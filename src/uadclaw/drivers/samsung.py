@@ -121,8 +121,19 @@ _BINARY_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{25,160}$")
 # than escaped; these two were the exception until a reviewer said so.
 _VERSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}(?:/[A-Za-z0-9._-]{0,64}){1,3}$")
 _MODEL_TYPE_RE = re.compile(r"^[0-9]{1,4}$")
-# An unsigned 32-bit CRC in decimal, which is what `BINARY_CRC` carries (949352961).
-_CRC32_RE = re.compile(r"^(?:[0-9]{1,10})$")
+# `BINARY_CRC` in decimal, SIGN INCLUDED. The one value ever measured here (949352961) is
+# below 2**31 and is therefore spelled identically whether the server encodes this field
+# unsigned or as a Java `int`, so it cannot tell the two apart — and a Java DTO spells every
+# CRC at or above 2**31 negative, which is half of all CRC32 values. Accepting the sign and
+# normalising is correct under both readings (the mask is a no-op on an unsigned value),
+# where refusing it would hard-fail half of all builds on a field that used to be ignored.
+_CRC32_RE = re.compile(r"^-?[0-9]{1,10}$")
+# The regex bounds the DIGIT COUNT and not the value, so the range is checked separately:
+# `9999999999` parses, can never equal a `zlib.crc32` result, and would otherwise surface
+# after the whole 11.5 GB transfer as a corrupt download pointing at a retry that fails
+# identically every time.
+_CRC32_MIN = -(2**31)
+_CRC32_MAX = 2**32 - 1
 # The lookahead is what refuses a `.` or `..` COMPONENT: the charset alone admits both, and a
 # `/neofus/../911/` reaching a server that normalises its own paths asks for a resource this
 # pipeline never named. Same call `unpack.safe_archive_path` makes about an image listing.
@@ -322,7 +333,8 @@ class SamsungBinary:
     # `SM-S911U`/`XAA` download hashes to 949352961, which is exactly what the inform response
     # declared, while the plaintext's CRC (3102581189) is not. So Samsung does publish an
     # integrity value for the download, and it is the only one either half of this protocol
-    # offers. None when the response omits it rather than assumed.
+    # offers. Always unsigned here — the parser normalises the Java-signed spelling — and None
+    # when the response omits the field rather than assumed.
     crc32: int | None = None
 
     @property
@@ -422,13 +434,20 @@ def parse_binary_inform(text: str, *, model: str, region: str) -> SamsungBinary:
             "a positive multiple of the 16-byte AES block every `.enc4` is padded to"
         )
     declared_crc = fields.get("BINARY_CRC", "")
-    if declared_crc and not _CRC32_RE.match(declared_crc):
+    if declared_crc and (
+        not _CRC32_RE.match(declared_crc) or not _CRC32_MIN <= int(declared_crc) <= _CRC32_MAX
+    ):
         raise SamsungProtocolError(
-            f"parse_binary_inform: BINARY_CRC is {declared_crc!r} for {model}/{region}, not the "
-            "unsigned 32-bit CRC of the encrypted body that this field has always carried"
+            f"parse_binary_inform: BINARY_CRC is {declared_crc!r} for {model}/{region}, which is "
+            "not a 32-bit CRC in either the unsigned or the Java-signed spelling. Refused here "
+            "rather than one 11.5 GB transfer later, where it would read as a corrupt download."
         )
     return SamsungBinary(
-        crc32=int(declared_crc) if declared_crc else None,
+        # Masked, not just parsed: a Java `int` DTO spells a CRC at or above 2**31 negative,
+        # and `-1192386107 & 0xFFFFFFFF` is the 3102581189 `zlib.crc32` will produce. On an
+        # already-unsigned value the mask changes nothing, so this is right under both
+        # readings of a field only one measurement has ever pinned.
+        crc32=int(declared_crc) & 0xFFFFFFFF if declared_crc else None,
         version=version,
         filename=filename,
         model_path=model_path,

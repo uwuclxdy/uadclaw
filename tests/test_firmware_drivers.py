@@ -1365,6 +1365,47 @@ async def test_samsung_fetch_refuses_a_body_whose_crc_fus_did_not_declare(tmp_pa
     assert list(tmp_path.iterdir()) == []
 
 
+def test_samsung_reads_the_java_signed_spelling_of_a_crc_as_the_same_value():
+    """The one CRC ever measured on this field (949352961) is below 2**31, so it is spelled
+    identically unsigned and as a Java `int` and cannot tell the two encodings apart. Half of
+    all CRC32 values are at or above 2**31, and a Java DTO spells those negative — so refusing
+    the sign would hard-fail half of all builds. 3102581189 is a real CRC32 from this work
+    (the plaintext's), which is why it is the pair used here.
+    """
+    unsigned, signed = "3102581189", "-1192386107"
+    assert int(signed) & 0xFFFFFFFF == int(unsigned)
+
+    def crc_of(spelling: str) -> int | None:
+        document = samsung_fixture("binary_inform").replace(
+            "<BINARY_CRC><Data>949352961</Data>", f"<BINARY_CRC><Data>{spelling}</Data>"
+        )
+        return parse_binary_inform(document, model=SAMSUNG_MODEL, region=SAMSUNG_REGION).crc32
+
+    assert crc_of(signed) == crc_of(unsigned) == 3102581189
+    # The measured value is unchanged by the normalisation that makes the above work.
+    assert (
+        parse_binary_inform(
+            samsung_fixture("binary_inform"), model=SAMSUNG_MODEL, region=SAMSUNG_REGION
+        ).crc32
+        == 949352961
+    )
+
+
+@pytest.mark.parametrize("declared", ["9999999999", "-9999999999", "4294967296", "0x1f", "1e9"])
+def test_samsung_refuses_a_crc_that_is_not_a_32_bit_value(declared):
+    """The digit count is not the value: `9999999999` parses, can never equal a `zlib.crc32`
+    result, and would otherwise surface one 11.5 GB transfer later as a corrupt download
+    pointing at a retry that fails identically every time."""
+    document = samsung_fixture("binary_inform").replace(
+        "<BINARY_CRC><Data>949352961</Data>", f"<BINARY_CRC><Data>{declared}</Data>"
+    )
+
+    with pytest.raises(SamsungProtocolError) as excinfo:
+        parse_binary_inform(document, model=SAMSUNG_MODEL, region=SAMSUNG_REGION)
+
+    assert "32-bit CRC" in str(excinfo.value)
+
+
 async def test_samsung_archive_is_unverified_when_the_response_carries_no_crc(tmp_path):
     """The claim has to track what was actually checked: no CRC and no pinned digest means
     nothing outside this pipeline said what these bytes should be."""
