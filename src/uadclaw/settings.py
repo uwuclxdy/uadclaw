@@ -101,6 +101,15 @@ class Settings(BaseSettings):
     # device with a handful of packages.
     max_apk_parse_failure_ratio: float = 0.05
 
+    # Corpus graph / filter / rule ladder (task 5). The upstream `uad_lists.json` the filter
+    # reads to know what is already carried. Explicit configuration and a local file on
+    # purpose: it decides what the pipeline proposes, so a stage that fetched its own filter
+    # input would change what reaches triage between two runs of the same corpus with nothing
+    # recorded about why. The worker image mounts ./data read-only at /data; the loader
+    # records the copy's sha256 and mtime on every row it decides, and refuses a missing or
+    # empty file rather than treating the whole corpus as new.
+    upstream_list_path: Path = Path("/data/uad_lists.json")
+
     @field_validator("postgres_password", "auth_password", "session_secret")
     @classmethod
     def _reject_blank(cls, value: str) -> str:
