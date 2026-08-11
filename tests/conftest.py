@@ -51,7 +51,7 @@ PG_TEST_DB = f"uadclaw_test_{_xdist_worker_id()}"
 
 _DB_TABLES_TRUNCATE_ORDER = (
     "scratch_lease_events, job_stage_runs, device_scans, jobs, scratch_lease, "
-    "package_observations, package_facts"
+    "package_observations, package_facts, package_analysis"
 )
 
 

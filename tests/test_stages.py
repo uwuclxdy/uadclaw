@@ -26,7 +26,7 @@ from uadclaw.firmware import (
     TermsPosture,
     TermsRisk,
 )
-from uadclaw.models import Job, JobKind, JobState
+from uadclaw.models import PIPELINE_STAGES, Job, JobKind, JobState
 from uadclaw.settings import Settings, get_settings
 from uadclaw.stages import (
     PipelineState,
@@ -172,7 +172,17 @@ def test_state_round_trips(tmp_path):
 def test_the_registry_wires_the_stages_the_worker_runs():
     handlers = pipeline_stage_handlers()
 
-    assert set(handlers) == {"acquire", "unpack", "extract_facts"}
+    assert set(handlers) == {
+        "acquire",
+        "unpack",
+        "extract_facts",
+        "corpus_graph",
+        "filter",
+        "rule_ladder",
+    }
+    # Every registered name is a real pipeline stage: a typo here is a handler the worker
+    # silently never calls, because it no-ops any stage it has no entry for.
+    assert set(handlers) <= set(PIPELINE_STAGES)
 
 
 # --- the stages themselves ----------------------------------------------------------------

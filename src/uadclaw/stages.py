@@ -23,8 +23,19 @@ from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
+from uadclaw.corpus import EDGE_LIBRARY, EDGE_OVERLAY, build_graph
+from uadclaw.corpusstore import (
+    load_config_inputs,
+    record_config_inputs,
+    require_corpus,
+    store_filter_verdicts,
+    store_floors,
+    store_graph,
+)
+from uadclaw.etcconfig import parse_config_inputs
 from uadclaw.facts import ApkFacts, ApkParseError, parse_apk
 from uadclaw.factstore import record_device_scan, store_device_facts
+from uadclaw.filters import FilterVerdict, queue_verdicts, survival
 from uadclaw.firmware import (
     FirmwareInputError,
     FirmwareJobParams,
@@ -32,9 +43,11 @@ from uadclaw.firmware import (
     get_driver,
     select_ref,
 )
+from uadclaw.ladder import compute_floors
 from uadclaw.models import Job
 from uadclaw.settings import get_settings
 from uadclaw.unpack import canonical_device_path, extract_artifacts, unpack_to_partitions
+from uadclaw.upstream import load_upstream_list
 from uadclaw.worker import StageContext, StageHandler
 
 logger = logging.getLogger(__name__)
@@ -375,6 +388,113 @@ def _delete_apks(paths: list[Path]) -> None:
         path.unlink(missing_ok=True)
 
 
+async def corpus_graph_stage(ctx: StageContext) -> None:
+    """Derive the two high-confidence dependency edge classes over the whole corpus.
+
+    Corpus-wide rather than per device, and re-run by every job: an edge is a statement about
+    what else exists, so a second device arriving can create edges for packages a previous job
+    already analysed.
+
+    This is also where the `/etc` config XMLs are read and parked on the device's scan row —
+    the first stage of the deterministic core that needs them, and the last one that can still
+    see the job's scratch directory. The graph needs the platform-declared shared libraries to
+    tell "no package provides this library" from "the platform does", and the rule ladder
+    needs the privapp allowlists and static roles two stages later, by which point this job's
+    scratch is the only copy in existence.
+    """
+    scratch = _require_scratch(ctx)
+    artifacts_dir = scratch / ARTIFACTS_DIRNAME
+    if not artifacts_dir.is_dir():
+        raise StageInputError(
+            f"corpus_graph_stage: job {ctx.job_id} has no {artifacts_dir} directory, so the "
+            "config XMLs the deterministic core reads are gone. A reclaimed job resumes under "
+            "a NEW attempt with an empty scratch directory — requeue it from the acquire stage."
+        )
+    device_config = await asyncio.to_thread(parse_config_inputs, artifacts_dir)
+    if device_config.files_failed:
+        logger.warning(
+            "job %s: %d config XML(s) did not parse and contribute no rule input: %s",
+            ctx.job_id,
+            len(device_config.files_failed),
+            ", ".join(device_config.files_failed[:10]),
+        )
+
+    at = datetime.now(UTC)
+    async with ctx.session_factory() as session, session.begin():
+        await record_config_inputs(session, job_id=ctx.job_id, config=device_config)
+        corpus = await require_corpus(session)
+        config = await load_config_inputs(session)
+        graph = build_graph(corpus, platform_libraries=config.platform_libraries)
+        written = await store_graph(session, corpus, graph, at=at)
+    counts = graph.counts_by_kind()
+    logger.info(
+        "job %s corpus graph: %d package(s), %d edge(s) (%d overlay, %d library) from %d "
+        "config file(s)",
+        ctx.job_id,
+        written,
+        len(graph.edges),
+        counts.get(EDGE_OVERLAY, 0),
+        counts.get(EDGE_LIBRARY, 0),
+        device_config.files_read,
+    )
+
+
+async def filter_stage(ctx: StageContext) -> None:
+    """Decide which packages reach the additions queue.
+
+    The upstream list is loaded first and on its own: if it is missing or empty the stage
+    fails here, before anything is written, rather than marking all 393 packages as new.
+    """
+    settings = get_settings()
+    upstream = await asyncio.to_thread(load_upstream_list, settings.upstream_list_path)
+    at = datetime.now(UTC)
+    async with ctx.session_factory() as session, session.begin():
+        corpus = await require_corpus(session)
+        verdicts = queue_verdicts(corpus, upstream=upstream)
+        await store_filter_verdicts(session, verdicts, upstream=upstream, at=at)
+    counts = survival(verdicts)
+    logger.info(
+        "job %s filter: %d of %d package(s) queued (%d already upstream, %d auto-generated "
+        "RRO, %d emulator-only) against %s sha256 %s",
+        ctx.job_id,
+        counts[str(FilterVerdict.QUEUED)],
+        counts["total"],
+        counts[str(FilterVerdict.ALREADY_UPSTREAM)],
+        counts[str(FilterVerdict.AUTO_GENERATED_RRO)],
+        counts[str(FilterVerdict.EMULATOR_ONLY)],
+        upstream.path,
+        upstream.sha256[:12],
+    )
+
+
+async def rule_ladder_stage(ctx: StageContext) -> None:
+    """Compute every package's removal floor.
+
+    Database to database: the `/etc` inputs it needs were parked on the device scan rows by
+    `corpus_graph`, and the union across every device is what makes a floor a property of the
+    package rather than of whichever device is being scanned right now.
+    """
+    at = datetime.now(UTC)
+    async with ctx.session_factory() as session, session.begin():
+        corpus = await require_corpus(session)
+        config = await load_config_inputs(session)
+        floors = compute_floors(corpus, config=config)
+        written = await store_floors(session, floors, at=at)
+
+    by_floor: dict[str, int] = {}
+    for floor in floors.values():
+        by_floor[str(floor.floor)] = by_floor.get(str(floor.floor), 0) + 1
+    logger.info(
+        "job %s rule ladder: %d floor(s) over %d privapp allowlist entries and %d static "
+        "role(s); %s",
+        ctx.job_id,
+        written,
+        len(config.privapp_permissions),
+        len(config.static_role_holders),
+        ", ".join(f"{tier} {count}" for tier, count in sorted(by_floor.items())),
+    )
+
+
 def pipeline_stage_handlers() -> dict[str, StageHandler]:
     """The stages that have real implementations. The worker no-ops any stage missing from
     this mapping, so tasks 5+ each add one entry here and nothing else."""
@@ -382,4 +502,7 @@ def pipeline_stage_handlers() -> dict[str, StageHandler]:
         "acquire": acquire_stage,
         "unpack": unpack_stage,
         "extract_facts": extract_facts_stage,
+        "corpus_graph": corpus_graph_stage,
+        "filter": filter_stage,
+        "rule_ladder": rule_ladder_stage,
     }
