@@ -30,7 +30,14 @@ from uadclaw.bundle import (
     canonical_json,
     nearest_entries,
 )
-from uadclaw.corpus import CorpusPackage, build_graph
+from uadclaw.corpus import (
+    EDGE_LIBRARY,
+    EDGE_OVERLAY,
+    CorpusGraph,
+    CorpusPackage,
+    Edge,
+    build_graph,
+)
 from uadclaw.ladder import Removal, compute_floors
 from uadclaw.upstream import UpstreamEntry, UpstreamList
 
@@ -200,6 +207,34 @@ def test_every_emitted_list_in_the_payload_is_sorted():
     keyed = [(e["kind"], e["dependent"], e["provider"], e["detail"]) for e in edges]
     assert keyed == sorted(keyed)
     assert len(edges) >= 2, "too few edges to detect an unsorted emit"
+
+
+def test_the_edge_sort_holds_for_a_graph_that_did_not_come_from_build_graph():
+    """The edge sort is only observable on a graph the graph BUILDER did not order.
+
+    `test_every_emitted_list_in_the_payload_is_sorted` above goes through `build_graph`,
+    whose last line already sorts by this exact four-tuple, so it cannot tell the sort in
+    `_graph_json` from its absence — dropping that sort leaves it green. But `build_bundle`
+    takes any `CorpusGraph`, and the type promises nothing about edge order, so "the input is
+    already sorted" is a convention rather than a guarantee and the sort is part of this
+    function's own contract. Hand-building the graph is the only way to state that.
+    """
+    item = CorpusPackage(package="com.example.multi")
+    floors = compute_floors([item])
+    unsorted_edges = (
+        Edge(kind=EDGE_OVERLAY, dependent="com.example.multi", provider="com.zzz", detail="z"),
+        Edge(kind=EDGE_LIBRARY, dependent="com.example.multi", provider="com.aaa", detail="a"),
+    )
+    graph = CorpusGraph(edges=unsorted_edges, evidence={})
+
+    bundle = build_bundle(item, floor=floors["com.example.multi"], graph=graph)
+
+    emitted = [
+        (edge["kind"], edge["dependent"], edge["provider"], edge["detail"])
+        for edge in bundle.payload["graph"]["edges"]
+    ]
+    assert emitted == sorted(emitted)
+    assert emitted[0][0] == EDGE_LIBRARY, "input order was overlay-first; output must not be"
 
 
 def test_the_hash_is_identical_across_interpreter_processes():

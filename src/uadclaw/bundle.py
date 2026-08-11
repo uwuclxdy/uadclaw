@@ -199,6 +199,12 @@ def _graph_json(graph: CorpusGraph | None, package: str) -> dict[str, Any]:
     return {
         "dependencies": sorted(graph.dependencies_of(package)),
         "needed_by": sorted(graph.needed_by(package)),
+        # Load-bearing, and not merely a second application of `build_graph`'s own sort.
+        # `build_graph` is the only producer TODAY, but `build_bundle` accepts any
+        # `CorpusGraph`, and the type carries no promise that its edges are ordered — a
+        # convention, not a guarantee, since nothing rejects the counterexample. So this
+        # function's contract is "sorted output for any graph handed to it", which is what
+        # `test_the_edge_sort_holds_for_a_graph_that_did_not_come_from_build_graph` pins.
         "edges": sorted(
             (edge.as_json() for edge in graph.edges_for(package)),
             key=lambda edge: (edge["kind"], edge["dependent"], edge["provider"], edge["detail"]),
