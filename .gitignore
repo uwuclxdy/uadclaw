@@ -6,6 +6,11 @@ secrets/
 # is what stops the server from publishing a port it has no use for.
 docker-compose.override.yml
 
+# Operator-supplied pipeline inputs, bind-mounted read-only at /data. `uad_lists.json` is a
+# 1.6 MB copy of somebody else's file that changes daily; the pipeline records the sha256 and
+# mtime of whichever copy it read, so the copy itself is data rather than source.
+data/
+
 # hatchling / uv build output.
 dist/
 build/

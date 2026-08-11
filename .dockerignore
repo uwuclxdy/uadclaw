@@ -33,6 +33,10 @@ build
 # Tests + dev-only docs aren't needed at runtime
 tests
 
+# Operator-supplied pipeline inputs. The worker bind-mounts these at /data at run time, so
+# baking a copy into the image would only give it a stale one to read by accident.
+data
+
 # OS noise
 .DS_Store
 Thumbs.db

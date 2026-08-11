@@ -122,3 +122,13 @@ services:
         max-file: "3"
     volumes:
       - worker-scratch:/scratch
+      # The upstream `uad_lists.json` the filter stage reads, operator-supplied and read-only.
+      # It decides which packages are already carried upstream, so it is deliberately a file
+      # on disk rather than a fetch: a stage that downloaded its own filter input would change
+      # what reaches triage between two runs of the same corpus with nothing recorded about
+      # why. The loader records the copy's sha256 and mtime on every row it decides, and
+      # refuses a missing or empty file. Refresh it deliberately:
+      #   mkdir -p data && curl -fsSL -o data/uad_lists.json https://raw.githubusercontent.com/\
+      #     Universal-Debloater-Alliance/universal-android-debloater-next-generation/main/\
+      #     resources/assets/uad_lists.json
+      - ./data:/data:ro
