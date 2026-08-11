@@ -1,7 +1,9 @@
-"""Job, scratch-lease and stage-run tables.
+"""Job, scratch-lease, stage-run and extracted-fact tables.
 
-The job substrate every later pipeline stage runs on top of. Kept deliberately thin: no
-firmware-specific columns here, those land with tasks 3+.
+The job substrate every later pipeline stage runs on top of, plus the facts task 4 extracts
+and the survivors of retention: firmware and APKs are deleted after a successful analysis, so
+`package_observations` and `package_facts` are the only thing left of a device once its job
+finishes.
 """
 
 import enum
@@ -9,7 +11,18 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -163,4 +176,169 @@ class ScratchLeaseEvent(Base):
     __table_args__ = (
         Index("ix_scratch_lease_events_job_id", "job_id"),
         Index("ix_scratch_lease_events_at", "at"),
+    )
+
+
+class DeviceScan(Base):
+    """One fact-extraction pass over one device's APKs, append-only.
+
+    Exists because retention deletes the APKs: without this row, "312 APKs went in, 312 came
+    out" is unprovable after the job finishes, and a run that quietly parsed 40 of 312 looks
+    exactly like a device with 40 packages. `parse_failed` and `failures` are the only home
+    for an APK that produced no observation, since a failure has no package name to key on.
+    """
+
+    __tablename__ = "device_scans"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    # `<driver>:<device>`, deliberately without the build: two builds of one phone are one
+    # device, and `package_facts.device_count` is a count of phones, not of firmware images.
+    device_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    build: Mapped[str] = mapped_column(String(255), nullable=False)
+    scanned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    apk_total: Mapped[int] = mapped_column(nullable=False, default=0)
+    parsed_ok: Mapped[int] = mapped_column(nullable=False, default=0)
+    parse_failed: Mapped[int] = mapped_column(nullable=False, default=0)
+    # [{"device_path": ..., "error": ...}] for every APK that produced no observation.
+    failures: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+
+    __table_args__ = (Index("ix_device_scans_device_key", "device_key"),)
+
+
+class PackageObservation(Base):
+    """One APK on one device+build, as its manifest declared it.
+
+    One row per APK rather than per package: a device that ships the same package name twice
+    (two partitions, two certificates) then produces two rows that flow through the ordinary
+    cross-device conflict check instead of needing a special case, and nothing is collapsed
+    before it has been compared.
+
+    The unique key is `(device_key, build, device_path)`, which is what makes re-parsing a
+    build an upsert onto the same rows — the reproducibility claim in task 4's verify line.
+    """
+
+    __tablename__ = "package_observations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    device_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    build: Mapped[str] = mapped_column(String(255), nullable=False)
+    package: Mapped[str] = mapped_column(String(255), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    label_unresolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    version_code: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    partition: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_path: Mapped[str] = mapped_column(Text, nullable=False)
+    priv_app: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    cert_issuer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cert_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    core_app: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    shared_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    persistent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    has_code: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    overlay_target: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    overlay_static: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    overlay_priority: Mapped[int | None] = mapped_column(nullable=True)
+    is_input_method: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_device_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_accessibility_service: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_carrier_service: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # List-valued signals. JSONB rather than side tables: nothing queries an individual
+    # protected broadcast, they travel together into the evidence bundle, and a side table per
+    # signal would be six joins to rebuild one package's card.
+    libraries: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    static_libraries: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    uses_libraries_required: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    uses_libraries_optional: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    protected_broadcasts: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    provider_authorities: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    intent_filters: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "device_key", "build", "device_path", name="uq_package_observations_device_path"
+        ),
+        Index("ix_package_observations_package", "package"),
+    )
+
+
+class PackageFact(Base):
+    """One row per package name, merged across every device that shipped it.
+
+    `device_count` is a stored column, not a join computed at read time: it is the primary
+    triage ranking signal (design §3, task 9's queue order), and a ranking that is recomputed
+    by whoever happens to read it is a ranking that will eventually be computed differently in
+    two places.
+
+    Merge rules, chosen so the merge can never lower a rule-ladder floor:
+
+    - danger booleans (`core_app`, `persistent`, `priv_app`, `has_code`, the four service
+      classes) are sticky-true — one device declaring `coreApp` is enough;
+    - list-valued signals are the union across devices, deduplicated and sorted;
+    - `version_code` keeps the highest seen;
+    - identity scalars (`cert_issuer`, `cert_subject`, `shared_user_id`, `overlay_target`,
+      `label`) take the value from the lowest `(device_key, build, device_path)`, which is
+      deterministic and, unlike last-write, does not depend on scan order.
+
+    A disagreement on any field in `factstore.CONFLICT_FIELDS` sets `has_conflict` and lands
+    in `conflicts` with every value and the devices that carried it. The row survives, because
+    dropping it would hide the disagreement instead of surfacing it.
+
+    `has_conflict` is a review signal, not a verdict, and the difference is measured rather
+    than assumed: across the Pixel 6 and Android 16 emulator corpora, 134 of the 147 shared
+    packages disagree on the signing certificate, all of it APK signature v3 key rotation
+    (`com_google_android_gms-rotation-2020`) or the AOSP test key facing Google's production
+    key. So triage shows a conflict; it must not filter on one.
+    """
+
+    __tablename__ = "package_facts"
+
+    package: Mapped[str] = mapped_column(String(255), primary_key=True)
+    device_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    devices: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    label_unresolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    version_code: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    partitions: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    priv_app: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    cert_issuer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cert_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    core_app: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    shared_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    persistent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    has_code: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    overlay_target: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    overlay_static: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_input_method: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_device_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_accessibility_service: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_carrier_service: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    libraries: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    static_libraries: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    uses_libraries_required: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    uses_libraries_optional: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    protected_broadcasts: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    provider_authorities: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    intent_filters: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+
+    has_conflict: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    conflicts: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+
+    __table_args__ = (
+        Index("ix_package_facts_device_count", "device_count"),
+        Index("ix_package_facts_has_conflict", "has_conflict"),
     )

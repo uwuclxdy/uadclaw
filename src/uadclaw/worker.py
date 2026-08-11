@@ -2,10 +2,10 @@
 kinds that need it), and enforces retention around the outcome.
 
 `stage_handlers` is the injection point: production runs `uadclaw.stages`, which implements
-the stages that exist (acquire and unpack today) and leaves the rest no-ops, so a stage
-landing later is one entry there and no change here. Tests inject synthetic handlers (sleep,
-write scratch files, raise) to exercise concurrency, lease contention, crash reclaim and
-retention without needing a real firmware pipeline.
+the stages that exist (acquire, unpack and extract_facts today) and leaves the rest no-ops, so
+a stage landing later is one entry there and no change here. Tests inject synthetic handlers
+(sleep, write scratch files, raise) to exercise concurrency, lease contention, crash reclaim
+and retention without needing a real firmware pipeline.
 
 Every job write is fenced on (job_id, worker_id, attempt) via `uadclaw.jobs`: a worker that
 gets reclaimed — falsely, mid-lease-wait, or genuinely after a crash — stops touching the

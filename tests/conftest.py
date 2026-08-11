@@ -49,7 +49,10 @@ PG_PASSWORD = os.environ.get(
 PG_ADMIN_DB = os.environ.get("UADCLAW_TEST_PG_ADMIN_DB", "uadclaw")
 PG_TEST_DB = f"uadclaw_test_{_xdist_worker_id()}"
 
-_DB_TABLES_TRUNCATE_ORDER = "scratch_lease_events, job_stage_runs, jobs, scratch_lease"
+_DB_TABLES_TRUNCATE_ORDER = (
+    "scratch_lease_events, job_stage_runs, device_scans, jobs, scratch_lease, "
+    "package_observations, package_facts"
+)
 
 
 def _pg_url(db_name: str) -> str:

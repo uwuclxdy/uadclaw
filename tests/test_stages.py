@@ -172,7 +172,7 @@ def test_state_round_trips(tmp_path):
 def test_the_registry_wires_the_stages_the_worker_runs():
     handlers = pipeline_stage_handlers()
 
-    assert set(handlers) == {"acquire", "unpack"}
+    assert set(handlers) == {"acquire", "unpack", "extract_facts"}
 
 
 # --- the stages themselves ----------------------------------------------------------------

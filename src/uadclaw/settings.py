@@ -93,6 +93,14 @@ class Settings(BaseSettings):
     # for the largest OEM images without leaving the ceiling meaningless.
     max_firmware_archive_bytes: int = 16 * 1024**3
 
+    # Fact extraction (task 4). Fraction of one device's APKs that may fail to parse before
+    # the whole device is refused. The measured baseline is 0 of 312 on real Pixel firmware,
+    # so any non-zero rate is already worth looking at; this ceiling exists so that one
+    # truncated or parser-hostile APK does not cost the other 311, while a systematically
+    # broken extraction (wrong bytes, wrong tool) still fails loudly instead of recording a
+    # device with a handful of packages.
+    max_apk_parse_failure_ratio: float = 0.05
+
     @field_validator("postgres_password", "auth_password", "session_secret")
     @classmethod
     def _reject_blank(cls, value: str) -> str:
@@ -124,6 +132,15 @@ class Settings(BaseSettings):
     def _reject_non_positive_duration(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("must be > 0")
+        return value
+
+    @field_validator("max_apk_parse_failure_ratio")
+    @classmethod
+    def _reject_out_of_range_ratio(cls, value: float) -> float:
+        # 1.0 would let a device record zero packages and still succeed, which is the exact
+        # silent failure the ceiling exists to catch.
+        if not 0.0 <= value < 1.0:
+            raise ValueError("max_apk_parse_failure_ratio must be in [0.0, 1.0)")
         return value
 
     @field_validator("failure_retention_bytes")
