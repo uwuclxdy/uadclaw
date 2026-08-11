@@ -1,0 +1,114 @@
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  auth_password:
+    file: ./secrets/auth_password
+  session_secret:
+    file: ./secrets/session_secret
+
+volumes:
+  postgres-data:
+  # Firmware-unpack scratch. Local and prod use the SAME named volume, sized only by the
+  # host disk backing docker's volume driver — the local box just has less of it. No
+  # separate local-only compose path.
+  worker-scratch:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: uadclaw
+      POSTGRES_DB: uadclaw
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # No published port, deliberately: internal-network-only, LAN exposure goes through
+    # web. Run migrations from inside the network instead of the host:
+    # `docker compose exec web alembic upgrade head`. Do not "fix" host-side alembic by
+    # publishing 5432 — that widens this service's exposure to solve a workflow problem.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U uadclaw -d uadclaw"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    ports:
+      # WEB_BIND_ADDR lets the server pin this to its LAN interface (e.g. 192.168.1.10)
+      # without editing the file; unset, it keeps today's behaviour (all interfaces).
+      - "${WEB_BIND_ADDR:-0.0.0.0}:8000:8000"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: uadclaw
+      POSTGRES_DB: uadclaw
+      COOKIE_SECURE: "false"
+    secrets:
+      - postgres_password
+      - auth_password
+      - session_secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # --- hardening baseline (cloudify python/hardening.md) ---
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532"
+    init: true
+    mem_limit: 512m
+    pids_limit: 200
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 2048
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run:size=8m,mode=755
+
+  worker:
+    build: .
+    command: ["python", "-m", "uadclaw.worker"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: uadclaw
+      POSTGRES_DB: uadclaw
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The web image's baked-in HEALTHCHECK probes localhost:8000/health, which the worker
+    # never serves; disable it here rather than let it report permanently unhealthy.
+    healthcheck:
+      disable: true
+    # --- hardening baseline, MINUS read-only rootfs ---
+    # Deliberately NOT read_only: this service unpacks multi-GB firmware images and shells
+    # out to extraction tools (task 3). tmpfs tops out around host RAM/2 and won't hold an
+    # 8 GB image; it needs a real writable named volume instead. Do not "harden" this to
+    # read_only without also solving where multi-GB scratch writes go.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532"
+    init: true
+    pids_limit: 200
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 2048
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - worker-scratch:/scratch

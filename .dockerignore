@@ -1,0 +1,38 @@
+# Exclude from the build context so `COPY . .` doesn't ship the repo.
+
+# VCS / IDE
+.git
+.gitignore
+.idea
+.vscode
+
+# Local env, never bake into the image
+.env
+.env.*
+!.env.example
+
+# Real local credential material for compose file-secrets — never bake plaintext
+# credentials into an image layer (recoverable via `docker history` / `docker save` even
+# if a later layer deletes them).
+secrets/
+
+# Python tooling caches and the local venv (image rebuilds its own with uv)
+.venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Build / packaging artefacts
+dist
+build
+*.egg-info
+
+# Tests + dev-only docs aren't needed at runtime
+tests
+
+# OS noise
+.DS_Store
+Thumbs.db
