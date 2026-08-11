@@ -6,6 +6,9 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+# Import side effect: registers every mapped table onto Base.metadata before
+# target_metadata is read below. Without this, autogenerate diffs against an empty schema.
+from uadclaw import models  # noqa: F401
 from uadclaw.db import Base
 from uadclaw.settings import get_settings
 
@@ -22,9 +25,9 @@ if config.config_file_name is not None:
 # same source of truth as the app itself, so migrations always target the DB the app targets.
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
-# No models yet (task 2 adds the first one), but wired now: --autogenerate diffs against
-# Base.metadata, and if this stays None every future autogenerate silently emits an empty
-# migration instead of erroring, which reads as "no changes" and is easy to miss.
+# --autogenerate diffs against Base.metadata (populated by the `uadclaw.models` import
+# above); if this stays None every future autogenerate silently emits an empty migration
+# instead of erroring, which reads as "no changes" and is easy to miss.
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,
