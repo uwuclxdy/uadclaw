@@ -8,6 +8,24 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      # Job/lease tests need a real Postgres: SKIP LOCKED semantics, lease contention and
+      # crash reclaim cannot be proven against a mock. Password and port match conftest's
+      # local-dev defaults (see docker-compose.yml's loopback publish) so no extra env vars
+      # are needed here. tests/conftest.py fails loudly, not skip, when this is unreachable.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: uadclaw
+          POSTGRES_PASSWORD: uadclaw
+          POSTGRES_DB: uadclaw
+        ports:
+          - "55432:5432"
+        options: >-
+          --health-cmd "pg_isready -U uadclaw -d uadclaw"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v6
