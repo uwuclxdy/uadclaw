@@ -13,7 +13,12 @@ about the package changing.
 """
 
 import json
+import os
+import subprocess
+import sys
+import textwrap
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +35,7 @@ from uadclaw.ladder import Removal, compute_floors
 from uadclaw.upstream import UpstreamEntry, UpstreamList
 
 NOW = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def package(name: str, **overrides) -> CorpusPackage:
@@ -147,6 +153,96 @@ def test_the_payload_carries_no_timestamp_and_no_run_scoped_id():
         assert forbidden not in blob, f"{forbidden!r} leaked into the hashed payload"
 
 
+def test_every_emitted_list_in_the_payload_is_sorted():
+    """Reviewer finding 4. Three `sorted` calls in `_facts_json`/`_graph_json` were equivalent
+    mutants: replacing any of them with `list(...)` left the whole suite at 425 passed, while
+    `sorted({*libraries, *static_libraries})` in particular then varied the bundle hash ACROSS
+    PROCESSES, because set iteration order over strings depends on PYTHONHASHSEED. The
+    fixtures had one element where they needed three, and a one-element list is sorted."""
+    item = CorpusPackage(
+        package="com.example.multi",
+        partitions=("vendor", "product", "system"),
+        devices=("pixel:oriole", "google:emulator-a16"),
+        libraries=("com.zeta.lib", "com.alpha.lib", "com.mid.lib"),
+        static_libraries=("com.yankee.static", "com.bravo.static", "com.november.static"),
+        uses_libraries_required=("com.zulu.req", "com.alpha.req"),
+        uses_libraries_optional=("com.zulu.opt", "com.alpha.opt"),
+        provider_authorities=("zulu.authority", "alpha.authority"),
+        queries_packages=("com.zulu.q", "com.alpha.q"),
+    )
+    # Two providers so the package carries two library edges whose order is observable: one
+    # edge is sorted no matter what the code does.
+    corpus = [
+        item,
+        CorpusPackage(package="com.zeta.lib", libraries=("com.zulu.req",)),
+        CorpusPackage(package="com.alpha.lib", libraries=("com.alpha.req",)),
+    ]
+    bundle = build_bundles(corpus, floors=compute_floors(corpus), graph=build_graph(corpus))[
+        "com.example.multi"
+    ]
+
+    facts = bundle.payload["facts"]
+    for key in (
+        "partitions",
+        "declares_libraries",
+        "uses_libraries_required",
+        "uses_libraries_optional",
+        "provider_authorities",
+    ):
+        assert facts[key] == sorted(facts[key]), f"{key} is not sorted: {facts[key]}"
+        assert len(facts[key]) >= 2, f"{key} has too few elements to detect an unsorted emit"
+    assert facts["declares_libraries"] == sorted(facts["declares_libraries"])
+    assert len(facts["declares_libraries"]) == 6
+
+    provenance = bundle.payload["provenance"]
+    assert provenance["devices"] == sorted(provenance["devices"])
+    edges = bundle.payload["graph"]["edges"]
+    keyed = [(e["kind"], e["dependent"], e["provider"], e["detail"]) for e in edges]
+    assert keyed == sorted(keyed)
+    assert len(edges) >= 2, "too few edges to detect an unsorted emit"
+
+
+def test_the_hash_is_identical_across_interpreter_processes():
+    """The cross-process half of finding 4. A within-process test cannot see a set-iteration
+    leak at all: PYTHONHASHSEED is fixed for the life of an interpreter, so the same unsorted
+    code returns the same order every time inside one run and a different one in the next."""
+    script = textwrap.dedent(
+        """
+        import json, sys
+        sys.path.insert(0, "src")
+        from uadclaw.bundle import build_bundles
+        from uadclaw.corpus import CorpusPackage, build_graph
+        from uadclaw.ladder import compute_floors
+
+        item = CorpusPackage(
+            package="com.example.multi",
+            partitions=("vendor", "product", "system"),
+            libraries=("com.zeta.lib", "com.alpha.lib", "com.mid.lib"),
+            static_libraries=("com.yankee.s", "com.bravo.s", "com.november.s"),
+            uses_libraries_required=("com.zulu.req", "com.alpha.req"),
+            provider_authorities=("zulu.a", "alpha.a"),
+        )
+        corpus = [item, CorpusPackage(package="com.alpha.lib")]
+        bundles = build_bundles(corpus, floors=compute_floors(corpus), graph=build_graph(corpus))
+        print(bundles["com.example.multi"].sha256)
+        """
+    )
+    digests = set()
+    for seed in ("0", "1", "12345", "7", "99"):
+        env = {**os.environ, "PYTHONHASHSEED": seed, "PYTHONDONTWRITEBYTECODE": "1"}
+        result = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", script],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        digests.add(result.stdout.strip())
+    assert len(digests) == 1, f"bundle hash varies with PYTHONHASHSEED: {digests}"
+
+
 def test_a_changed_fact_moves_the_hash():
     """The negative control for every determinism test above: a hash that never changes is
     also stable."""
@@ -196,6 +292,37 @@ def test_an_entry_with_a_blank_description_is_not_an_anchor():
 def test_the_package_itself_is_never_its_own_anchor():
     anchors = nearest_entries("com.other.thing", UPSTREAM, limit=5)
     assert "com.other.thing" not in [entry.package for entry in anchors]
+
+
+def test_a_package_with_no_namespace_neighbour_gets_no_anchors():
+    """Reviewer finding 6. Sharing only `com` is not a neighbourhood: against the real list
+    it drew `com.LocalFota`, `com.Qunar` and two more, and the prompt then told the model to
+    match the register of four unrelated entries."""
+    assert nearest_entries("com.zzz.vendor.widget", UPSTREAM, limit=4) == ()
+    assert nearest_entries("xyz.novendor.app", UPSTREAM, limit=4) == ()
+
+
+def test_an_unrelated_new_upstream_entry_does_not_move_a_hash():
+    """The billing half of finding 6: anchors are hashed, so alphabetical anchors made ONE
+    new upstream entry invalidate every namespace-less package's bundle and re-bill it for
+    evidence that did not change."""
+    corpus = [CorpusPackage(package="com.zzz.vendor.widget")]
+    floors = compute_floors(corpus)
+    before = build_bundles(corpus, floors=floors, upstream=UPSTREAM)["com.zzz.vendor.widget"]
+
+    grown = dict(
+        {
+            name: (entry.list, entry.removal, entry.description)
+            for name, entry in UPSTREAM.entries.items()
+        },
+        **{"com.AAAA.sorts.first": ("Misc", "Recommended", "An unrelated new entry.")},
+    )
+    after = build_bundles(corpus, floors=floors, upstream=upstream_list(grown))[
+        "com.zzz.vendor.widget"
+    ]
+
+    assert after.payload["anchors"] == []
+    assert after.sha256 == before.sha256
 
 
 # --- content -------------------------------------------------------------------------------

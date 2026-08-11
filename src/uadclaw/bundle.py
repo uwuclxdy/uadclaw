@@ -46,6 +46,15 @@ BUNDLE_SCHEMA_VERSION = 1
 # length and register.
 DEFAULT_ANCHOR_COUNT = 4
 
+# How many leading dotted segments an entry must share before it is an anchor at all. Two,
+# because one buys nothing: measured against the real list, `com.zzz.vendor.widget` with no
+# minimum draws `com.LocalFota`, `com.LogiaGroup.LogiaDeck`, `com.Qunar`, `com.Rogers…` —
+# alphabetical noise that shares only `com`, presented to the model as entries to match the
+# register of. It also churns the hash: anchors are hashed, so ONE new upstream entry sorting
+# ahead of those four moves `bundle_sha256` for every namespace-less package, and the next
+# run re-asks and re-bills all of them for evidence that did not change.
+MIN_ANCHOR_SHARED_SEGMENTS = 2
+
 
 @dataclass(frozen=True, slots=True)
 class PackageIdentity:
@@ -123,12 +132,18 @@ def nearest_entries(
 
     An entry for `package` itself is excluded: a package already carried upstream is being
     re-proposed, and handing the model the answer it is being asked for is not an anchor.
+
+    A package with no namespace neighbour gets NO anchors rather than the alphabetically
+    nearest strangers — see `MIN_ANCHOR_SHARED_SEGMENTS`.
     """
     scored = sorted(
         (
-            (-_shared_prefix_length(package, entry.package), entry.package)
+            (-shared, entry.package)
             for entry in upstream.entries.values()
-            if entry.package != package and entry.description.strip()
+            if entry.package != package
+            and entry.description.strip()
+            and (shared := _shared_prefix_length(package, entry.package))
+            >= MIN_ANCHOR_SHARED_SEGMENTS
         ),
     )
     return tuple(upstream.entries[name] for _, name in scored[:limit])
