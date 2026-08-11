@@ -259,6 +259,21 @@ def test_a_field_that_cannot_be_unknown_is_rejected():
     assert "removal" in error.reason
 
 
+def test_list_cannot_be_declared_unknown_because_misc_already_says_that():
+    """Reviewer finding 7. `unknown_fields: ["list"]` used to validate ALONGSIDE a confident
+    `list`, storing `Oem` on a row that also claimed the category was unknown. `Misc` is the
+    upstream catch-all and the deterministic rule returns undecided so the model can pick it,
+    so a second spelling of "I don't know" for that field buys nothing."""
+    error = rejection(unknown_fields=["list"])
+    assert error.field == "unknown_fields"
+    assert "list" in error.reason
+
+
+def test_the_prompt_does_not_offer_list_as_an_unknowable_field():
+    assert '["description"]' in SYSTEM_PROMPT
+    assert '["description", "list"]' not in SYSTEM_PROMPT
+
+
 # --- shape ------------------------------------------------------------------------------------
 
 

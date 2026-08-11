@@ -96,9 +96,13 @@ class Confidence(enum.StrEnum):
     HIGH = "high"
 
 
-# The fields a proposal may declare unknown. `removal` is absent: it always has a value,
-# because the floor is one.
-UNKNOWABLE_FIELDS: frozenset[str] = frozenset({"description", "list"})
+# The fields a proposal may declare unknown. `removal` is absent because it always has a
+# value: the floor is one. `list` is absent because the upstream schema already carries the
+# answer — `Misc` is the catch-all, 433 live entries use it, and the deterministic rule
+# returns undecided precisely so the model can pick. A second spelling of "I don't know" for
+# one field is a second thing to keep consistent, and it was accepted alongside a confident
+# `list` for exactly as long as it existed.
+UNKNOWABLE_FIELDS: frozenset[str] = frozenset({"description"})
 
 # Keys whose mere presence in a response is a rejection. These come from the corpus graph or
 # from a human and a wrong edge silently changes a removal rating.
@@ -193,20 +197,25 @@ class Classification:
 # Design §7: `list` is deterministic from cert issuer plus partition plus prefix, with the
 # model only breaking ties in the catch-all category. Measured against the live 5372-entry
 # list on 2026-08-11, only ONE of those rules is precise enough to be allowed to overrule a
-# model, and saying which is the point of this block:
+# model, and saying which is the point of this block.
 #
-#   rule                                    n      agrees with upstream
-#   OEM vendor token in the package name    3128   98.3%
-#   chipset vendor prefix -> Misc            331   55.6%
-#   `com.android.` prefix -> Aosp            538   39.2%
-#   `com.google.` prefix -> Google           367   47.7%
+# Every row below is measured with the predicate THIS module ships, over the entries the OEM
+# rule has not already claimed (it runs first, so that is the population each later rule
+# actually sees). Stating the population matters: over ALL entries instead, the AOSP row
+# reads n=620 / 35.8%, a different number for a rule that never gets those entries.
 #
-# The bottom three are not close. `com.android.*` is 337 Oem against 211 Aosp upstream
-# because every OEM ships packages in that namespace, and `com.google.*` splits between
-# Google's own apps and Google's builds of AOSP mainline components (`documentsui`,
-# `providers.media.module`, `networkstack.tethering`) that upstream calls Aosp. A prefix
-# cannot tell those apart; the signing organization can, which is why the issuer is the
-# second decider and the only one that can decide `Aosp`.
+#   rule                                             n      agrees with upstream
+#   OEM vendor token in the package name            3147   98.7%
+#   chipset vendor segment -> Misc                   236   76.7%
+#   AOSP namespace (`com.android.`/`android.`)       576   38.4%
+#   `com.google.` prefix -> Google                   367   47.7%
+#
+# The bottom three are not close. The AOSP namespace is mostly Oem upstream because every
+# OEM ships packages in it, and `com.google.*` splits between Google's own apps and Google's
+# builds of AOSP mainline components (`documentsui`, `providers.media.module`,
+# `networkstack.tethering`) that upstream calls Aosp. A prefix cannot tell those apart; the
+# signing organization can, which is why the issuer is the second decider and the only one
+# that can decide `Aosp`.
 #
 # Everything else is UNDECIDED, and undecided means the model's answer stands. `Carrier` in
 # particular is never derived: which of Verizon, Orange or Telstra a package belongs to is a
@@ -521,7 +530,8 @@ minor functionality, overlays, or apps with a better alternative. Expert = break
 or important functionality but nothing vital to the OS. Unsafe = can break vital parts of \
 the OS, or is illegal to remove in some countries.
 - confidence: low, medium or high.
-- unknown_fields: the names of fields you could not determine, from ["description", "list"].
+- unknown_fields: the names of fields you could not determine, from ["description"]. Do not \
+put "list" here — answer "Misc" instead, which is what it is for.
 - reasoning_brief: one or two sentences of evidence for your answer, under \
 {REASONING_BRIEF_MAX_CHARS} characters.
 
@@ -543,8 +553,13 @@ their register and length, do not copy their content.
 
 
 def user_prompt(bundle: EvidenceBundle) -> str:
-    """The per-package half. The evidence goes in as the same canonical json the hash is
-    taken over, so what the model saw and what the bundle hash attests are the same bytes."""
+    """The per-package half.
+
+    The evidence is the same PAYLOAD the hash is taken over — indented here for the model
+    and compact there for the digest, so it is the same object and deliberately not the same
+    bytes. Nothing is added, removed or reordered on the way in, which is what makes
+    `bundle_sha256` an honest record of what was asked.
+    """
     return (
         f"Classify this package. Answer with one json object.\n\nEVIDENCE:\n"
         f"{json.dumps(bundle.payload, indent=2, sort_keys=True, ensure_ascii=False)}\n"
