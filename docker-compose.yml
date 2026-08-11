@@ -12,10 +12,6 @@ secrets:
 
 volumes:
   postgres-data:
-  # Firmware-unpack scratch. Local and prod use the SAME named volume, sized only by the
-  # host disk backing docker's volume driver — the local box just has less of it. No
-  # separate local-only compose path.
-  worker-scratch:
 
 services:
   postgres:
@@ -133,7 +129,19 @@ services:
         max-size: "10m"
         max-file: "3"
     volumes:
-      - worker-scratch:/scratch
+      # Firmware-unpack scratch, a BIND MOUNT rather than a named volume: docker's volume
+      # driver puts a named volume under /var/lib/docker, and one Samsung job peaks well past
+      # what the root filesystem holds — the archive is 11.5-19.25 GB before it is opened.
+      # WORKER_SCRATCH_DIR repoints it without editing this file; the default is the server's
+      # 1.9 TB disk.
+      #
+      # A bind mount inherits the HOST directory's ownership, where a named volume would be
+      # created with the container user's. So this is the one manual step it costs, and the
+      # worker EACCESes on its first scratch write without it:
+      #   sudo mkdir -p /mnt/ssd-1/scratch && sudo chown 65532:65532 /mnt/ssd-1/scratch
+      # Host-side heavy tests write to UADCLAW_HEAVY_WORKDIR instead, so they do not want
+      # this directory back.
+      - ${WORKER_SCRATCH_DIR:-/mnt/ssd-1/scratch}:/scratch
       # The upstream `uad_lists.json` the filter stage reads, operator-supplied and read-only.
       # It decides which packages are already carried upstream, so it is deliberately a file
       # on disk rather than a fetch: a stage that downloaded its own filter input would change
