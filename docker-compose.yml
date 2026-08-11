@@ -28,6 +28,9 @@ services:
     # web. Run migrations from inside the network instead of the host:
     # `docker compose exec web alembic upgrade head`. Do not "fix" host-side alembic by
     # publishing 5432 — that widens this service's exposure to solve a workflow problem.
+    # (Local dev/test DOES need host-side access — see docker-compose.override.yml, which
+    # `docker compose` merges in automatically and which keeps this file honest about
+    # what's actually deployed.)
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U uadclaw -d uadclaw"]
       interval: 10s
@@ -36,6 +39,9 @@ services:
 
   web:
     build: .
+    # A reclaim sweep runs inside the worker process, so a process that dies and stays
+    # dead never recovers what it was holding; the compose layer has to bring it back.
+    restart: unless-stopped
     ports:
       # WEB_BIND_ADDR lets the server pin this to its LAN interface (e.g. 192.168.1.10)
       # without editing the file; unset, it keeps today's behaviour (all interfaces).
@@ -78,6 +84,10 @@ services:
   worker:
     build: .
     command: ["python", "-m", "uadclaw.worker"]
+    # Same reasoning as web: a dead worker process leaves the periodic in-process reclaim
+    # sweep dead with it, so a job or lease it was holding never recovers without the
+    # container itself restarting.
+    restart: unless-stopped
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"

@@ -1,6 +1,11 @@
 # Local docker-secrets material for compose (real .env is already globally ignored).
 secrets/
 
+# Local-only compose overlay. It publishes Postgres on loopback so host-side pytest and
+# alembic can reach it. `deploy.sh` rsyncs git-tracked files only, so keeping this untracked
+# is what stops the server from publishing a port it has no use for.
+docker-compose.override.yml
+
 # hatchling / uv build output.
 dist/
 build/
