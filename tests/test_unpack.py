@@ -6,7 +6,9 @@ multi-GB image in `test_unpack_chain_heavy.py`.
 """
 
 import asyncio
+import shutil
 import struct
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -22,6 +24,7 @@ from uadclaw.unpack import (
     UnsafePathError,
     _extract_zip_member,
     _harvest_erofs_staging,
+    _sparsechunk_sets,
     canonical_device_path,
     detect_format,
     ensure_within,
@@ -32,6 +35,7 @@ from uadclaw.unpack import (
     read_gpt_partitions,
     safe_archive_path,
     unpack_to_partitions,
+    unpopulated_slot_b,
 )
 
 
@@ -85,6 +89,10 @@ def test_detects_every_container_by_magic_not_by_extension(tmp_path):
             ContainerFormat.PAYLOAD_BIN,
         ),
         "factory.bin": (zip_path, ContainerFormat.ZIP),
+        "logical.bin": (
+            write_at(tmp_path / "logical.bin", (0, b"7z\xbc\xaf\x27\x1c")),
+            ContainerFormat.SEVEN_ZIP,
+        ),
         "blob.img": (write_at(tmp_path / "blob.img"), ContainerFormat.UNKNOWN),
     }
     for name, (path, expected) in cases.items():
@@ -212,6 +220,146 @@ async def test_pixel_factory_layout_unpacks_without_lpunpack(tmp_path):
 
     assert sorted(p.name for p in partitions) == ["product", "system"]
     assert {p.fmt for p in partitions} == {ContainerFormat.EXT4}
+
+
+needs_7z = pytest.mark.skipif(shutil.which("7z") is None, reason="needs 7-Zip >= 24 on PATH")
+needs_simg = pytest.mark.skipif(
+    shutil.which("img2simg") is None or shutil.which("simg2img") is None,
+    reason="needs img2simg/simg2img from android-tools",
+)
+
+
+@needs_7z
+async def test_a_7z_archive_of_partition_images_unpacks(tmp_path):
+    """Nothing's shape once the driver has joined its volume set: one 7z whose members are
+    partition images, plus boot blobs that are on the skip list."""
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "system.img").write_bytes(magic_blob(EXT4_MAGIC_AT))
+    (source / "product.img").write_bytes(magic_blob(EROFS_MAGIC_AT))
+    (source / "vbmeta.img").write_bytes(magic_blob())
+    archive = tmp_path / "image-logical.7z"
+    subprocess.run(  # noqa: S603
+        ["7z", "a", "-t7z", "-bso0", "-bsp0", str(archive), str(source / "*")],
+        check=True,
+        capture_output=True,
+    )
+
+    assert detect_format(archive) is ContainerFormat.SEVEN_ZIP
+    partitions = await unpack_to_partitions(archive, tmp_path / "work", settings=make_settings())
+
+    assert sorted((p.name, str(p.fmt)) for p in partitions) == [
+        ("product", "erofs"),
+        ("system", "ext4"),
+    ]
+
+
+def test_sparsechunk_members_group_and_order_by_their_suffix():
+    """Motorola splits its super across up to 14 chunks and the ORDER lives nowhere but the
+    name, so `.10` must sort after `.9` rather than beside `.1`."""
+    members = [
+        "super.img_sparsechunk.10",
+        "super.img_sparsechunk.2",
+        "super.img_sparsechunk.0",
+        "boot.img",
+        "other.img_sparsechunk.0",
+    ]
+
+    sets = _sparsechunk_sets(members)
+
+    assert sorted(sets) == ["other.img", "super.img"]
+    assert sorted(sets["super.img"]) == [
+        (0, "super.img_sparsechunk.0"),
+        (2, "super.img_sparsechunk.2"),
+        (10, "super.img_sparsechunk.10"),
+    ]
+
+
+async def test_a_sparsechunk_set_with_a_gap_is_refused_rather_than_rebuilt_short(tmp_path):
+    """A missing chunk produces a shorter image that still mounts and still yields APKs,
+    which is the quietest way to lose a partition's packages."""
+    archive = tmp_path / "moto.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("super.img_sparsechunk.0", magic_blob(SPARSE_MAGIC_AT))
+        zf.writestr("super.img_sparsechunk.2", magic_blob(SPARSE_MAGIC_AT))
+
+    with pytest.raises(UnpackError) as excinfo:
+        await unpack_to_partitions(archive, tmp_path / "work", settings=make_settings())
+
+    assert "[0, 2]" in str(excinfo.value)
+
+
+async def test_a_sparsechunk_member_whose_bytes_are_not_sparse_is_refused(tmp_path):
+    """The name orders the set; the magic decides what it is. A file that merely wears the
+    name must not get itself concatenated into a partition."""
+    archive = tmp_path / "moto.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("super.img_sparsechunk.0", magic_blob(SPARSE_MAGIC_AT))
+        zf.writestr("super.img_sparsechunk.1", magic_blob(EXT4_MAGIC_AT))
+
+    with pytest.raises(UnpackError) as excinfo:
+        await unpack_to_partitions(archive, tmp_path / "work", settings=make_settings())
+
+    assert "super.img_sparsechunk.1" in str(excinfo.value)
+    assert "ext4" in str(excinfo.value)
+
+
+def sparse_chunk(*, total_blocks: int, block_size: int, skip_blocks: int, data: bytes) -> bytes:
+    """One member of a real sparsechunk set, in the format measured off Motorola's own.
+
+    Every chunk of a set declares the WHOLE image's `total_blks` (2,426,880 on `rtwo`) and
+    opens with a DONT_CARE chunk skipping to its own offset, so `simg2img c0 … cN out` writes
+    each one at its absolute position rather than appending. Building this by hand rather
+    than with `img2simg`: img2simg emits an image whose blocks start at zero, so two of them
+    both claim block 0 and the second silently overwrites the first — which is a property of
+    that shortcut, not of a real chunk set.
+    """
+    blocks = len(data) // block_size
+    trailing = total_blocks - skip_blocks - blocks
+    chunks = [struct.pack("<HHII", 0xCAC1, 0, blocks, 12 + len(data)) + data]
+    if skip_blocks:
+        chunks.insert(0, struct.pack("<HHII", 0xCAC3, 0, skip_blocks, 12))
+    if trailing:
+        # simg2img refuses a file whose chunks do not account for every declared block, so a
+        # chunk that carries the middle of an image is bracketed by DONT_CAREs on both sides.
+        chunks.append(struct.pack("<HHII", 0xCAC3, 0, trailing, 12))
+    header = struct.pack(
+        "<IHHHHIIII", 0xED26FF3A, 1, 0, 28, 12, block_size, total_blocks, len(chunks), 0
+    )
+    return header + b"".join(chunks)
+
+
+@needs_simg
+async def test_a_real_sparsechunk_set_rebuilds_one_image(tmp_path):
+    """Two real Android sparse chunks, joined by simg2img in one call, back to the ext4 image
+    they were carved from. Blobs carrying only the sparse magic would prove the dispatch and
+    nothing about the rebuild."""
+    block = 4096
+    raw = magic_blob(EXT4_MAGIC_AT, (block + 16, b"second-half"), size=2 * block)
+    archive = tmp_path / "moto.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for index, half in enumerate((raw[:block], raw[block:])):
+            zf.writestr(
+                f"super.img_sparsechunk.{index}",
+                sparse_chunk(total_blocks=2, block_size=block, skip_blocks=index, data=half),
+            )
+
+    partitions = await unpack_to_partitions(archive, tmp_path / "work", settings=make_settings())
+
+    assert [(p.name, str(p.fmt)) for p in partitions] == [("super", "ext4")]
+    assert partitions[0].path.read_bytes() == raw
+
+
+def test_an_unwritten_slot_b_is_droppable_only_when_slot_a_is_there():
+    """Measured on Motorola `rtwo`: lpunpack writes every partition the super declares, and 5
+    of the 6 `_b` images are ZERO bytes. Dropping any unreadable partition instead would be
+    how a whole partition's packages go missing with nothing raised."""
+    both = ["product_a", "product_b", "system_a", "system_b"]
+
+    assert unpopulated_slot_b("product_b", both) is True
+    assert unpopulated_slot_b("product_a", both) is False
+    assert unpopulated_slot_b("product_b", ["product_b", "system_a"]) is False
+    assert unpopulated_slot_b("odm", both) is False
 
 
 async def test_a_gpt_disk_carves_only_its_filesystem_partitions(tmp_path):

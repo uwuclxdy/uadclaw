@@ -4,8 +4,15 @@ selective extraction of the files later stages actually read.
 Every step is chosen by magic number, never by file extension or vendor: a Pixel factory zip
 carries raw ext4 partition images directly (measured 2026-08-11 on oriole/cp2a.260705.006.a1
 — no `super.img`, no sparse header), while the emulator system image is a GPT disk whose
-`super` partition needs `lpunpack`, and an OTA carries a `payload.bin`. Same table serves
-all three, so a vendor switching layouts needs no new driver.
+`super` partition needs `lpunpack`, a Xiaomi recovery ROM carries a `payload.bin`, and a
+Nothing build arrives as a 7-Zip archive of partition images. Same table serves all four, so
+a vendor switching layouts needs no new driver.
+
+One thing the magic cannot decide is ORDER. Motorola splits its super image across
+`super.img_sparsechunk.0 … .13` inside its firmware zip, and the only record of which chunk
+comes first is the suffix, so `_sparsechunk_sets` groups and orders on the name — and then
+refuses any member whose bytes are not a sparse image, so a file that merely wears the name
+still cannot get itself concatenated into a partition.
 
 Extraction is selective by construction: an ext4 partition is listed once, the paths worth
 having are chosen in Python, and only those are handed back to `7z`. That sidesteps two
@@ -87,6 +94,7 @@ class DuplicatePartitionError(UnpackError):
 
 class ContainerFormat(StrEnum):
     ZIP = "zip"
+    SEVEN_ZIP = "seven_zip"  # Nothing ships its partitions as a split 7z volume set
     PAYLOAD_BIN = "payload_bin"  # A/B OTA payload
     SPARSE_IMAGE = "sparse_image"  # Android sparse image -> simg2img
     SUPER_IMAGE = "super_image"  # dynamic partitions -> lpunpack
@@ -100,6 +108,7 @@ class ContainerFormat(StrEnum):
 _HEADER_BYTES = 8192
 
 _ZIP_MAGIC = b"PK\x03\x04"
+_SEVEN_ZIP_MAGIC = b"7z\xbc\xaf\x27\x1c"
 _PAYLOAD_MAGIC = b"CrAU"
 _SPARSE_MAGIC = b"\x3a\xff\x26\xed"  # 0xED26FF3A little-endian
 _GPT_MAGIC = b"EFI PART"  # at LBA 1
@@ -233,6 +242,8 @@ def _classify_header(header: bytes) -> ContainerFormat:
         return ContainerFormat.SPARSE_IMAGE
     if at(0, _ZIP_MAGIC):
         return ContainerFormat.ZIP
+    if at(0, _SEVEN_ZIP_MAGIC):
+        return ContainerFormat.SEVEN_ZIP
     if at(0, _PAYLOAD_MAGIC):
         return ContainerFormat.PAYLOAD_BIN
     if at(_GPT_HEADER_OFFSET, _GPT_MAGIC):
@@ -304,6 +315,11 @@ def normalize_partition_name(name: str) -> str:
 
 _SAFE_COMPONENT_RE = re.compile(r"[^A-Za-z0-9._-]")
 _MAX_COMPONENT_CHARS = 96
+
+# `super.img_sparsechunk.0` … `.13`, how Motorola splits a super image inside its firmware
+# zip. Grouped and ordered by this name because nothing else records the order; what each
+# member IS still comes from its magic (see `_unpack_sparsechunks`).
+_SPARSECHUNK_RE = re.compile(r"^(?P<stem>.+)_sparsechunk\.(?P<index>\d+)$")
 
 
 def safe_component(name: str, *, context: str) -> str:
@@ -566,6 +582,8 @@ async def _unpack(
     match fmt:
         case ContainerFormat.ZIP:
             return await _unpack_zip(source, workdir, settings, depth)
+        case ContainerFormat.SEVEN_ZIP:
+            return await _unpack_7z(source, workdir, settings, depth)
         case ContainerFormat.PAYLOAD_BIN:
             return await _unpack_payload(source, workdir, settings, depth)
         case ContainerFormat.SPARSE_IMAGE:
@@ -632,14 +650,10 @@ async def _unpack_zip(
         )
         return await _unpack(extracted, "payload", workdir, settings, depth + 1)
 
-    if not images:
-        raise UnsupportedContainerError(
-            f"_unpack_zip: {source.name} contains no nested archive, no payload.bin and no .img "
-            f"member (it has {len(members)} entries); this is not a firmware archive shape the "
-            "pipeline knows"
-        )
+    found: list[PartitionImage] = []
+    for stem, chunks in sorted(_sparsechunk_sets(members).items()):
+        found.extend(await _unpack_sparsechunks(source, stem, chunks, workdir, settings, depth))
 
-    found = []
     for member in images:
         stem = Path(member).stem
         if normalize_partition_name(stem) in _NON_FILESYSTEM_IMAGES:
@@ -659,7 +673,173 @@ async def _unpack_zip(
             # the caller's "no APKs at all" guard is what catches dropping them all.
             logger.info("skipping %s: not a filesystem image", member)
             await asyncio.to_thread(extracted.unlink, True)
+
+    if not found:
+        raise UnsupportedContainerError(
+            f"_unpack_zip: {source.name} contains no nested archive, no payload.bin, no "
+            f"sparsechunk set and no readable .img member (it has {len(members)} entries); "
+            "this is not a firmware archive shape the pipeline knows"
+        )
     return found
+
+
+def _sparsechunk_sets(members: Sequence[str]) -> dict[str, list[tuple[int, str]]]:
+    """Group `super.img_sparsechunk.0 … .13` members by the image they rebuild.
+
+    Motorola splits its super image across up to 14 chunk files, none of which ends in
+    `.img`, so before this the whole set was invisible to the `.img` member scan and a
+    Motorola firmware zip read as "no image members at all". The NAME is used only to group
+    and order the set — nothing else can, since the order lives nowhere but the suffix — and
+    `_unpack_sparsechunks` still refuses any member whose BYTES are not a sparse image.
+    """
+    sets: dict[str, list[tuple[int, str]]] = {}
+    for member in members:
+        match = _SPARSECHUNK_RE.match(PurePosixPath(member).name)
+        if match is not None:
+            sets.setdefault(match.group("stem"), []).append((int(match.group("index")), member))
+    return sets
+
+
+async def _unpack_sparsechunks(
+    source: Path,
+    stem: str,
+    chunks: list[tuple[int, str]],
+    workdir: Path,
+    settings: Settings,
+    depth: int,
+) -> list[PartitionImage]:
+    """Rebuild one raw image out of an ordered sparse-chunk set.
+
+    `simg2img` takes the whole set in one call and writes one raw image. The set has to be
+    complete: a missing chunk would produce a shorter image that still mounts and still
+    yields APKs, which is the quietest possible way to lose a partition's worth of packages.
+    """
+    ordered = sorted(chunks)
+    indices = [index for index, _member in ordered]
+    if indices != list(range(len(indices))):
+        raise UnpackError(
+            f"_unpack_sparsechunks: {source.name} carries chunks {indices} for {stem!r}, which "
+            f"is not the complete run 0..{len(indices) - 1}. A gap means the archive is "
+            "incomplete; re-download it rather than rebuilding a short image."
+        )
+
+    chunk_dir = workdir / "chunks"
+    extracted: list[Path] = []
+    for _index, member in ordered:
+        path = await asyncio.to_thread(
+            _extract_zip_member,
+            source,
+            member,
+            chunk_dir,
+            max_bytes=settings.max_firmware_archive_bytes,
+        )
+        fmt = await asyncio.to_thread(detect_format, path)
+        if fmt is not ContainerFormat.SPARSE_IMAGE:
+            raise UnpackError(
+                f"_unpack_sparsechunks: {member} is named as a sparse chunk of {stem!r} but its "
+                f"leading bytes are {fmt}, not an Android sparse image. The name orders the "
+                "set; the magic decides what it is, and these disagree."
+            )
+        extracted.append(path)
+
+    raw_dir = workdir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    name = safe_component(Path(stem).stem, context="_unpack_sparsechunks")
+    raw = unique_path(raw_dir, f"{name}.raw.img")
+    await _run_tool([_tool_path("simg2img"), *(str(path) for path in extracted), str(raw)])
+    for path in extracted:
+        await asyncio.to_thread(path.unlink, True)
+    logger.info("rebuilt %s from %d sparse chunk(s)", raw.name, len(extracted))
+    return await _unpack(raw, name, workdir, settings, depth + 1)
+
+
+async def _unpack_7z(
+    source: Path, workdir: Path, settings: Settings, depth: int
+) -> list[PartitionImage]:
+    """A 7-Zip archive of partition images (Nothing's `-image-logical.7z` volume set, joined
+    into one file by the driver before it ever reaches here).
+
+    `-t7z` forces the handler for the same reason the ext4 path does: the format is already
+    known from the magic, and 7z's own sniffing is what mistook an EROFS image for a gzip
+    stream and reported one file where there were 105.
+    """
+    records = await _list_7z_records(source)
+    wanted = [
+        record
+        for record in records
+        if record["Path"].lower().endswith(".img")
+        and normalize_partition_name(PurePosixPath(record["Path"]).stem)
+        not in _NON_FILESYSTEM_IMAGES
+    ]
+    for record in wanted:
+        safe_archive_path(record["Path"], context=f"_unpack_7z[{source.name}]")
+        declared = int(record.get("Size") or 0)
+        if declared > settings.max_firmware_archive_bytes:
+            raise UnpackError(
+                f"_unpack_7z: {record['Path']!r} in {source.name} declares {declared} bytes, "
+                f"over the {settings.max_firmware_archive_bytes}-byte ceiling; raise "
+                "max_firmware_archive_bytes if this firmware is genuinely that large"
+            )
+    if not wanted:
+        raise UnsupportedContainerError(
+            f"_unpack_7z: {source.name} holds {len(records)} entries and none of them is a "
+            "filesystem image this pipeline reads; this is not a firmware archive shape the "
+            "pipeline knows"
+        )
+
+    out_dir = workdir / "sevenzip"
+    await _extract_7z(source, [record["Path"] for record in wanted], out_dir)
+    _drop_consumed_intermediate(source, depth)
+    found: list[PartitionImage] = []
+    for record in wanted:
+        image = ensure_within(out_dir, Path(record["Path"]), context="_unpack_7z")
+        if not image.is_file():
+            raise NothingExtractedError(
+                f"_unpack_7z: {record['Path']} was listed inside {source.name} but is not on "
+                "disk after extraction; 7z silently skipped it"
+            )
+        try:
+            found.extend(await _unpack(image, image.stem, workdir, settings, depth + 1))
+        except UnsupportedContainerError:
+            logger.info("skipping %s: not a filesystem image", record["Path"])
+            await asyncio.to_thread(image.unlink, True)
+    if not found:
+        raise UnpackError(
+            f"_unpack_7z: none of the {len(wanted)} image(s) in {source.name} is a filesystem "
+            "this pipeline reads"
+        )
+    return found
+
+
+async def _list_7z_records(archive: Path) -> list[dict[str, str]]:
+    listing = await _run_tool(
+        [_tool_path("7z"), "l", "-slt", "-ba", "-t7z", str(archive)], ok_codes=(0, 1)
+    )
+    return [record for record in parse_7z_records(listing) if record.get("Path")]
+
+
+async def _extract_7z(archive: Path, names: Sequence[str], dest: Path) -> None:
+    """Hand 7z the exact members to pull, through a list file for the same reasons the ext4
+    path uses one: no argument-length ceiling and no ambiguity with a leading dash."""
+    dest.mkdir(parents=True, exist_ok=True)
+    list_file = archive.with_suffix(archive.suffix + ".7zlist")
+    await asyncio.to_thread(list_file.write_text, "\n".join(names) + "\n", "utf-8")
+    await _run_tool(
+        [
+            _tool_path("7z"),
+            "x",
+            "-y",
+            "-bd",
+            "-bso0",
+            "-scsUTF-8",
+            "-t7z",
+            f"-o{dest}",
+            str(archive),
+            f"@{list_file}",
+        ],
+        ok_codes=(0, 1),
+    )
+    await asyncio.to_thread(list_file.unlink, True)
 
 
 def _zip_members(archive: Path) -> list[str]:
@@ -678,6 +858,23 @@ async def _unpack_sparse(
     return await _unpack(raw, name, workdir, settings, depth + 1)
 
 
+def unpopulated_slot_b(stem: str, siblings: Sequence[str]) -> bool:
+    """Whether an unreadable partition image is a slot B that was never written.
+
+    lpunpack writes every partition the super metadata declares, and on a retrofitted A/B
+    device the B slot has extents but no content until the first OTA lands. Measured
+    2026-08-11 on Motorola `rtwo`: 5 of the 6 `_b` images lpunpack produced are ZERO bytes,
+    matching no magic, while `system_b` is a real 1.6 MB EROFS — and one zero-byte file was
+    enough to fail the whole build with "not a container this pipeline reads".
+
+    The A sibling has to be present for this to be droppable. Without that check this is
+    "ignore any partition we cannot read", which is how a whole partition's packages go
+    missing with nothing raised; `_resolve_partition_identities` drops the same image a
+    moment later for the same reason, so nothing extra is lost here.
+    """
+    return stem.endswith("_b") and f"{stem[:-2]}_a" in set(siblings)
+
+
 async def _unpack_super(
     source: Path, workdir: Path, settings: Settings, depth: int
 ) -> list[PartitionImage]:
@@ -686,8 +883,21 @@ async def _unpack_super(
     await _run_tool([_tool_path("lpunpack"), str(source), str(parts_dir)])
     _drop_consumed_intermediate(source, depth)
     found: list[PartitionImage] = []
-    for image in sorted(parts_dir.glob("*.img")):
-        found.extend(await _unpack(image, image.stem, workdir, settings, depth + 1))
+    images = sorted(parts_dir.glob("*.img"))
+    stems = [image.stem for image in images]
+    for image in images:
+        try:
+            found.extend(await _unpack(image, image.stem, workdir, settings, depth + 1))
+        except UnsupportedContainerError:
+            if not unpopulated_slot_b(image.stem, stems):
+                raise
+            logger.info(
+                "partition %s is an unwritten slot B (%d bytes); slot A of the same partition "
+                "is present",
+                image.stem,
+                image.stat().st_size,
+            )
+            await asyncio.to_thread(image.unlink, True)
     if not found:
         raise UnpackError(
             f"_unpack_super: lpunpack produced no filesystem image from {source.name}; the super "
@@ -768,18 +978,18 @@ async def _unpack_payload(
     return found
 
 
-def parse_7z_listing(text: str) -> list[str]:
-    """Regular-file paths out of `7z l -slt -ba` output.
+def parse_7z_records(text: str) -> list[dict[str, str]]:
+    """Regular-file entries out of `7z l -slt -ba` output, each as its whole key/value block.
 
     `-slt` emits one `Key = Value` block per entry separated by blank lines, which parses
-    unambiguously; the default column layout does not (paths contain spaces).
+    unambiguously; the default column layout does not (paths contain spaces). Directories and
+    links are dropped here so no caller has to remember to.
     """
-    paths: list[str] = []
+    records: list[dict[str, str]] = []
     record: dict[str, str] = {}
 
     def flush() -> None:
-        path = record.get("Path")
-        if not path:
+        if not record.get("Path"):
             return
         if record.get("Folder") == "+":
             return
@@ -787,7 +997,7 @@ def parse_7z_listing(text: str) -> list[str]:
             return
         if record.get("Mode", "").startswith(("l", "d")):
             return
-        paths.append(path)
+        records.append(dict(record))
 
     for line in text.splitlines():
         if not line.strip():
@@ -798,7 +1008,12 @@ def parse_7z_listing(text: str) -> list[str]:
         if sep:
             record[key.strip()] = value.strip()
     flush()
-    return paths
+    return records
+
+
+def parse_7z_listing(text: str) -> list[str]:
+    """Regular-file paths out of `7z l -slt -ba` output."""
+    return [record["Path"] for record in parse_7z_records(text)]
 
 
 async def _list_ext4(image: Path) -> list[str]:
