@@ -568,12 +568,26 @@ class SamsungDriver(FirmwareDriver):
             if owned:
                 await client.aclose()
         if missing:
+            # INFO, not a warning: most of a model x CSC grid legitimately does not exist —
+            # a model is sold under a handful of CSCs and the cross product names the rest.
             logger.info(
                 "samsung: %d of %d configured pair(s) do not exist and are not on offer: %s",
                 len(missing),
                 len(models) * len(regions),
                 ", ".join(missing),
             )
+        # A MODEL that resolved nothing is a different thing from a pair that did, and it is
+        # the shape a typo takes: the operator believes they are tracking a phone and the grid
+        # quietly carries none of it. Same call the Motorola driver makes per device.
+        for model in models:
+            if not any(ref.device == model for ref in refs):
+                logger.warning(
+                    "samsung: %r resolved to no build under any of %d configured CSC(s) (%s); "
+                    "check the model name and its CSCs",
+                    model,
+                    len(regions),
+                    ", ".join(regions),
+                )
         if not refs:
             raise EmptyFirmwareIndexError(
                 f"SamsungDriver.list_available: not one of {len(models) * len(regions)} "

@@ -22,6 +22,7 @@ Every HTTP call goes through an `httpx.MockTransport` that records what was sent
 
 import hashlib
 import json
+import logging
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -742,6 +743,25 @@ async def test_samsung_reads_a_403_as_a_pair_that_does_not_exist_rather_than_a_f
     refs = await driver.list_available()
 
     assert [(ref.device, ref.build) for ref in refs] == [("SM-S911U", SAMSUNG_BUILD)]
+
+
+async def test_samsung_warns_about_a_model_that_resolved_nothing_at_all(caplog):
+    """A pair that does not exist is normal — most of a model x CSC grid legitimately does
+    not. A MODEL with no live CSC anywhere is the shape a typo takes, and it would otherwise
+    read as a phone being tracked while the grid carries none of it."""
+    driver = SamsungDriver(
+        samsung_settings(samsung_models="SM-S911U,SM-TYPO9Z"), client=samsung_client()
+    )
+
+    with caplog.at_level(logging.WARNING):
+        refs = await driver.list_available()
+
+    assert [ref.device for ref in refs] == [SAMSUNG_MODEL]
+    warnings = [
+        record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING
+    ]
+    assert any("SM-TYPO9Z" in message for message in warnings), warnings
+    assert not any(SAMSUNG_MODEL in message for message in warnings), warnings
 
 
 async def test_samsung_grid_where_no_pair_exists_is_an_error_not_an_empty_catalogue():
