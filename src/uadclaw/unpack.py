@@ -166,8 +166,12 @@ _NON_FILESYSTEM_IMAGES = frozenset(
 _TOOL_PROVIDERS = {
     # p7zip 16.02 does not read ext4 at all; 7-Zip >= 24 does. Neither reads EROFS.
     "7z": "7-Zip >= 24 (Arch: `7zip`, Debian: `7zip`; p7zip 16.02 will NOT do)",
-    "lpunpack": "android-tools",
-    "simg2img": "android-tools",
+    # Both ship in Arch's `android-tools`; Debian splits them and packages lpunpack nowhere at
+    # all, so naming one package would send half the operators looking for something that does
+    # not exist. The worker image compiles lpunpack from nmeum/android-tools for that reason.
+    "lpunpack": "Arch: `android-tools`; Debian: no package provides it, build it from "
+    "github.com/nmeum/android-tools as the worker image does",
+    "simg2img": "Arch: `android-tools`, Debian: `android-sdk-libsparse-utils`",
     "fsck.erofs": "erofs-utils",
 }
 
