@@ -28,7 +28,8 @@ Refresh it deliberately, from the upstream repo's `main`:
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,22 @@ class UpstreamListError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class UpstreamEntry:
+    """One existing entry, reduced to the three fields a style anchor shows the model.
+
+    Not a schema for the file: the live copy carries `dependencies`, `neededBy`, `labels` and
+    three keys the upstream struct does not even declare (`leabel`, `labelid`, `suggestions`).
+    Only what a proposal is written against is kept, because everything else is either
+    graph-derived here or noise in a prompt.
+    """
+
+    package: str
+    list: str | None
+    removal: str | None
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
 class UpstreamList:
     """The package names already carried upstream, plus which bytes said so."""
 
@@ -59,6 +76,9 @@ class UpstreamList:
     loaded_at: datetime
     entry_count: int
     packages: frozenset[str]
+    # Package -> the entry's proposal fields, for the style anchors the classification
+    # bundle carries. The filter never reads this; it only ever asks `package in upstream`.
+    entries: Mapping[str, UpstreamEntry] = field(default_factory=dict)
 
     def __contains__(self, package: str) -> bool:
         return package in self.packages
@@ -71,6 +91,28 @@ class UpstreamList:
             "loaded_at": self.loaded_at.isoformat(),
             "entry_count": self.entry_count,
         }
+
+
+def _entries(parsed: dict[str, Any]) -> dict[str, UpstreamEntry]:
+    """Reduce the parsed file to the anchor fields, skipping anything malformed.
+
+    Skipping rather than raising, unlike everything else in this module: a single entry whose
+    `list` is a number is a defect in somebody else's file and costs one style anchor, while
+    the filter's question ("is this package carried upstream") is still answered correctly by
+    its key. The file as a whole is already refused when it is empty or not an object.
+    """
+    entries: dict[str, UpstreamEntry] = {}
+    for package, value in parsed.items():
+        if not isinstance(value, dict):
+            continue
+        description = value.get("description")
+        entries[str(package)] = UpstreamEntry(
+            package=str(package),
+            list=value["list"] if isinstance(value.get("list"), str) else None,
+            removal=value["removal"] if isinstance(value.get("removal"), str) else None,
+            description=description if isinstance(description, str) else "",
+        )
+    return entries
 
 
 def load_upstream_list(path: Path) -> UpstreamList:
@@ -119,6 +161,7 @@ def load_upstream_list(path: Path) -> UpstreamList:
         loaded_at=datetime.now(UTC),
         entry_count=len(packages),
         packages=packages,
+        entries=_entries(parsed),
     )
     logger.info(
         "upstream list loaded: %d entries from %s (sha256 %s, obtained %s)",
