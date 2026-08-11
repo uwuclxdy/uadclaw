@@ -120,8 +120,9 @@ class Settings(BaseSettings):
     # would push the total over this ceiling.
     #
     # NOTE at this default a failed FIRMWARE_ANALYSIS job is always evicted whole: one peaks
-    # near 15 GB (a 3.5 GB archive, its partition images, and the extracted tree), so the
-    # "keep failed artifacts for debugging" intent never applies to that kind. Raise this
+    # anywhere from ~15 GB (a 3.5 GB Pixel archive, its partition images and the extracted
+    # tree) to past 20 GB for Samsung, whose archive alone is 11-19 GB before it is opened. So
+    # the "keep failed artifacts for debugging" intent never applies to that kind. Raise this
     # past a single job's peak if post-mortem access to a failed unpack is wanted.
     failure_retention_bytes: int = 5_000_000_000
     # A job stuck CLAIMED/RUNNING past this many claims is parked FAILED instead of

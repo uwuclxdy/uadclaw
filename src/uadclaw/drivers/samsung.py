@@ -102,7 +102,16 @@ _REGION_RE = re.compile(r"^[A-Z0-9]{3}$")
 # The two fields of the inform response that reach the download URL. They arrive inside a
 # document downloaded from a third party, so they are refused rather than sanitised: a real
 # one is `/neofus/911/` and `SM-S911U_2_20260708221800_qd55e39o59_fac.zip.enc4`.
-_BINARY_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
+# The floor is 25, not 1: the download-authorisation LOGIC_CHECK is computed over
+# `filename[-25:-9]`, and a shorter name slices to something shorter than 16 characters
+# without raising, so the request goes out wrong and FUS refuses it for a reason no message
+# names. A real name is 48 characters.
+_BINARY_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{25,160}$")
+# The four-part version and DEVICE_MODEL_TYPE both come out of a downloaded document and both
+# are interpolated into an outgoing XML body. Every other field that does is refused rather
+# than escaped; these two were the exception until a reviewer said so.
+_VERSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}(?:/[A-Za-z0-9._-]{0,64}){1,3}$")
+_MODEL_TYPE_RE = re.compile(r"^[0-9]{1,4}$")
 # The lookahead is what refuses a `.` or `..` COMPONENT: the charset alone admits both, and a
 # `/neofus/../911/` reaching a server that normalises its own paths asks for a resource this
 # pipeline never named. Same call `unpack.safe_archive_path` makes about an image listing.
@@ -119,6 +128,7 @@ MAX_INDEX_PROBES = 128
 # any document carrying a DTD, which is the whole billion-laughs class removed without a
 # parser swap. The real documents are 1.7-8 KB.
 MAX_RESPONSE_BYTES = 1024 * 1024
+_RESPONSE_CHUNK_BYTES = 64 * 1024
 _DTD_SNIFF_BYTES = 8 * 1024
 _DTD_PATTERN = re.compile(r"<!DOCTYPE|<!ENTITY", re.IGNORECASE)
 
@@ -130,6 +140,29 @@ class SamsungProtocolError(FirmwareError):
     and a job's failure reason has to separate "Samsung changed the protocol" from "the
     network is down" — the first needs this module rewritten, the second needs a retry.
     """
+
+
+async def _read_capped(response: httpx.Response, *, context: str) -> str:
+    """The body, refused once it passes the ceiling rather than after it is all in memory.
+
+    `response.text` on a streamed response would buffer whatever the server chose to send,
+    and these are third-party servers reached by a worker with no memory bound of its own.
+    Reading it in chunks with a running total is what makes the ceiling in `parse_xml` a
+    ceiling on what ARRIVES — the same order `etcconfig` does it in, where the file's size is
+    checked before the read rather than after.
+    """
+    received = 0
+    chunks: list[bytes] = []
+    async for chunk in response.aiter_bytes(_RESPONSE_CHUNK_BYTES):
+        received += len(chunk)
+        if received > MAX_RESPONSE_BYTES:
+            raise SamsungProtocolError(
+                f"{context}: the response passed the {MAX_RESPONSE_BYTES}-byte ceiling for a "
+                f"FUS document after {received} bytes (a real one is 1.7-8 KB); refusing to "
+                "read the rest of it"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 def parse_xml(text: str, *, context: str) -> ElementTree.Element:
@@ -190,9 +223,17 @@ def normalize_version(version: str) -> str:
     return "/".join(parts)
 
 
-def _latest_element(text: str, *, model: str, region: str, source_url: str) -> ElementTree.Element:
-    """The `<latest>` element, or a named failure. One parse, because both callers below want
-    a different part of the same element and the document is a third party's."""
+def _latest_offer(
+    text: str, *, model: str, region: str, source_url: str
+) -> tuple[ElementTree.Element, str]:
+    """The `<latest>` element and its validated four-part version.
+
+    One function rather than two, because BOTH are read on both paths — `list_available`
+    wants the element's `o` attribute and `fetch` wants the version — and validating in only
+    one of them is how the check ends up on the path nobody attacks. (It did, briefly: the
+    version charset was enforced in `latest_version` while `parse_version_index` reached
+    around it to the same element.)
+    """
     root = parse_xml(text, context=f"samsung index[{model}/{region}]")
     latest = root.find("./firmware/version/latest")
     if latest is None or not (latest.text or "").strip():
@@ -202,7 +243,16 @@ def _latest_element(text: str, *, model: str, region: str, source_url: str) -> E
             "empty index means the document's shape changed, not that Samsung published "
             "nothing for it."
         )
-    return latest
+    version = normalize_version((latest.text or "").strip())
+    if not _VERSION_RE.match(version):
+        # This string is interpolated into the outgoing FUS body. Refused rather than escaped,
+        # the same call every other externally-supplied field in this module gets.
+        raise SamsungProtocolError(
+            f"latest_version: {source_url} published {version!r} for {model}/{region}, which is "
+            "not a Samsung version string (`PDA/CSC/PHONE`, alphanumerics and `._-`); refusing "
+            "to build a request body out of it"
+        )
+    return latest, version
 
 
 def latest_version(text: str, *, model: str, region: str, source_url: str) -> str:
@@ -212,8 +262,7 @@ def latest_version(text: str, *, model: str, region: str, source_url: str) -> st
     an `rcount` attribute whose meaning is not measured, and whether FUS still resolves one is
     unproven — so offering them would be a catalogue of builds that may not download.
     """
-    latest = _latest_element(text, model=model, region=region, source_url=source_url)
-    return normalize_version((latest.text or "").strip())
+    return _latest_offer(text, model=model, region=region, source_url=source_url)[1]
 
 
 def parse_version_index(text: str, *, model: str, region: str, source_url: str) -> FirmwareRef:
@@ -228,8 +277,7 @@ def parse_version_index(text: str, *, model: str, region: str, source_url: str) 
     download URL until an authenticated inform call produces one. `fetch` re-reads this same
     document to resolve it, so the ref names where the offer came from and nothing else.
     """
-    latest = _latest_element(text, model=model, region=region, source_url=source_url)
-    version = normalize_version((latest.text or "").strip())
+    latest, version = _latest_offer(text, model=model, region=region, source_url=source_url)
     # `o="16"` on that element is the Android version, and it is the only place either
     # document states one.
     android = latest.attrib.get("o")
@@ -268,24 +316,46 @@ class SamsungBinary:
         return f"{DOWNLOAD_URL}?file={quote(self.model_path + self.filename, safe='/')}"
 
 
+def require_s00(text: str, *, context: str) -> ElementTree.Element:
+    """Parse a FUS response and refuse anything but a success status.
+
+    **FUS declines with HTTP 200 and a status in the body.** That is why every call here reads
+    the status rather than the status code — including the download-authorisation call, whose
+    only symptom otherwise arrives one request later as a 401 on the binary itself, which
+    reads like an expired URL and is not one.
+    """
+    root = parse_xml(text, context=context)
+    status = root.find("./FUSBody/Results/Status")
+    status_text = (status.text or "").strip() if status is not None else ""
+    if status_text not in {"S00", "200"}:
+        raise SamsungProtocolError(
+            f"{context}: FUS answered status {status_text or '(none)'}, not S00. It declines "
+            "with HTTP 200 and a status in the body, so this is a refusal rather than a "
+            "transport failure; re-list the index before retrying this build."
+        )
+    return root
+
+
 def parse_binary_inform(text: str, *, model: str, region: str) -> SamsungBinary:
     """The resolved binary, or a named protocol failure.
 
     The decryption key is `md5(logic_check(BINARY_SW_VERSION, LOGIC_VALUE_FACTORY))`, and both
     inputs arrive in THIS response, so nothing extra is fetched to decrypt what it resolves.
     """
-    root = parse_xml(text, context=f"parse_binary_inform[{model}/{region}]")
-    status = root.find("./FUSBody/Results/Status")
-    status_text = (status.text or "").strip() if status is not None else ""
-    if status_text not in {"S00", "200"}:
+    root = require_s00(text, context=f"parse_binary_inform[{model}/{region}]")
+    # Scoped to `Put` rather than harvested from the whole document: `BINARY_SW_VERSION`
+    # appears in `Results` as well, and a whole-document walk picks whichever comes last —
+    # which is right by document order alone, and this is the field the decryption key is
+    # derived from.
+    body = root.find("./FUSBody/Put")
+    if body is None:
         raise SamsungProtocolError(
-            f"parse_binary_inform: FUS answered status {status_text or '(none)'} for "
-            f"{model}/{region}, not S00. Samsung answers a real model with a status even when "
-            "the firmware is withdrawn, so re-list the index before retrying this build."
+            f"parse_binary_inform: FUS answered S00 for {model}/{region} with no FUSBody/Put "
+            "block, which is where every field the download needs lives"
         )
     fields = {
         element.tag: (element.find("Data").text or "").strip()
-        for element in root.iter()
+        for element in body
         if element.find("Data") is not None and element.find("Data").text is not None
     }
 
@@ -306,11 +376,20 @@ def parse_binary_inform(text: str, *, model: str, region: str) -> SamsungBinary:
     logic_value = require("LOGIC_VALUE_FACTORY", "LOGIC_VALUE_HOME")
     filename = require("BINARY_NAME")
     model_path = require("MODEL_PATH")
+    model_type = require("DEVICE_MODEL_TYPE")
     if not _BINARY_NAME_RE.match(filename) or not _MODEL_PATH_RE.match(model_path):
         raise SamsungProtocolError(
             f"parse_binary_inform: FUS named {model_path!r} + {filename!r} for {model}/{region}, "
             "which is not the shape a Samsung binary path has (`/neofus/911/` plus a plain "
-            "filename); refusing to build a request URL out of it"
+            "filename of at least 25 characters); refusing to build a request URL out of it"
+        )
+    # Both reach an outgoing FUS body: the version through the inform LOGIC_CHECK and the
+    # model type through the download authorisation.
+    if not _VERSION_RE.match(version) or not _MODEL_TYPE_RE.match(model_type):
+        raise SamsungProtocolError(
+            f"parse_binary_inform: FUS answered version {version!r} and model type "
+            f"{model_type!r} for {model}/{region}. Both are interpolated into the next request "
+            "body, so a character outside their charsets is refused rather than escaped."
         )
     size_text = require("BINARY_BYTE_SIZE")
     try:
@@ -331,7 +410,7 @@ def parse_binary_inform(text: str, *, model: str, region: str) -> SamsungBinary:
         model_path=model_path,
         size=size,
         key=hashlib.md5(logic_check(version, logic_value).encode()).digest(),  # noqa: S324
-        model_type=require("DEVICE_MODEL_TYPE"),
+        model_type=model_type,
         region=require("BINARY_LOCAL_CODE"),
     )
 
@@ -613,34 +692,54 @@ class SamsungDriver(FirmwareDriver):
         """
         url = self._index_url_for(model, region)
         try:
-            response = await client.get(url)
+            async with client.stream("GET", url) as response:
+                if response.status_code == httpx.codes.FORBIDDEN:
+                    return None
+                if response.status_code != httpx.codes.OK:
+                    await response.aread()
+                    raise FirmwareError(
+                        f"SamsungDriver: {url} answered HTTP {response.status_code}; expected "
+                        "200, or 403 for a CSC and model that do not go together"
+                    )
+                return await _read_capped(response, context=f"samsung index[{model}/{region}]")
         except httpx.HTTPError as exc:
             raise FirmwareError(f"SamsungDriver: {url} is unreachable: {exc}") from exc
-        if response.status_code == httpx.codes.FORBIDDEN:
-            return None
-        if response.status_code != httpx.codes.OK:
-            raise FirmwareError(
-                f"SamsungDriver: {url} answered HTTP {response.status_code}; expected 200, or "
-                "403 for a CSC and model that do not go together"
-            )
-        return response.text
 
     async def _post(
         self, client: httpx.AsyncClient, session: FusSession, path: str, body: str = ""
     ) -> str:
+        """One FUS call, with its status checked HERE rather than by each caller.
+
+        **FUS declines with HTTP 200 and a `<Status>` in the body**, so a caller that discards
+        the response discards the refusal. Checking it in the one place every call goes
+        through is what makes that unrepresentable: the download-authorisation call had no
+        other symptom than a 401 on the binary one request later, which reads as an expired
+        URL. Measured: every response carries the element, `GenerateNonce` included (it
+        answers `<Status>200</Status>` with a 228-byte body).
+
+        `parse_binary_inform` checks the status again on its own text, and that duplicate
+        parse of a 4 KB document once per job is deliberate — it is the unit the fixture tests
+        drive, and it has to be correct without a caller having gone first.
+        """
         url = f"{FUS_URL}/{path}"
         try:
-            response = await client.post(url, headers=session.headers(), content=body)
+            async with client.stream(
+                "POST", url, headers=session.headers(), content=body
+            ) as response:
+                if response.status_code != httpx.codes.OK:
+                    await response.aread()
+                    raise SamsungProtocolError(
+                        f"SamsungDriver: {url} answered HTTP {response.status_code}. FUS "
+                        "answers 401 once a nonce has expired and 403 when the handshake is "
+                        "wrong, and both mean this module's transcription of the protocol no "
+                        "longer matches the server."
+                    )
+                text = await _read_capped(response, context=f"SamsungDriver[{path}]")
+                session.rotate(response)
         except httpx.HTTPError as exc:
             raise FirmwareError(f"SamsungDriver: {url} is unreachable: {exc}") from exc
-        if response.status_code != httpx.codes.OK:
-            raise SamsungProtocolError(
-                f"SamsungDriver: {url} answered HTTP {response.status_code}. FUS answers 401 "
-                "once a nonce has expired and 403 when the handshake is wrong, and both mean "
-                "this module's transcription of the protocol no longer matches the server."
-            )
-        session.rotate(response)
-        return response.text
+        require_s00(text, context=f"SamsungDriver[{path}]")
+        return text
 
     async def resolve(
         self, client: httpx.AsyncClient, ref: FirmwareRef
@@ -694,6 +793,15 @@ class SamsungDriver(FirmwareDriver):
 
         session = FusSession()
         await self._post(client, session, "NF_SmartDownloadGenerateNonce.do")
+        if not session.nonce:
+            # Every later request is signed with this. Absent, they go out as `nonce=""`,
+            # `signature=""` and a LOGIC_CHECK of the empty string — which FUS rejects one
+            # call later, blaming the call that was built correctly.
+            raise SamsungProtocolError(
+                "SamsungDriver.fetch: NF_SmartDownloadGenerateNonce.do answered 200 without a "
+                "NONCE header. Every later request is signed with that value, so there is "
+                "nothing to sign with and the protocol has changed."
+            )
         inform = await self._post(
             client,
             session,
@@ -707,6 +815,9 @@ class SamsungDriver(FirmwareDriver):
                 f"for {binary.region}; refusing to download firmware for a region nobody asked "
                 "for"
             )
+        # The download authorisation. Its status is checked inside `_post` with every other
+        # FUS response, which is the point: declined, it answers HTTP 200 and its only other
+        # symptom is a 401 on the binary one request later.
         await self._post(
             client,
             session,
@@ -721,9 +832,30 @@ class SamsungDriver(FirmwareDriver):
                 f"SamsungDriver.fetch: ref belongs to driver {ref.driver!r}, not {self.name!r}; "
                 "route it to the driver that produced it"
             )
+        if ref.md5 is not None:
+            # Refused rather than dropped. Every other driver hands `published_digest()` to
+            # `download_to_file`, and doing that here would check an md5 of the CIPHERTEXT
+            # against a digest an operator computed over an archive — a mismatch that reads as
+            # a corrupt download and is not one. `sha256` is honoured, against the plaintext.
+            raise FirmwareInputError(
+                f"SamsungDriver.fetch: {ref.build} pins an md5. FUS serves an encrypted body, "
+                "so a digest can only be checked against the decrypted archive, and this "
+                "driver computes sha256 there — pin `sha256` instead."
+            )
         client, owned = self._open_client()
         try:
             session, binary = await self.resolve(client, ref)
+            if binary.size > self._max_archive_bytes:
+                # FUS states the size before the first byte, so the ceiling is enforced here
+                # rather than only mid-stream by `download_to_file`. Otherwise a build past it
+                # costs a full-ceiling transfer, and that much of a scratch disk shared with
+                # every other job, before anything says no.
+                raise FirmwareDownloadError(
+                    f"SamsungDriver.fetch: FUS declares {binary.size} bytes for {ref.build}, "
+                    f"past the {self._max_archive_bytes}-byte ceiling. Raise "
+                    "MAX_FIRMWARE_ARCHIVE_BYTES if a firmware is genuinely that large; nothing "
+                    "was downloaded."
+                )
             dest = dest_dir / ref.archive_filename
             encrypted = dest.with_name(dest.name + ENCRYPTED_SUFFIX)
             logger.info(
@@ -757,6 +889,17 @@ class SamsungDriver(FirmwareDriver):
                     binary.key,
                     context=f"SamsungDriver.fetch[{ref.build}]",
                 )
+                if ref.sha256 is not None and sha256 != ref.sha256:
+                    # An operator can pin a digest in a job's params. For every other driver
+                    # that pin is checked against the download; here the download is
+                    # ciphertext, so it is checked against the PLAINTEXT this driver keeps —
+                    # which is the artifact the digest identifies everywhere else.
+                    raise FirmwareDownloadError(
+                        f"SamsungDriver.fetch: {ref.build} decrypted to sha256 {sha256}, but "
+                        f"this job pinned {ref.sha256}. The pin is checked against the "
+                        "decrypted archive, since FUS serves ciphertext and publishes no "
+                        "digest of either form."
+                    )
                 encrypted.replace(dest)
             except BaseException:
                 # Cancellation included: a reclaim lands here holding gigabytes that nothing
@@ -766,12 +909,23 @@ class SamsungDriver(FirmwareDriver):
         finally:
             if owned:
                 await client.aclose()
-        logger.warning(
-            "%s decrypted to %d bytes, sha256=%s: FUS publishes no digest of the plaintext "
-            "this pipeline keeps, so the archive is integrity-unverified — what IS proven is "
-            "that it decrypted to valid PKCS#7 padding and the zip magic",
+        if ref.sha256 is None:
+            logger.warning(
+                "%s decrypted to %d bytes, sha256=%s: FUS publishes no digest of the plaintext "
+                "this pipeline keeps, so the archive is integrity-unverified — what IS proven "
+                "is that it decrypted to valid PKCS#7 padding and the zip magic",
+                dest.name,
+                dest.stat().st_size,
+                sha256,
+            )
+            return DownloadedArchive(path=dest, sha256=sha256, integrity_verified=False)
+        logger.info(
+            "%s decrypted to %d bytes and matches the sha256 this job pinned (%s)",
             dest.name,
             dest.stat().st_size,
             sha256,
         )
-        return DownloadedArchive(path=dest, sha256=sha256, integrity_verified=False)
+        # Verified against a digest a HUMAN supplied, which is the only kind available here:
+        # the source publishes none. Same meaning the field carries everywhere else — somebody
+        # could prove these bytes are the bytes that were meant.
+        return DownloadedArchive(path=dest, sha256=sha256, integrity_verified=True)

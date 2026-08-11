@@ -614,6 +614,15 @@ SAMSUNG_BINARY_NAME = "SM-S911U_2_20260708221800_qd55e39o59_fac.zip.enc4"
 # Measured against the live server on 2026-08-11, not recomputed here: this is the key that
 # actually decrypted the first block of the real 11,565,187,312-byte archive to `PK\x03\x04`.
 SAMSUNG_KEY = bytes.fromhex("b7f921b15f9e3004f4241aaa2b7f4a82")
+# What `NF_SmartDownloadGenerateNonce.do` really answers, measured 2026-08-11: a 228-byte
+# document carrying `<Status>200</Status>` alongside the NONCE header. Copied here because an
+# empty body is NOT what production sees, and a mock that serves one hides the status check
+# that every FUS response now goes through.
+SAMSUNG_NONCE_RESPONSE = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><FUSMsg><FUSHdr>'
+    "<ProtoVer>1.0</ProtoVer><SessionID></SessionID><MsgID>1</MsgID></FUSHdr><FUSBody>"
+    "<Results><CmdRef>2</CmdRef><Status>200</Status></Results></FUSBody></FUSMsg>"
+)
 
 
 def samsung_settings(**overrides) -> Settings:
@@ -652,6 +661,8 @@ def samsung_client(
     inform: str | None = None,
     body: bytes | None = None,
     declared_size: int | None = None,
+    init_status: str = "S00",
+    nonce_header: bool = True,
 ) -> httpx.AsyncClient:
     """The whole chain: the public index, the three FUS posts, and the binary.
 
@@ -685,9 +696,9 @@ def samsung_client(
             return httpx.Response(200, text=document)
         if url.startswith(DOWNLOAD_URL):
             return httpx.Response(200, content=body if body is not None else b"")
-        headers = {"NONCE": next(nonces)}
+        headers = {"NONCE": next(nonces)} if nonce_header else {}
         if url.endswith("GenerateNonce.do"):
-            return httpx.Response(200, text="", headers=headers)
+            return httpx.Response(200, text=SAMSUNG_NONCE_RESPONSE, headers=headers)
         if url.endswith("BinaryInform.do"):
             return httpx.Response(
                 200,
@@ -696,7 +707,10 @@ def samsung_client(
             )
         return httpx.Response(
             200,
-            text="<FUSMsg><FUSBody><Results><Status>S00</Status></Results></FUSBody></FUSMsg>",
+            text=(
+                "<FUSMsg><FUSBody><Results><Status>"
+                f"{init_status}</Status></Results></FUSBody></FUSMsg>"
+            ),
             headers=headers,
         )
 
@@ -1123,6 +1137,204 @@ async def test_samsung_fetch_refuses_a_body_shorter_than_the_size_fus_declared(t
     assert str(len(whole)) in str(excinfo.value)
     assert str(len(whole) - AES_BLOCK_BYTES) in str(excinfo.value)
     assert list(tmp_path.iterdir()) == []
+
+
+async def test_samsung_fetch_stops_when_the_download_authorisation_is_declined(tmp_path):
+    """FUS declines this call with HTTP 200 and a status in the body. Unread, its only other
+    symptom is a 401 on the binary one request later, which `download_to_file` reports as an
+    expired or withdrawn URL — sending a reader to the index instead of to the handshake.
+
+    The observable is the request list: nothing may be asked of the binary host at all.
+    """
+    seen: list[httpx.Request] = []
+    driver = SamsungDriver(
+        samsung_settings(),
+        client=samsung_client(seen=seen, body=b"never served!!!!", init_status="408"),
+    )
+
+    with pytest.raises(SamsungProtocolError) as excinfo:
+        await driver.fetch(samsung_ref(), tmp_path)
+
+    assert "408" in str(excinfo.value)
+    assert not [request for request in seen if str(request.url).startswith(DOWNLOAD_URL)]
+    assert [request.url.path.rsplit("/", 1)[-1] for request in seen][-1] == (
+        "NF_SmartDownloadBinaryInitForMass.do"
+    )
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_samsung_fetch_stops_when_the_nonce_call_issues_no_nonce(tmp_path):
+    """Every later request is signed with it. Absent, they go out as `nonce=""` with a
+    LOGIC_CHECK of the empty string, and FUS refuses the call AFTER this one."""
+    seen: list[httpx.Request] = []
+    driver = SamsungDriver(samsung_settings(), client=samsung_client(seen=seen, nonce_header=False))
+
+    with pytest.raises(SamsungProtocolError) as excinfo:
+        await driver.fetch(samsung_ref(), tmp_path)
+
+    assert "NONCE header" in str(excinfo.value)
+    assert [request.url.path.rsplit("/", 1)[-1] for request in seen] == [
+        "version.xml",
+        "NF_SmartDownloadGenerateNonce.do",
+    ]
+
+
+async def test_samsung_fetch_refuses_a_build_bigger_than_the_ceiling_before_downloading(tmp_path):
+    """FUS states the size before the first byte, so a build past the ceiling costs nothing.
+    Left to `download_to_file`, it costs a full-ceiling transfer of a shared scratch disk."""
+    seen: list[httpx.Request] = []
+    driver = SamsungDriver(
+        samsung_settings(),
+        client=samsung_client(seen=seen, body=b"x" * 16, declared_size=64 * 1024**3),
+    )
+
+    with pytest.raises(FirmwareDownloadError) as excinfo:
+        await driver.fetch(samsung_ref(), tmp_path)
+
+    assert "nothing was downloaded" in str(excinfo.value)
+    assert not [request for request in seen if str(request.url).startswith(DOWNLOAD_URL)]
+
+
+async def test_samsung_fetch_checks_a_pinned_sha256_against_the_decrypted_archive(tmp_path):
+    """Every other driver checks a pinned digest against the download. Here the download is
+    ciphertext, so the pin is checked against the plaintext — the artifact the digest names
+    everywhere else in this pipeline."""
+    plaintext = samsung_plain_archive()
+    digest = hashlib.sha256(plaintext).hexdigest()
+    driver = SamsungDriver(
+        samsung_settings(), client=samsung_client(body=pkcs7_encrypt(plaintext, SAMSUNG_KEY))
+    )
+    ref = FirmwareRef(
+        driver="samsung",
+        device=SAMSUNG_MODEL,
+        build=SAMSUNG_BUILD,
+        url=samsung_index_url(),
+        sha256=digest,
+    )
+
+    archive = await driver.fetch(ref, tmp_path)
+
+    assert archive.sha256 == digest
+    # A human supplied this one, which is the only kind available: the source publishes none.
+    assert archive.integrity_verified is True
+
+
+async def test_samsung_fetch_refuses_a_pinned_sha256_that_the_plaintext_does_not_match(tmp_path):
+    driver = SamsungDriver(
+        samsung_settings(),
+        client=samsung_client(body=pkcs7_encrypt(samsung_plain_archive(), SAMSUNG_KEY)),
+    )
+    ref = FirmwareRef(
+        driver="samsung",
+        device=SAMSUNG_MODEL,
+        build=SAMSUNG_BUILD,
+        url=samsung_index_url(),
+        sha256="0" * 64,
+    )
+
+    with pytest.raises(FirmwareDownloadError) as excinfo:
+        await driver.fetch(ref, tmp_path)
+
+    assert "pinned" in str(excinfo.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_samsung_fetch_refuses_a_pinned_md5_rather_than_dropping_it(tmp_path):
+    """It cannot be checked: an md5 of the ciphertext is not the digest anyone computed, and
+    this driver digests the plaintext in sha256. Refused, not silently ignored."""
+    seen: list[httpx.Request] = []
+    driver = SamsungDriver(samsung_settings(), client=samsung_client(seen=seen))
+    ref = FirmwareRef(
+        driver="samsung",
+        device=SAMSUNG_MODEL,
+        build=SAMSUNG_BUILD,
+        url=samsung_index_url(),
+        md5="0" * 32,
+    )
+
+    with pytest.raises(FirmwareInputError) as excinfo:
+        await driver.fetch(ref, tmp_path)
+
+    assert "pin `sha256` instead" in str(excinfo.value)
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        # Escaped in the document, so it PARSES and the markup arrives as text — the shape
+        # that actually reaches the request builder. Raw markup would only break the parser.
+        "S911USQS8FZG1/&lt;/Data&gt;&lt;/BINARY_SW_VERSION&gt;&lt;EVIL&gt;&lt;Data&gt;x/PHONE",
+        "S911USQS8FZG1/CSC/PHONE/EXTRA/TOOMANY",
+        "S911USQS8FZG1 /CSC/PHONE",
+    ],
+)
+async def test_samsung_refuses_an_index_version_that_could_reshape_the_request_body(version):
+    """The one external field that reaches an outgoing FUS body. Refused rather than escaped,
+    the same call every neighbouring field gets — and note the first case keeps its PDA half
+    intact, so the build-matches-the-ref check cannot catch it."""
+    document = samsung_fixture("version_index").replace(
+        "S911USQS8FZG1/S911UOYN8FZG1/S911USQS8FZG1", version
+    )
+    driver = SamsungDriver(
+        samsung_settings(), client=samsung_client(index={samsung_index_url(): document})
+    )
+
+    with pytest.raises(SamsungProtocolError) as excinfo:
+        await driver.list_available()
+
+    assert "request body" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("model_type", ["9</Data></DEVICE_MODEL_TYPE><EVIL><Data>x", "nine", ""])
+def test_samsung_refuses_a_model_type_that_could_reshape_the_request_body(model_type):
+    document = samsung_fixture("binary_inform").replace(
+        "<DEVICE_MODEL_TYPE><Data>9</Data>", f"<DEVICE_MODEL_TYPE><Data>{model_type}</Data>"
+    )
+
+    with pytest.raises(SamsungProtocolError):
+        parse_binary_inform(document, model=SAMSUNG_MODEL, region=SAMSUNG_REGION)
+
+
+def test_samsung_refuses_a_binary_name_too_short_for_the_authorisation_slice():
+    """The init LOGIC_CHECK is `filename[-25:-9]`. Below 25 characters that slice silently
+    yields fewer than 16, so the request goes out wrong with nothing raised."""
+    document = samsung_fixture("binary_inform").replace(SAMSUNG_BINARY_NAME, "a.zip.enc4")
+
+    with pytest.raises(SamsungProtocolError) as excinfo:
+        parse_binary_inform(document, model=SAMSUNG_MODEL, region=SAMSUNG_REGION)
+
+    assert "25 characters" in str(excinfo.value)
+
+
+async def test_samsung_stops_reading_a_response_that_passes_the_ceiling():
+    """The ceiling is on what ARRIVES, not on what has already been buffered.
+
+    The observable is how much the SERVER got to send, not the message: a parse-time check on
+    `len(text)` raises the same way after taking the whole body into memory, so a test that
+    only asserts "it raised" cannot tell the two apart. (Measured: widening the streaming cap
+    1024x left such an assertion green.)
+    """
+    served_chunks = 0
+    chunk = b"<versioninfo>" + b" " * (64 * 1024)
+
+    async def body():
+        nonlocal served_chunks
+        for _ in range(256):  # 16 MB if it is all read
+            served_chunks += 1
+            yield chunk
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body())
+
+    driver = SamsungDriver(samsung_settings(), client=mock_client(handler))
+
+    with pytest.raises(SamsungProtocolError) as excinfo:
+        await driver.list_available()
+
+    assert "ceiling" in str(excinfo.value)
+    # 1 MiB ceiling over 64 KB chunks: it stops around 17, and must never reach 256.
+    assert served_chunks <= 20, served_chunks
 
 
 async def test_samsung_fetch_refuses_a_build_the_index_no_longer_publishes(tmp_path):
