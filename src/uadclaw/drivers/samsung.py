@@ -141,8 +141,9 @@ def parse_xml(text: str, *, context: str) -> ElementTree.Element:
     """
     if len(text) > MAX_RESPONSE_BYTES:
         raise SamsungProtocolError(
-            f"{context}: the response is {len(text)} bytes, past the {MAX_RESPONSE_BYTES}-byte "
-            "ceiling for a FUS document (a real one is 1.7-8 KB); refusing to parse it"
+            f"{context}: the response is {len(text)} characters, past the "
+            f"{MAX_RESPONSE_BYTES}-character ceiling for a FUS document (a real one is 1.7-8 "
+            "KB); refusing to parse it"
         )
     if _DTD_PATTERN.search(text[:_DTD_SNIFF_BYTES]):
         raise SamsungProtocolError(
@@ -189,13 +190,9 @@ def normalize_version(version: str) -> str:
     return "/".join(parts)
 
 
-def latest_version(text: str, *, model: str, region: str, source_url: str) -> str:
-    """The four-part `BINARY_SW_VERSION` this (model, CSC) pair currently offers.
-
-    Only `<latest>` is read. The `<upgrade>` list beside it carries older versions ordered by
-    an `rcount` attribute whose meaning is not measured, and whether FUS still resolves one is
-    unproven — so offering them would be a catalogue of builds that may not download.
-    """
+def _latest_element(text: str, *, model: str, region: str, source_url: str) -> ElementTree.Element:
+    """The `<latest>` element, or a named failure. One parse, because both callers below want
+    a different part of the same element and the document is a third party's."""
     root = parse_xml(text, context=f"samsung index[{model}/{region}]")
     latest = root.find("./firmware/version/latest")
     if latest is None or not (latest.text or "").strip():
@@ -205,7 +202,18 @@ def latest_version(text: str, *, model: str, region: str, source_url: str) -> st
             "empty index means the document's shape changed, not that Samsung published "
             "nothing for it."
         )
-    return normalize_version(latest.text.strip())
+    return latest
+
+
+def latest_version(text: str, *, model: str, region: str, source_url: str) -> str:
+    """The four-part `BINARY_SW_VERSION` this (model, CSC) pair currently offers.
+
+    Only `<latest>` is read. The `<upgrade>` list beside it carries older versions ordered by
+    an `rcount` attribute whose meaning is not measured, and whether FUS still resolves one is
+    unproven — so offering them would be a catalogue of builds that may not download.
+    """
+    latest = _latest_element(text, model=model, region=region, source_url=source_url)
+    return normalize_version((latest.text or "").strip())
 
 
 def parse_version_index(text: str, *, model: str, region: str, source_url: str) -> FirmwareRef:
@@ -220,13 +228,11 @@ def parse_version_index(text: str, *, model: str, region: str, source_url: str) 
     download URL until an authenticated inform call produces one. `fetch` re-reads this same
     document to resolve it, so the ref names where the offer came from and nothing else.
     """
-    version = latest_version(text, model=model, region=region, source_url=source_url)
-    latest = parse_xml(text, context=f"parse_version_index[{model}/{region}]").find(
-        "./firmware/version/latest"
-    )
+    latest = _latest_element(text, model=model, region=region, source_url=source_url)
+    version = normalize_version((latest.text or "").strip())
     # `o="16"` on that element is the Android version, and it is the only place either
     # document states one.
-    android = latest.attrib.get("o") if latest is not None else None
+    android = latest.attrib.get("o")
     try:
         return FirmwareRef(
             driver=SamsungDriver.name,
