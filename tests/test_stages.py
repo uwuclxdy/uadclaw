@@ -292,3 +292,62 @@ async def test_a_stage_without_scratch_fails_loudly(db_session_factory):
 
     with pytest.raises(StageInputError):
         await acquire_stage(ctx)
+
+
+async def test_the_samsung_driver_reaches_the_acquire_stage_and_lands_a_plain_zip(
+    db_env, db_session_factory, monkeypatch, tmp_path
+):
+    """The real driver through the real stage, on the real registry.
+
+    Two things only this path proves. A Samsung model name has to survive job creation —
+    `SM-S911U` carries a hyphen, and `FirmwareJobParams.device` is the boundary that would
+    422 it. And `acquire` has to end with a DECRYPTED archive on disk: `unpack` dispatches on
+    magic bytes, so an `.enc4` handed forward would fail there with nothing pointing back here.
+    """
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    from test_firmware_drivers import SAMSUNG_KEY, samsung_client, samsung_plain_archive
+    from uadclaw.drivers.samsung import SamsungDriver
+
+    plaintext = samsung_plain_archive()
+    padding = 16 - len(plaintext) % 16
+    encryptor = Cipher(algorithms.AES(SAMSUNG_KEY), modes.ECB()).encryptor()
+    body = encryptor.update(plaintext + bytes([padding]) * padding) + encryptor.finalize()
+
+    monkeypatch.setenv("SAMSUNG_MODELS", "SM-S911U")
+    monkeypatch.setenv("SAMSUNG_REGIONS", "XAA")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        firmware_module,
+        "_driver_factories",
+        lambda: {
+            "samsung": lambda settings: SamsungDriver(settings, client=samsung_client(body=body))
+        },
+    )
+    async with db_session_factory() as session, session.begin():
+        job = await jobs_module.create_job(
+            session,
+            kind=JobKind.FIRMWARE_ANALYSIS.value,
+            params={"driver": "samsung", "device": "SM-S911U"},
+        )
+        job_id = job.id
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    await acquire_stage(
+        StageContext(
+            job_id=job_id, attempt=1, scratch_dir=scratch, session_factory=db_session_factory
+        )
+    )
+
+    state = read_state(scratch)
+    assert state.ref.device == "SM-S911U"
+    assert state.ref.build == "S911USQS8FZG1_XAA"
+    assert state.integrity_verified is False
+    archive = Path(state.archive_path)
+    assert archive.name == "samsung-SM-S911U-S911USQS8FZG1_XAA.zip"
+    assert archive.read_bytes() == plaintext
+    assert archive.read_bytes()[:4] == b"PK\x03\x04"
+    # Nothing encrypted is left for retention to miss.
+    assert [path.name for path in archive.parent.iterdir()] == [archive.name]
+    get_settings.cache_clear()
