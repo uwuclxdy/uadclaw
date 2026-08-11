@@ -28,6 +28,7 @@ from uadclaw.models import (
     JOB_KIND_NEEDS_SCRATCH,
     JOB_KIND_STAGES,
     LOG_TAIL_MAX_CHARS,
+    PIPELINE_STAGES,
     Job,
     JobKind,
     JobStageRun,
@@ -70,6 +71,14 @@ def first_stage(kind: str) -> str:
     return stages_for(kind)[0]
 
 
+def _is_retired_stage(current: str, stages: tuple[str, ...]) -> bool:
+    """Whether `current` is a real pipeline stage this kind used to reach and has since
+    stopped walking — strictly later than its last stage in the design's own order."""
+    if current not in PIPELINE_STAGES:
+        return False
+    return PIPELINE_STAGES.index(current) > PIPELINE_STAGES.index(stages[-1])
+
+
 def next_stage(current: str | None, kind: str) -> str | None:
     """The stage after `current` for this KIND, the kind's first stage if nothing has run
     yet, or None once its last stage has completed.
@@ -85,6 +94,23 @@ def next_stage(current: str | None, kind: str) -> str | None:
     try:
         idx = stages.index(current)
     except ValueError as exc:
+        # A stage this kind no longer walks, sitting AFTER its last one in design order, is
+        # an upgrade artifact rather than a caller bug: a firmware job parked at
+        # `corroborate` was recorded when FIRMWARE_ANALYSIS no-opped its way through the four
+        # trailing stages, and it has already completed everything the current walk asks of
+        # it. Answering "done" retires it as SUCCEEDED; raising would fail every such row in
+        # a live database on its next attempt, for work it actually finished. An EARLIER
+        # stage still raises — `next_stage("rule_ladder", "classification")` is a real caller
+        # bug, and swallowing it would let a job skip the stage it was about to run.
+        if _is_retired_stage(current, stages):
+            logger.info(
+                "job stage %r predates the current %s pipeline and sits after its last "
+                "stage (%s); treating the job as complete rather than failing it",
+                current,
+                kind,
+                stages[-1],
+            )
+            return None
         raise JobValidationError(
             f"next_stage: stage {current!r} is not one of {stages} for kind {kind!r}; "
             "fix the caller to pass a stage this kind actually walks"

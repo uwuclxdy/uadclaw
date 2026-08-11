@@ -80,6 +80,29 @@ def test_a_stage_from_another_kind_is_rejected_rather_than_walked():
         next_stage("acquire", "classification")
 
 
+@pytest.mark.parametrize("retired", ["llm", "corroborate", "triage", "branch"])
+def test_a_firmware_job_parked_on_a_retired_stage_completes_instead_of_failing(retired):
+    """Reviewer finding 5, the upgrade path. FIRMWARE_ANALYSIS used to no-op through these
+    four, so a live database can hold rows sitting on any of them; each has already done
+    everything the current walk asks, so the truthful answer is "done" rather than a failure
+    for work it actually finished."""
+    assert next_stage(retired, "firmware_analysis") is None
+
+
+@pytest.mark.parametrize("earlier", ["acquire", "extract_facts", "rule_ladder"])
+def test_a_stage_EARLIER_than_a_kinds_last_still_raises(earlier):
+    """The boundary the retirement rule must not swallow. `rule_ladder` precedes `llm` in the
+    design order, so a classification job sitting on it is a real caller bug — answering
+    "done" there would let a job skip the one stage it exists to run."""
+    with pytest.raises(JobValidationError, match="not one of"):
+        next_stage(earlier, "classification")
+
+
+def test_a_name_that_is_not_a_pipeline_stage_at_all_still_raises():
+    with pytest.raises(JobValidationError, match="not one of"):
+        next_stage("definitely_not_a_stage", "firmware_analysis")
+
+
 def test_stages_for_rejects_an_unknown_kind():
     with pytest.raises(JobValidationError, match="no stage list"):
         stages_for("not-a-real-kind")
