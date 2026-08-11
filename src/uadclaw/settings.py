@@ -128,6 +128,48 @@ class Settings(BaseSettings):
     # empty file rather than treating the whole corpus as new.
     upstream_list_path: Path = Path("/data/uad_lists.json")
 
+    # Classification (task 7). Deliberately NOT in `_reject_blank` below, unlike the other
+    # three credentials: the whole deterministic half of this pipeline (acquire through
+    # rule_ladder, milestone M2) is independently useful and must boot on a box that has no
+    # DeepSeek account at all. A blank key is refused at the point of use instead, by
+    # `deepseek.require_api_key`, naming the setting and where to put it.
+    deepseek_key: str = ""
+    # The OpenAI-format endpoint, never `/anthropic`. `usage.prompt_cache_hit_tokens` and
+    # `prompt_cache_miss_tokens` are what the cost measurement (task 8) reads, and the
+    # Anthropic wire format does not carry them.
+    deepseek_base_url: str = "https://api.deepseek.com"
+    # Cheapest of the two live models and 5x the concurrency ceiling of `deepseek-v4-pro`
+    # (2500 vs 500). The legacy `deepseek-chat`/`deepseek-reasoner` ids no longer resolve.
+    deepseek_model: str = "deepseek-v4-flash"
+    # Thinking mode is ON by default on v4-flash and its reasoning tokens bill as output.
+    # Measured on one identical prompt: default 110 completion tokens (104 reasoning),
+    # `reasoning_effort: "low"` 58 (52), `thinking: {"type": "disabled"}` 5 and no reasoning
+    # field at all. So `low` is a discount and `disabled` is the actual off switch. Left ON
+    # here — the API's own default — because whether disabling it costs description quality
+    # is what task 8's measurement answers, and a setting is how both halves get measured.
+    deepseek_thinking: bool = True
+    # Sized for reasoning PLUS the JSON body, not the body alone: reasoning is charged
+    # against this ceiling, and a budget that only covers the answer returns
+    # `finish_reason="length"` with EMPTY content — indistinguishable from DeepSeek's
+    # documented empty-content bug from the envelope, and with the opposite fix.
+    deepseek_max_tokens: int = 4096
+    # Concurrency is account-wide across every key (there is no documented RPM or TPM), and
+    # the account is shared with whatever else is talking to DeepSeek, so this defaults far
+    # below the 2500 ceiling rather than near it.
+    deepseek_max_concurrency: int = 4
+    # Total attempts per package, not retries on top of one: 3 means one call plus two
+    # retries. The retry/backoff layer is the client's alone — the stage must not wrap it in
+    # a second one, or the two compound silently.
+    deepseek_max_attempts: int = 3
+    # First backoff, doubled per attempt. DeepSeek prescribes none and sends no Retry-After.
+    deepseek_retry_backoff_seconds: float = 2.0
+    # Per-request read/connect deadline. The API holds a connection open for up to 10 minutes
+    # before inference starts, so this is generous on purpose.
+    deepseek_request_timeout_seconds: float = 300.0
+    # How many packages one classification job may call the API for. A ceiling on spend that
+    # a job's own params can lower but never raise, so a mis-typed job cannot bill a corpus.
+    classification_max_packages: int = 500
+
     @field_validator("postgres_password", "auth_password", "session_secret")
     @classmethod
     def _reject_blank(cls, value: str) -> str:
@@ -154,11 +196,25 @@ class Settings(BaseSettings):
         "sweep_interval_seconds",
         "stats_lookback_seconds",
         "firmware_http_timeout_seconds",
+        "deepseek_request_timeout_seconds",
+        "deepseek_retry_backoff_seconds",
     )
     @classmethod
     def _reject_non_positive_duration(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("must be > 0")
+        return value
+
+    @field_validator(
+        "deepseek_max_tokens",
+        "deepseek_max_concurrency",
+        "deepseek_max_attempts",
+        "classification_max_packages",
+    )
+    @classmethod
+    def _reject_non_positive_count(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("must be >= 1")
         return value
 
     @field_validator("max_apk_parse_failure_ratio")

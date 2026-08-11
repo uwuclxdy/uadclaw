@@ -5,6 +5,10 @@ secrets:
     file: ./secrets/auth_password
   session_secret:
     file: ./secrets/session_secret
+  # Only the worker mounts this one: nothing the web service serves calls the model, and a
+  # credential that buys tokens has no business inside the internet-facing container.
+  deepseek_key:
+    file: ./secrets/deepseek_key
 
 volumes:
   postgres-data:
@@ -93,6 +97,14 @@ services:
       POSTGRES_PORT: "5432"
       POSTGRES_USER: uadclaw
       POSTGRES_DB: uadclaw
+    secrets:
+      # `postgres_password` is not optional here and was missing until 2026-08-11: with no
+      # secrets mounted, /run/secrets is empty, POSTGRES_PASSWORD is unset, and `Settings()`
+      # raises before the worker's first line of work.
+      - postgres_password
+      # The classification stage's credential. Absent, every deterministic stage still runs
+      # and only a `classification` job fails, naming this setting.
+      - deepseek_key
     depends_on:
       postgres:
         condition: service_healthy
