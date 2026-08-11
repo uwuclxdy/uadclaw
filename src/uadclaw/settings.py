@@ -6,6 +6,7 @@ no-op when the directory does not exist, which is what makes the fallback work.
 """
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import field_validator
 from pydantic_settings import (
@@ -37,6 +38,32 @@ class Settings(BaseSettings):
     # Plain-HTTP LAN-only deployment by default; flip on if ever put behind TLS.
     cookie_secure: bool = False
 
+    # Worker / job substrate (task 2).
+    scratch_root: Path = Path("/scratch")
+    worker_pool_size: int = 1
+    # How long a job/lease heartbeat may go stale before it is reclaimed from a dead worker.
+    lease_stale_after_seconds: float = 300.0
+    # How often a held lease's heartbeat is refreshed while a job runs.
+    heartbeat_interval_seconds: float = 30.0
+    # How often a lease-acquire attempt is retried while scratch is occupied.
+    lease_poll_interval_seconds: float = 0.2
+    # How often an idle worker slot polls for a queued job.
+    job_claim_poll_interval_seconds: float = 1.0
+    # Total bytes of scratch artifacts kept on disk for jobs no longer actively owned
+    # (failed, orphaned, or a superseded attempt); oldest evicted first once a new one
+    # would push the total over this ceiling.
+    failure_retention_bytes: int = 5_000_000_000
+    # A job stuck CLAIMED/RUNNING past this many claims is parked FAILED instead of
+    # requeued forever ahead of healthy jobs (claim ordering is FIFO by created_at, so an
+    # endlessly-reclaimed job would otherwise jump the queue on every reclaim).
+    max_job_attempts: int = 5
+    # How often the periodic sweep (stale-job/lease reclaim, retention ceiling) runs while
+    # the worker is up, on top of the one-time sweep at startup.
+    sweep_interval_seconds: float = 60.0
+    # How far back /stats looks when aggregating. Ends at "now", not at the last time
+    # something finished, so a wedged system (nothing finishing) still reads accurately.
+    stats_lookback_seconds: float = 86_400.0
+
     @field_validator("postgres_password", "auth_password", "session_secret")
     @classmethod
     def _reject_blank(cls, value: str) -> str:
@@ -46,6 +73,41 @@ class Settings(BaseSettings):
         # the first exploited request.
         if not value.strip():
             raise ValueError("must not be empty or whitespace-only")
+        return value
+
+    @field_validator("worker_pool_size")
+    @classmethod
+    def _reject_non_positive_pool(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("worker_pool_size must be >= 1")
+        return value
+
+    @field_validator(
+        "lease_stale_after_seconds",
+        "heartbeat_interval_seconds",
+        "lease_poll_interval_seconds",
+        "job_claim_poll_interval_seconds",
+        "sweep_interval_seconds",
+        "stats_lookback_seconds",
+    )
+    @classmethod
+    def _reject_non_positive_duration(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("must be > 0")
+        return value
+
+    @field_validator("failure_retention_bytes")
+    @classmethod
+    def _reject_non_positive_bytes(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("failure_retention_bytes must be > 0")
+        return value
+
+    @field_validator("max_job_attempts")
+    @classmethod
+    def _reject_non_positive_attempts(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("max_job_attempts must be >= 1")
         return value
 
     @property
