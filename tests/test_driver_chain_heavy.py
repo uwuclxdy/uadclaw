@@ -180,7 +180,6 @@ async def _apk_partitions(session_factory) -> dict[str, int]:
 
 XIAOMI_DEVICE = "water_global"
 XIAOMI_BUILD = "V14.0.24.0.TGOMIXM"
-XIAOMI_ARCHIVE_BYTES = 1_523_069_732
 XIAOMI_APKS_BY_PARTITION = {"product": 79, "system": 136, "vendor": 12}
 XIAOMI_CHAIN = {"apks": 227, "artifacts": 324, "packages": 204, "parse_failures": 0}
 XIAOMI_QUEUE = {"already_upstream": 182, "queued": 22, "merged_packages": 204}
@@ -238,7 +237,10 @@ async def test_xiaomi_water_global_end_to_end(db_env, db_session_factory, monkey
 
 NOTHING_DEVICE = "FroggerPro"
 NOTHING_BUILD = "B4.1-260723-1820"
-NOTHING_ARCHIVE_BYTES = 6_139_281_340
+# sha256 of the three volumes concatenated in order, i.e. `cat *.7z.00* | sha256sum` over
+# the 6,139,281,340 bytes the release publishes. Pins the join as byte-exact rather than
+# merely producing something 7z happens to open.
+NOTHING_ARCHIVE_SHA256 = "b6c8528eab7facbe21aa3adad9e7f892025d9975cc4dc4bb57673f8da3720c2a"
 NOTHING_APKS_BY_PARTITION = {"odm": 4, "product": 186, "system": 83, "system_ext": 66, "vendor": 34}
 NOTHING_CHAIN = {"apks": 374, "artifacts": 668, "packages": 353, "parse_failures": 1}
 NOTHING_QUEUE = {"already_upstream": 255, "queued": 98, "merged_packages": 353}
@@ -286,6 +288,7 @@ async def test_nothing_frogger_pro_end_to_end(db_env, db_session_factory, monkey
     state = read_state(work)
     # The release's published hashes cover the images inside the archive, not the download.
     assert state.integrity_verified is False
+    assert state.archive_sha256 == NOTHING_ARCHIVE_SHA256
     assert await _apk_partitions(db_session_factory) == NOTHING_APKS_BY_PARTITION
     assert await _queue_counts(db_session_factory) == NOTHING_QUEUE
     assert state.archive_path is None
@@ -297,7 +300,6 @@ async def test_nothing_frogger_pro_end_to_end(db_env, db_session_factory, monkey
 
 MOTOROLA_DEVICE = "rtwo"
 MOTOROLA_BUILD = "V1TRS35H.60-33-7_RETAIL"
-MOTOROLA_ARCHIVE_BYTES = 5_783_742_066
 MOTOROLA_APKS_BY_PARTITION = {"product": 265, "system": 83, "system_ext": 82, "vendor": 16}
 MOTOROLA_CHAIN = {"apks": 446, "artifacts": 993, "packages": 427, "parse_failures": 0}
 MOTOROLA_QUEUE = {

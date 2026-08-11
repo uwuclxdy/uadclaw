@@ -36,6 +36,7 @@ from uadclaw.firmware import (
     FirmwareDriverDisabledError,
     FirmwareError,
     FirmwareInputError,
+    FirmwareJobParams,
     FirmwareRef,
     TermsRisk,
     driver_names,
@@ -236,6 +237,23 @@ async def test_xiaomi_fetch_refuses_a_body_whose_md5_is_wrong(tmp_path):
 
     assert "md5" in str(excinfo.value)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_job_params_carry_the_md5_so_a_pinned_xiaomi_build_is_still_verified():
+    """Without `md5` here, pinning a build outright downgrades it to an unverified download
+    of an archive whose digest the index publishes."""
+    params = FirmwareJobParams(
+        driver="xiaomi",
+        device="water_global",
+        build="V14.0.24.0.TGOMIXM",
+        url="https://cdnorg.d.miui.com/a/b.zip",
+        md5="e2f5f8046340876d29d99683d1600f26",
+    )
+
+    ref = params.as_ref()
+
+    assert ref is not None
+    assert ref.published_digest() == ("md5", "e2f5f8046340876d29d99683d1600f26")
 
 
 async def test_xiaomi_fetch_rewrites_a_bigota_url_that_arrived_from_job_params(tmp_path):

@@ -171,6 +171,10 @@ class FirmwareJobParams(BaseModel):
     build: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._-]{1,64}$")
     url: str | None = Field(default=None, pattern=r"^https://[^\s]{1,2048}$")
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    # Alongside `sha256` because a source that publishes only md5 would otherwise have its
+    # checksum silently dropped on this path: an operator who pins a Xiaomi build outright
+    # would get an integrity-unverified download of a build whose digest the index knows.
+    md5: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
     def as_ref(self) -> FirmwareRef | None:
         """The ref these params name outright, or None when the build still has to be
@@ -183,6 +187,7 @@ class FirmwareJobParams(BaseModel):
             build=self.build,
             url=self.url,
             sha256=self.sha256,
+            md5=self.md5,
         )
 
 
