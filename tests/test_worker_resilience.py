@@ -4,6 +4,7 @@ even starts (e.g. a bug in a guard itself).
 """
 
 import uadclaw.jobs as jobs_module
+from conftest import FIRMWARE_TARGET
 from uadclaw.jobs import create_job
 from uadclaw.models import Job, JobState
 from uadclaw.settings import get_settings
@@ -21,8 +22,8 @@ async def test_slot_survives_an_exception_raised_outside_run_jobs_own_try_block(
     settings = get_settings()
 
     async with db_session_factory() as session, session.begin():
-        poison_job = await create_job(session, kind="firmware_analysis")
-        healthy_job = await create_job(session, kind="firmware_analysis")
+        poison_job = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
+        healthy_job = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
         poison_id, healthy_id = poison_job.id, healthy_job.id
 
     real_needs_scratch = jobs_module.needs_scratch

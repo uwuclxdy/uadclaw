@@ -14,6 +14,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from conftest import FIRMWARE_TARGET
 from uadclaw.jobs import claim_job, create_job, fail_job, mark_running, reclaim_stale_jobs
 from uadclaw.models import Job
 from uadclaw.scratch import (
@@ -35,7 +36,7 @@ async def _claim_and_run(db_session_factory, worker_id: str) -> tuple[uuid.UUID,
     """Create, claim and mark-running a job, returning (job_id, attempt) — the identity
     every fenced write needs."""
     async with db_session_factory() as session, session.begin():
-        job = await create_job(session, kind="firmware_analysis")
+        job = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
         claimed = await claim_job(session, worker_id=worker_id)
         assert claimed.id == job.id
         await mark_running(session, claimed.id, worker_id, claimed.attempt)
@@ -261,8 +262,8 @@ async def test_retention_sweep_rechecks_state_immediately_before_evicting(
 
     async with db_session_factory() as session, session.begin():
         # Created first so claim_job's FIFO-by-created_at ordering picks this one.
-        racing_job = await create_job(session, kind="firmware_analysis")
-        stale_job = await create_job(session, kind="firmware_analysis")
+        racing_job = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
+        stale_job = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
 
     # Both directories look evictable at scan time: neither job has been claimed yet
     # (attempt 0), so a directory labeled attempt 1 for either one doesn't match the job's

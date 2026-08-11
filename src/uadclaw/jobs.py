@@ -90,17 +90,16 @@ def validate_job_params(kind: JobKind, params: dict[str, Any] | None) -> dict[st
     row exists. A firmware job whose target is misspelt is a 422 at creation rather than a
     worker that claims it, waits for the scratch lease and only then discovers the problem.
 
-    `None` stays permitted and validates to `{}`: the substrate's own tests and the no-op
-    stage registry create target-less jobs deliberately, and the acquire stage refuses one
-    with a named error of its own.
+    A missing `params` is validated, not waved through: `{"kind": "firmware_analysis"}` and
+    `{"kind": "firmware_analysis", "params": {}}` describe the same job and must get the same
+    answer. Short-circuiting on None gave one a 201 and the other a 422, and the 201 went on
+    to claim the single-occupant scratch lease before discovering it had no target.
     """
-    if params is None:
-        return {}
     model = JOB_KIND_PARAM_MODELS.get(kind)
     if model is None:
-        return dict(params)
+        return dict(params or {})
     try:
-        return model.model_validate(params).model_dump(mode="json", exclude_none=True)
+        return model.model_validate(params or {}).model_dump(mode="json", exclude_none=True)
     except ValidationError as exc:
         raise JobValidationError(
             f"create_job: params for kind={kind.value!r} are not valid: {exc}"

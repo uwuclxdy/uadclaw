@@ -165,6 +165,13 @@ async def db_session_factory(db_env):
     await engine.dispose()
 
 
+# Every FIRMWARE_ANALYSIS job needs a target: `create_job` validates params against the kind's
+# model at the boundary, so a job with no target is a 422 and never reaches a worker. The
+# substrate tests care about claiming, leases and retention rather than about which build, so
+# they all queue the same one.
+FIRMWARE_TARGET = {"driver": "pixel", "device": "comet"}
+
+
 def utcnow() -> datetime:
     return datetime.now(UTC)
 

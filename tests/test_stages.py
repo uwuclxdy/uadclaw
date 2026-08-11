@@ -6,6 +6,7 @@ stage that only works against one OEM would be the wrong shape for the six drive
 adds behind the same interface.
 """
 
+import hashlib
 import io
 import shutil
 import subprocess
@@ -15,10 +16,17 @@ from pathlib import Path
 
 import pytest
 
+from conftest import utcnow
 from uadclaw import firmware as firmware_module
 from uadclaw import jobs as jobs_module
-from uadclaw.firmware import FirmwareDriver, FirmwareRef, TermsPosture, TermsRisk
-from uadclaw.models import JobKind
+from uadclaw.firmware import (
+    DownloadedArchive,
+    FirmwareDriver,
+    FirmwareRef,
+    TermsPosture,
+    TermsRisk,
+)
+from uadclaw.models import Job, JobKind, JobState
 from uadclaw.settings import Settings, get_settings
 from uadclaw.stages import (
     PipelineState,
@@ -90,7 +98,7 @@ class StubDriver(FirmwareDriver):
         self.settings = settings
         self.image_bytes = image_bytes
 
-    async def fetch(self, ref: FirmwareRef, dest_dir: Path) -> Path:
+    async def fetch(self, ref: FirmwareRef, dest_dir: Path) -> DownloadedArchive:
         """The real Pixel layout: outer zip -> nested image zip -> raw ext4 partitions."""
         dest_dir.mkdir(parents=True, exist_ok=True)
         inner = io.BytesIO()
@@ -100,7 +108,11 @@ class StubDriver(FirmwareDriver):
         with zipfile.ZipFile(archive, "w") as zf:
             zf.writestr("comet-a2/image-comet-a2.zip", inner.getvalue())
             zf.writestr("comet-a2/bootloader-comet-x.img", b"\x00" * 64)
-        return archive
+        return DownloadedArchive(
+            path=archive,
+            sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+            integrity_verified=True,
+        )
 
 
 # --- params validation at the boundary ---------------------------------------------------
@@ -121,10 +133,20 @@ def test_a_valid_firmware_target_round_trips():
     assert params == {"driver": "pixel", "device": "comet", "build": "AD1A.1"}
 
 
-def test_a_targetless_job_is_still_creatable():
-    """The substrate's own tests and the no-op registry create jobs with no target; the
-    acquire stage is what refuses one, with a message naming what is missing."""
-    assert jobs_module.validate_job_params(JobKind.FIRMWARE_ANALYSIS, None) == {}
+def test_a_targetless_firmware_job_is_refused_at_creation():
+    """An omitted target and an empty one are the same job and must get the same answer.
+    Short-circuiting on None skipped the model entirely, so `extra="forbid"` never ran, the
+    omitted form returned 201, and the job claimed the single-occupant scratch lease before
+    discovering it had nothing to acquire."""
+    for params in (None, {}, {"driver": "pixel"}, {"device": "comet"}):
+        with pytest.raises(jobs_module.JobValidationError):
+            jobs_module.validate_job_params(JobKind.FIRMWARE_ANALYSIS, params)
+
+
+def test_a_kind_with_no_params_model_still_takes_none():
+    """Only kinds that declare a params model are gated; the mapping is what decides, not a
+    blanket rule, so task 7's DB-only kinds do not have to invent a target."""
+    assert jobs_module.JOB_KIND_PARAM_MODELS[JobKind.FIRMWARE_ANALYSIS] is not None
 
 
 # --- the acquire -> unpack handoff --------------------------------------------------------
@@ -221,10 +243,23 @@ async def test_acquire_then_unpack_extracts_the_artifacts_and_drops_everything_e
     assert list((scratch / "firmware").iterdir()) == []
 
 
-async def test_acquire_refuses_a_job_with_no_target(db_env, db_session_factory, tmp_path):
+async def test_acquire_refuses_a_job_whose_target_is_gone(db_env, db_session_factory, tmp_path):
+    """The API can no longer create one, so this writes the row directly: the stage keeps its
+    own guard for a row that predates the boundary check or was written by hand, and the
+    message has to name what is missing rather than blowing up on a KeyError."""
+    job_id = uuid.uuid4()
     async with db_session_factory() as session, session.begin():
-        job = await jobs_module.create_job(session, kind=JobKind.FIRMWARE_ANALYSIS.value)
-        job_id = job.id
+        session.add(
+            Job(
+                id=job_id,
+                kind=JobKind.FIRMWARE_ANALYSIS.value,
+                params={},
+                state=JobState.QUEUED,
+                attempt=0,
+                log_tail="",
+                created_at=utcnow(),
+            )
+        )
     get_settings.cache_clear()
     ctx = StageContext(
         job_id=job_id, attempt=1, scratch_dir=tmp_path, session_factory=db_session_factory

@@ -5,6 +5,8 @@ route — no PUBLIC_PATHS entry.
 
 import uuid
 
+from conftest import FIRMWARE_TARGET
+
 
 async def _login(client) -> None:
     resp = await client.post("/login", json={"password": "test-only-admin-password"})
@@ -23,7 +25,7 @@ async def test_get_job_route_requires_auth(client):
 
 async def test_create_job_route_returns_the_new_job(db_env, client):
     await _login(client)
-    resp = await client.post("/jobs", json={"kind": "firmware_analysis"})
+    resp = await client.post("/jobs", json={"kind": "firmware_analysis", "params": FIRMWARE_TARGET})
     assert resp.status_code == 201
     body = resp.json()
     assert body["kind"] == "firmware_analysis"
@@ -35,6 +37,22 @@ async def test_create_job_route_returns_the_new_job(db_env, client):
     uuid.UUID(body["id"])  # a real id, parses cleanly
 
 
+async def test_create_job_route_rejects_a_firmware_job_with_no_target(db_env, client):
+    """An omitted `params` and an empty one describe the same job, so they must get the same
+    answer. They did not: the omitted form returned 201 and the job went on to claim the
+    single-occupant scratch lease before discovering it had nothing to acquire."""
+    await _login(client)
+
+    for payload in (
+        {"kind": "firmware_analysis"},
+        {"kind": "firmware_analysis", "params": None},
+        {"kind": "firmware_analysis", "params": {}},
+        {"kind": "firmware_analysis", "params": {"driver": "pixel"}},
+    ):
+        resp = await client.post("/jobs", json=payload)
+        assert resp.status_code == 422, payload
+
+
 async def test_create_job_route_rejects_unknown_kind(db_env, client):
     await _login(client)
     resp = await client.post("/jobs", json={"kind": "not-a-real-kind"})
@@ -43,7 +61,9 @@ async def test_create_job_route_rejects_unknown_kind(db_env, client):
 
 async def test_get_job_route_returns_state_stage_and_log_tail(db_env, client):
     await _login(client)
-    created = (await client.post("/jobs", json={"kind": "firmware_analysis"})).json()
+    created = (
+        await client.post("/jobs", json={"kind": "firmware_analysis", "params": FIRMWARE_TARGET})
+    ).json()
 
     resp = await client.get(f"/jobs/{created['id']}")
     assert resp.status_code == 200
@@ -73,7 +93,9 @@ async def test_created_job_is_pollable_after_the_worker_runs_it(
     from uadclaw.worker import default_stage_handlers
 
     await _login(client)
-    created = (await client.post("/jobs", json={"kind": "firmware_analysis"})).json()
+    created = (
+        await client.post("/jobs", json={"kind": "firmware_analysis", "params": FIRMWARE_TARGET})
+    ).json()
     job_id = created["id"]
     job_uuid = uuid.UUID(job_id)
 

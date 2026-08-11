@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
+from conftest import FIRMWARE_TARGET
 from uadclaw.jobs import create_job
 from uadclaw.models import Job, JobState, ScratchLease, ScratchLeaseEvent
 from uadclaw.settings import get_settings
@@ -37,9 +38,9 @@ async def test_stats_endpoint_reports_real_numbers_from_real_job_runs(
     job_ids = []
     async with db_session_factory() as session, session.begin():
         for _ in range(2):
-            job = await create_job(session, kind="firmware_analysis")
+            job = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
             job_ids.append(job.id)
-        failing_job = await create_job(session, kind="firmware_analysis")
+        failing_job = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
         job_ids.append(failing_job.id)
     failing_job_id = job_ids[2]
 
@@ -116,14 +117,14 @@ async def test_stats_reflects_a_wedge_instead_of_reading_healthy(
     five_hours_ago = now - timedelta(hours=5)
 
     async with db_session_factory() as session, session.begin():
-        job_a = await create_job(session, kind="firmware_analysis")
+        job_a = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
         job_a.state = JobState.RUNNING
         job_a.started_at = six_hours_ago
         job_a.worker_id = "worker-a"
         job_a.attempt = 1
         job_a.heartbeat_at = now
 
-        job_b = await create_job(session, kind="firmware_analysis")
+        job_b = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
         job_b.state = JobState.RUNNING
         job_b.started_at = five_hours_ago
         job_b.worker_id = "worker-b"
@@ -196,7 +197,7 @@ async def test_stats_reflects_a_lease_acquired_before_the_lookback_window(
     acquired_long_ago = datetime.now(UTC) - timedelta(hours=1)
 
     async with db_session_factory() as session, session.begin():
-        job = await create_job(session, kind="firmware_analysis")
+        job = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
         session.add(
             ScratchLease(
                 id=1,

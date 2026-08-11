@@ -12,6 +12,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select
 
+from conftest import FIRMWARE_TARGET
 from uadclaw.jobs import create_job
 from uadclaw.models import ScratchLease
 from uadclaw.scratch import (
@@ -27,7 +28,7 @@ STALE_AFTER = timedelta(seconds=30)
 
 async def _make_job(db_session_factory) -> uuid.UUID:
     async with db_session_factory() as session, session.begin():
-        job = await create_job(session, kind="firmware_analysis")
+        job = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
         return job.id
 
 

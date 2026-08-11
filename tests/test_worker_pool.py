@@ -16,6 +16,7 @@ import asyncio
 
 from sqlalchemy import func, select
 
+from conftest import FIRMWARE_TARGET
 from uadclaw.jobs import create_job
 from uadclaw.models import Job, JobState, ScratchLeaseEvent
 from uadclaw.settings import get_settings
@@ -53,8 +54,8 @@ async def _run_two_scratch_jobs_sampling_running_count(
     handlers["acquire"] = _slow_scratch_write
 
     async with db_session_factory() as session, session.begin():
-        job_a = await create_job(session, kind="firmware_analysis")
-        job_b = await create_job(session, kind="firmware_analysis")
+        job_a = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
+        job_b = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
         ids = {job_a.id, job_b.id}
 
     samples: list[int] = []
@@ -168,8 +169,8 @@ async def test_job_waiting_on_a_contended_lease_is_not_falsely_reclaimed(
     handlers["acquire"] = _slow_holder
 
     async with db_session_factory() as session, session.begin():
-        job_a = await create_job(session, kind="firmware_analysis")
-        job_b = await create_job(session, kind="firmware_analysis")
+        job_a = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
+        job_b = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
         ids = {job_a.id, job_b.id}
 
     async def _both_terminal() -> bool:
@@ -209,7 +210,7 @@ async def test_resumed_job_restarts_from_its_recorded_stage_not_the_beginning(
         handlers[stage] = _make_recorder(stage)
 
     async with db_session_factory() as session, session.begin():
-        job = await create_job(session, kind="firmware_analysis")
+        job = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
         job.stage = "corpus_graph"  # pretend a previous run already got this far
         job_id = job.id
 

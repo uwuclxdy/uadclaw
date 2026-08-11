@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
+from conftest import FIRMWARE_TARGET
 from uadclaw.jobs import create_job
 from uadclaw.models import Job, JobState, ScratchLease
 from uadclaw.settings import get_settings
@@ -43,7 +44,7 @@ async def test_worker_kill_mid_job_reclaims_lease_and_job_on_restart(
     settings = get_settings()
 
     async with db_session_factory() as session, session.begin():
-        job = await create_job(session, kind="firmware_analysis")
+        job = await create_job(session, kind="firmware_analysis", params=FIRMWARE_TARGET)
         job_id = job.id
 
     env = os.environ.copy()
