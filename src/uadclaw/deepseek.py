@@ -70,7 +70,16 @@ _REASONING_PRESSURE_RATIO = 0.9
 
 
 class DeepSeekError(RuntimeError):
-    """Base for every failure of the model call. Distinct from a bug in this module."""
+    """Base for every failure of the model call. Distinct from a bug in this module.
+
+    `attempts` is how many requests actually reached the wire before this was raised, set by
+    `complete_json` on the way out. Without it a caller holding a request BUDGET cannot
+    decrement it on the failure path — it would charge one for a call that burned three, and
+    its ceiling would be three times looser than the number it prints. It is also what makes
+    a parked row's `attempts` true when the package parked because the wire gave up.
+    """
+
+    attempts: int = 0
 
 
 class DeepSeekConfigError(DeepSeekError):
@@ -282,8 +291,14 @@ class DeepSeekClient:
             body["thinking"] = {"type": "disabled"}
         return body
 
-    async def complete_json(self, *, system: str, user: str) -> ChatResult:
+    async def complete_json(
+        self, *, system: str, user: str, max_calls: int | None = None
+    ) -> ChatResult:
         """One JSON-mode completion, retried on the retryable failures only.
+
+        `max_calls` lets a caller holding a per-package request budget cap THIS call's share
+        of it, so a client whose own retry cap is larger than the budget's remainder cannot
+        overshoot it. None means "use the client's own cap".
 
         Raises the LAST failure once the attempt cap is spent, rather than a summary
         exception: the caller parks a package with a reason, and "3 attempts failed" is not a
@@ -291,20 +306,32 @@ class DeepSeekClient:
         """
         require_json_prompt(system, user)
         body = self._body(system, user)
+        allowance = self.max_attempts if max_calls is None else min(self.max_attempts, max_calls)
+        if allowance < 1:
+            raise DeepSeekConfigError(
+                f"complete_json: max_calls={max_calls} leaves no requests to make. A caller "
+                "tracking a budget must stop before it reaches zero rather than asking for a "
+                "call it cannot pay for."
+            )
         last: DeepSeekError | None = None
-        for attempt in range(1, self.max_attempts + 1):
+        for attempt in range(1, allowance + 1):
             try:
                 async with self._semaphore:
                     return await self._attempt(body, attempt)
-            except (DeepSeekUnavailableError, DeepSeekMalformedError) as exc:
+            except DeepSeekError as exc:
+                # Every failure carries what it actually spent, retryable or not: the caller's
+                # budget is in REQUESTS, so a 402 on the second attempt has to decrement two.
+                exc.attempts = attempt
+                if not isinstance(exc, DeepSeekUnavailableError | DeepSeekMalformedError):
+                    raise
                 last = exc
-                if attempt >= self.max_attempts:
+                if attempt >= allowance:
                     break
                 delay = self.retry_backoff_seconds * (2 ** (attempt - 1))
                 logger.warning(
                     "deepseek attempt %d/%d failed (%s); retrying in %.1fs",
                     attempt,
-                    self.max_attempts,
+                    allowance,
                     type(exc).__name__,
                     delay,
                 )

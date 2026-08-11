@@ -157,9 +157,9 @@ class Settings(BaseSettings):
     # the account is shared with whatever else is talking to DeepSeek, so this defaults far
     # below the 2500 ceiling rather than near it.
     deepseek_max_concurrency: int = 4
-    # Total attempts per package, not retries on top of one: 3 means one call plus two
-    # retries. The retry/backoff layer is the client's alone — the stage must not wrap it in
-    # a second one, or the two compound silently.
+    # Wire retries WITHIN one call: 3 means one request plus two on a 429/500/503 or a
+    # transport error. This bounds a single `complete_json`, never a package — the stage's
+    # own budget below is what bounds spend, so these two do not multiply.
     deepseek_max_attempts: int = 3
     # First backoff, doubled per attempt. DeepSeek prescribes none and sends no Retry-After.
     deepseek_retry_backoff_seconds: float = 2.0
@@ -169,6 +169,20 @@ class Settings(BaseSettings):
     # How many packages one classification job may call the API for. A ceiling on spend that
     # a job's own params can lower but never raise, so a mis-typed job cannot bill a corpus.
     classification_max_packages: int = 500
+    # Total billed requests ONE package may cost, counting every wire retry. The single knob
+    # that bounds per-package spend, deliberately counted in requests rather than in
+    # "attempts": a package can fail two ways — the wire (429/503, retried inside the client)
+    # and the answer (a `removal` under the floor, retried by re-prompting) — and giving each
+    # its own cap multiplies them. A 503,503,below-floor cycle spends 3 requests on one
+    # re-prompt, so two caps of 3 is a real ceiling of 9 and a row that reports 3.
+    # `package_classification.attempts` stores this count, so the row and the invoice agree.
+    #
+    # 3 rather than 6: the common rejection is a model that is confidently wrong, which costs
+    # one request per re-prompt, and 3 keeps that path at the spend it has always had. The
+    # trade is that a package hit by repeated 503s spends its budget on transport and gets
+    # fewer re-prompts — which is the right way round, because burning more requests into a
+    # service that is already failing is not a retry strategy, it is the outage getting help.
+    classification_max_calls_per_package: int = 3
 
     @field_validator("postgres_password", "auth_password", "session_secret")
     @classmethod
@@ -210,6 +224,7 @@ class Settings(BaseSettings):
         "deepseek_max_concurrency",
         "deepseek_max_attempts",
         "classification_max_packages",
+        "classification_max_calls_per_package",
     )
     @classmethod
     def _reject_non_positive_count(cls, value: int) -> int:

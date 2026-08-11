@@ -56,7 +56,12 @@ from uadclaw.corpusstore import (
     store_floors,
     store_graph,
 )
-from uadclaw.deepseek import ChatResult, DeepSeekClient, DeepSeekMalformedError
+from uadclaw.deepseek import (
+    ChatResult,
+    DeepSeekClient,
+    DeepSeekMalformedError,
+    DeepSeekUnavailableError,
+)
 from uadclaw.etcconfig import parse_config_inputs
 from uadclaw.facts import ApkFacts, ApkParseError, parse_apk
 from uadclaw.factstore import record_device_scan, store_device_facts
@@ -541,30 +546,50 @@ async def _classify_one(
     *,
     floor: RemovalFloor,
     derivation: ListDerivation,
-    max_attempts: int,
+    max_calls: int,
 ) -> tuple[Classification | None, str | None, ChatResult | None, int]:
-    """One package: call, validate, retry a bounded number of times, then give up.
+    """One package: call, validate, re-prompt while the budget lasts, then give up.
 
-    Returns `(classification, park_reason, last_result, attempts)`. Giving up returns a
-    reason rather than raising, because one package the model cannot answer must not cost
-    the other 47 — the caller records a park row and moves on.
+    Returns `(classification, park_reason, last_result, calls)`, where `calls` is the number
+    of requests that actually reached the wire. Giving up returns a reason rather than
+    raising, because one package the model cannot answer must not cost the other 47 — the
+    caller records a park row and moves on.
 
-    **This loop and the client's are one layer each, not two on top of each other.** The
-    client retries the WIRE (429/500/503, a transport error, a body that is not JSON, the
-    documented empty-content bug) and never sees a field. This loop retries the SEMANTICS: a
-    well-formed JSON object whose `removal` sits below the floor, or whose description is
-    four characters long. They are different failures with different fixes, and a validator
-    rejection re-sent unchanged is exactly the retry the design asks for.
+    **One budget, counted in requests, and it is the only ceiling.** A package can fail two
+    ways: the WIRE (429/500/503, a transport error, a body that is not JSON, the documented
+    empty-content bug), retried inside the client and invisible here; and the ANSWER (a
+    `removal` under the floor, a four-character description), retried here by re-prompting.
+    Giving each its own cap multiplies them — a `503, 503, below-floor` cycle spends three
+    requests on one re-prompt, so two caps of three is a real ceiling of nine. So this loop
+    spends `max_calls` requests total, tells the client how many of them it may use per call,
+    and charges itself what each call actually cost, on the failure path too.
 
-    A `DeepSeekBudgetError`, a bad credential and an empty balance all abort the whole job
-    rather than parking a package: none of them is about this package, and burning the
-    retry cap on each of 48 packages against a dead account is not a diagnosis.
+    An exhausted CLIENT is terminal for this package rather than a re-prompt: the client has
+    already retried the wire and the budget is spent, and re-entering the loop would send the
+    identical prompt into a transport that just refused it three times.
+
+    A `DeepSeekBudgetError`, a bad credential and an empty balance still abort the whole job:
+    none of them is about this package, and burning 48 packages' budgets against a dead
+    account is not a diagnosis.
     """
     user = user_prompt(bundle)
     last_result: ChatResult | None = None
     reason = "no attempt was made"
-    for attempt in range(1, max_attempts + 1):
-        result = await client.complete_json(system=SYSTEM_PROMPT, user=user)
+    calls = 0
+    while calls < max_calls:
+        try:
+            result = await client.complete_json(
+                system=SYSTEM_PROMPT, user=user, max_calls=max_calls - calls
+            )
+        except (DeepSeekMalformedError, DeepSeekUnavailableError) as exc:
+            # Terminal, and charged for what it really spent — `exc.attempts`, not one.
+            calls += exc.attempts
+            reason = f"after {calls} request(s): {exc}"
+            logger.warning(
+                "classification gave up on the wire: package=%s %s", bundle.package, reason
+            )
+            break
+        calls += result.attempts
         last_result = result
         try:
             payload = result.json_object()
@@ -572,11 +597,11 @@ async def _classify_one(
                 payload, bundle=bundle, floor=floor, derivation=derivation, model=result.model
             )
         except (ClassificationRejected, DeepSeekMalformedError) as exc:
-            reason = f"attempt {attempt}/{max_attempts}: {exc}"
+            reason = f"after {calls} request(s): {exc}"
             logger.warning("classification rejected: package=%s %s", bundle.package, reason)
             continue
-        return classification, None, result, attempt
-    return None, reason, last_result, max_attempts
+        return classification, None, result, calls
+    return None, reason, last_result, calls
 
 
 async def llm_stage(ctx: StageContext) -> None:
@@ -653,7 +678,7 @@ async def llm_stage(ctx: StageContext) -> None:
                     bundles[package],
                     floor=floors[package],
                     identity=identities.get(package),
-                    max_attempts=settings.deepseek_max_attempts,
+                    max_calls=settings.classification_max_calls_per_package,
                     counts=counts,
                 )
             )
@@ -673,7 +698,7 @@ async def _classify_and_store(
     *,
     floor: RemovalFloor,
     identity: PackageIdentity | None,
-    max_attempts: int,
+    max_calls: int,
     counts: dict[str, int],
 ) -> None:
     """One package end to end, in its own transaction.
@@ -688,7 +713,7 @@ async def _classify_and_store(
         partitions=tuple(item.get("partitions", ())),
     )
     classification, reason, result, attempts = await _classify_one(
-        client, bundle, floor=floor, derivation=derivation, max_attempts=max_attempts
+        client, bundle, floor=floor, derivation=derivation, max_calls=max_calls
     )
     at = datetime.now(UTC)
     usage = result.usage if result is not None else {}

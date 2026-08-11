@@ -217,10 +217,27 @@ async def park_package(
 
     A row rather than an exception: one package that keeps coming back malformed must not
     cost the other 47, and a park with no row is a package that silently gets retried by
-    every future run forever. The previous proposal's fields are left in place — a park says
-    "this run produced nothing usable", not "forget what you knew".
+    every future run forever.
+
+    **A previous proposal survives a park only when the park is for the SAME bundle.** The
+    row's `bundle_sha256` is a claim about which evidence the proposal on it answers, so
+    writing a new hash over an old answer makes the row assert something nobody validated —
+    and it is not a cosmetic lie. Measured: a package accepted at `Recommended`, then a
+    second device observes it `coreApp="true"`, so its floor becomes `Unsafe`; the model
+    keeps answering `Recommended`, gets rejected three times and parks. Re-pointing the old
+    answer at the new bundle leaves a stored `removal` of `Recommended` on a row naming a
+    bundle whose floor is `Unsafe` — the exact observable this whole repo is shaped to
+    prevent, reached without `raise_to_floor` ever being called, and permanent, because the
+    matching hash then makes `select_candidates` skip the package forever.
+
+    So a park against new evidence clears the proposal. A park against the same evidence
+    keeps it, because there the row's claim is still true: that answer did answer that
+    bundle, and this run simply failed to improve on it. A field a HUMAN owns survives
+    either way — the clearing is about an unvalidated model answer, and a triage edit was
+    never the model's to discard.
     """
     existing = await session.get(PackageClassification, package)
+    preserved = _preserved(existing)
     values: dict[str, Any] = {
         "package": package,
         "created_at": at,
@@ -233,9 +250,15 @@ async def park_package(
         "parked": True,
         "parked_reason": reason,
     }
-    if existing is None:
-        values["provenance"] = {}
+    if existing is None or existing.bundle_sha256 != bundle_sha256:
+        values["description"] = None
+        values["uad_list"] = None
+        values["removal"] = None
+        values["confidence"] = None
+        values["reasoning_brief"] = None
+        values["provenance"] = preserved.pop("provenance", {})
         values["unknown_fields"] = []
+        values.update(preserved)
     await _upsert(session, values)
     logger.warning(
         "classification parked: package=%s attempts=%d reason=%s", package, attempts, reason

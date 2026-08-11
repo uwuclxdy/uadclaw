@@ -25,9 +25,11 @@ from uadclaw import jobs as jobs_module
 from uadclaw import stages as stages_module
 from uadclaw.classify import UNKNOWN
 from uadclaw.classifystore import ClassificationStoreError, select_candidates
+from uadclaw.corpusstore import load_config_inputs, require_corpus
 from uadclaw.deepseek import DeepSeekBalanceError, DeepSeekClient
 from uadclaw.facts import ApkFacts
 from uadclaw.factstore import record_device_scan, store_device_facts
+from uadclaw.ladder import Removal, compute_floors, danger_rank
 from uadclaw.models import JobKind, PackageAnalysis, PackageClassification
 from uadclaw.settings import get_settings
 from uadclaw.stages import llm_stage
@@ -317,7 +319,7 @@ async def test_a_below_floor_response_is_retried_then_parked_never_clamped(
     assert parked.removal is None, "a rejected proposal must not be stored, raised or otherwise"
     assert "removal" in parked.parked_reason
     assert "Advanced" in parked.parked_reason
-    assert parked.attempts == get_settings().deepseek_max_attempts
+    assert parked.attempts == get_settings().classification_max_calls_per_package
     # The other package is unaffected: one bad package must not cost the rest.
     assert stored["com.example.notes"].parked is False
 
@@ -415,6 +417,119 @@ async def test_reclassify_asks_again_and_replaces_only_llm_owned_fields(
     # The model still owns everything it was not overruled on.
     assert stored["com.example.launcher"].description == second["description"]
     assert kept.provenance["removal"].startswith("llm:")
+
+
+async def test_a_park_against_new_evidence_never_leaves_a_below_floor_answer_on_the_row(
+    db_env, classification_env, fake_api, db_session_factory
+):
+    """Reviewer finding 3, and it is the repo's central safety observable reached without
+    `raise_to_floor` ever being called.
+
+    A package is accepted at `Recommended`. A second device then observes it `coreApp=true`,
+    so its floor becomes `Unsafe` and its bundle hash changes. The model keeps answering
+    `Recommended`, is rejected, and parks. Re-pointing the old answer at the new hash would
+    leave a stored `removal` of `Recommended` on a row naming a bundle whose floor is
+    `Unsafe` — and permanently, because the matching hash then makes the package skip
+    selection forever.
+    """
+    fake_api["responses"] = [httpx.Response(200, json=envelope(dict(GOOD, removal="Recommended")))]
+    async with db_session_factory() as session, session.begin():
+        firmware = await jobs_module.create_job(
+            session,
+            kind=JobKind.FIRMWARE_ANALYSIS.value,
+            params={"driver": "pixel", "device": "oriole"},
+        )
+        await record_device_scan(
+            session,
+            job_id=firmware.id,
+            device_key=PIXEL,
+            build=BUILD,
+            scanned_at=NOW,
+            apk_total=1,
+            parsed_ok=1,
+            failures=[],
+        )
+        await store_device_facts(
+            session,
+            device_key=PIXEL,
+            build=BUILD,
+            facts=[make_facts("com.example.notes")],
+            observed_at=NOW,
+        )
+        session.add(
+            PackageAnalysis(
+                package="com.example.notes", updated_at=NOW, queued=True, filter_verdict="queued"
+            )
+        )
+    async with db_session_factory() as session, session.begin():
+        job = await jobs_module.create_job(session, kind=JobKind.CLASSIFICATION.value)
+        job_id = job.id
+
+    await llm_stage(context(job_id, db_session_factory))
+    accepted = (await rows(db_session_factory))["com.example.notes"]
+    assert accepted.parked is False and accepted.removal == "Recommended"
+
+    # A second device raises the floor to Unsafe, so the evidence — and the hash — change.
+    async with db_session_factory() as session, session.begin():
+        await store_device_facts(
+            session,
+            device_key="google:emulator-a16",
+            build="android-36.1",
+            facts=[make_facts("com.example.notes", core_app=True)],
+            observed_at=NOW,
+        )
+    await llm_stage(context(job_id, db_session_factory))
+
+    row = (await rows(db_session_factory))["com.example.notes"]
+    assert row.parked is True
+    assert row.bundle_sha256 != accepted.bundle_sha256, "new evidence, new hash"
+    assert row.removal is None, (
+        "a park against evidence the proposal never answered must clear it: "
+        f"{row.removal!r} would sit below this row's own bundle floor"
+    )
+    assert row.description is None and row.uad_list is None
+
+    # And the row's own claim holds: whatever removal it carries is at or above the floor of
+    # the bundle it names.
+    async with db_session_factory() as session:
+        corpus = await require_corpus(session)
+        config = await load_config_inputs(session)
+    floors = compute_floors(corpus, config=config)
+    assert floors["com.example.notes"].floor is Removal.UNSAFE
+    if row.removal is not None:
+        assert danger_rank(Removal(row.removal)) >= danger_rank(floors["com.example.notes"].floor)
+
+
+async def test_a_human_edit_survives_a_park_against_new_evidence(
+    db_env, classification_env, fake_api, db_session_factory
+):
+    """The clearing above is about an unvalidated MODEL answer. A triage edit was never the
+    model's to discard, so it outlives the park."""
+    fake_api["responses"] = [httpx.Response(200, json=envelope(GOOD))]
+    job_id = await seed(db_session_factory)
+    await llm_stage(context(job_id, db_session_factory))
+
+    async with db_session_factory() as session, session.begin():
+        row = await session.get(PackageClassification, "com.example.notes")
+        row.description = "A human wrote this during triage."
+        row.provenance = {**row.provenance, "description": "human:uwuclxdy"}
+
+    fake_api["responses"] = [httpx.Response(200, json=envelope(dict(GOOD, removal="Recommended")))]
+    async with db_session_factory() as session, session.begin():
+        await store_device_facts(
+            session,
+            device_key="google:emulator-a16",
+            build="android-36.1",
+            facts=[make_facts("com.example.notes", core_app=True)],
+            observed_at=NOW,
+        )
+    await llm_stage(context(job_id, db_session_factory))
+
+    row = (await rows(db_session_factory))["com.example.notes"]
+    assert row.parked is True
+    assert row.description == "A human wrote this during triage."
+    assert row.provenance["description"] == "human:uwuclxdy"
+    assert row.removal is None, "the model's own unvalidated answer still goes"
 
 
 async def test_a_changed_corpus_makes_a_package_a_candidate_again(
@@ -531,6 +646,83 @@ async def test_an_empty_queue_is_refused_rather_than_silently_succeeding(
         await llm_stage(context(job_id, db_session_factory))
 
     assert fake_api["requests"] == []
+
+
+async def test_an_exhausted_client_parks_the_package_instead_of_killing_the_job(
+    db_env, classification_env, fake_api, db_session_factory
+):
+    """Reviewer finding 1. `complete_json` raising after its own wire retries used to escape
+    `_classify_one` entirely, take the TaskGroup down, and leave NO row — not even a park —
+    while cancelling every sibling. The empty-content shape is DeepSeek's own documented bug,
+    so this is the failure most likely to happen in production."""
+    fake_api["responses"] = [httpx.Response(200, json=envelope("", finish_reason="stop"))]
+    job_id = await seed(db_session_factory)
+
+    await llm_stage(context(job_id, db_session_factory))  # returns normally
+
+    stored = await rows(db_session_factory)
+    assert sorted(stored) == ["com.example.launcher", "com.example.notes"]
+    budget = get_settings().classification_max_calls_per_package
+    for row in stored.values():
+        assert row.parked is True
+        assert row.attempts == budget
+        assert "empty content" in row.parked_reason
+    assert len(fake_api["requests"]) == 2 * budget
+
+
+async def test_a_persistent_503_parks_the_package_rather_than_the_job(
+    db_env, classification_env, fake_api, db_session_factory
+):
+    """Same class as above through the other retryable error."""
+    fake_api["responses"] = [httpx.Response(503, text="overloaded")]
+    job_id = await seed(db_session_factory)
+
+    await llm_stage(context(job_id, db_session_factory))
+
+    stored = await rows(db_session_factory)
+    budget = get_settings().classification_max_calls_per_package
+    assert len(stored) == 2
+    assert all(row.parked and row.attempts == budget for row in stored.values())
+    assert len(fake_api["requests"]) == 2 * budget
+
+
+async def test_the_two_retry_layers_do_not_multiply_and_the_row_reports_true_spend(
+    db_env, classification_env, fake_api, db_session_factory
+):
+    """Reviewer finding 2. The mixed shape is the only one that separates a per-call
+    decrement from a per-request one: a `503, 503, below-floor` cycle costs three requests
+    inside ONE re-prompt, so charging the budget one per `complete_json` would let the
+    package spend three times its ceiling while the row reported a third of it."""
+    below_floor = dict(GOOD, removal="Recommended")
+    cycle = [
+        httpx.Response(503, text="busy"),
+        httpx.Response(503, text="busy"),
+        httpx.Response(200, json=envelope(below_floor)),
+    ]
+    state = {"i": 0}
+
+    def handler(request):
+        response = cycle[state["i"] % len(cycle)]
+        state["i"] += 1
+        return response
+
+    fake_api["responses"] = [handler]
+    await seed(db_session_factory)
+    async with db_session_factory() as session, session.begin():
+        job = await jobs_module.create_job(
+            session,
+            kind=JobKind.CLASSIFICATION.value,
+            params={"packages": ["com.example.launcher"]},
+        )
+        job_id = job.id
+
+    await llm_stage(context(job_id, db_session_factory))
+
+    budget = get_settings().classification_max_calls_per_package
+    row = (await rows(db_session_factory))["com.example.launcher"]
+    assert row.parked is True
+    # The row's own count IS the transport's count, and both are the single named budget.
+    assert row.attempts == len(fake_api["requests"]) == budget
 
 
 async def test_an_empty_balance_aborts_the_job_rather_than_parking_every_package(
