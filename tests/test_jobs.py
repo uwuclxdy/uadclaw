@@ -19,8 +19,15 @@ from uadclaw.jobs import (
     needs_scratch,
     next_stage,
     reclaim_stale_jobs,
+    stages_for,
 )
-from uadclaw.models import PIPELINE_STAGES, JobState
+from uadclaw.models import (
+    JOB_KIND_NEEDS_SCRATCH,
+    JOB_KIND_STAGES,
+    PIPELINE_STAGES,
+    JobKind,
+    JobState,
+)
 
 MAX_ATTEMPTS = 5
 
@@ -40,19 +47,65 @@ async def test_create_job_starts_queued_with_no_stage(db_session_factory):
     assert job.attempt == 0
 
 
-def test_next_stage_walks_the_pipeline_in_order():
-    assert next_stage(None) == PIPELINE_STAGES[0]
-    assert next_stage(PIPELINE_STAGES[0]) == PIPELINE_STAGES[1]
-    assert next_stage(PIPELINE_STAGES[-1]) is None
+def test_next_stage_walks_its_kinds_stages_in_order():
+    firmware = stages_for("firmware_analysis")
+    assert next_stage(None, "firmware_analysis") == firmware[0]
+    assert next_stage(firmware[0], "firmware_analysis") == firmware[1]
+    assert next_stage(firmware[-1], "firmware_analysis") is None
+
+
+def test_a_firmware_job_stops_at_rule_ladder_and_never_walks_into_llm():
+    """The structural guard behind the whole classification design: the worker no-ops any
+    stage with no handler, so a single global stage walk plus a registered `llm` handler
+    would make every firmware job classify the entire corpus against a paid API the moment
+    it finished unpacking, with nobody having asked for it."""
+    assert stages_for("firmware_analysis")[-1] == "rule_ladder"
+    assert "llm" not in stages_for("firmware_analysis")
+    assert next_stage("rule_ladder", "firmware_analysis") is None
+
+
+def test_a_classification_job_walks_only_the_llm_stage():
+    assert stages_for("classification") == ("llm",)
+    assert next_stage(None, "classification") == "llm"
+    assert next_stage("llm", "classification") is None
+
+
+def test_every_kinds_stages_are_drawn_from_the_design_pipeline():
+    for kind in JobKind:
+        assert set(stages_for(kind.value)) <= set(PIPELINE_STAGES)
+
+
+def test_a_stage_from_another_kind_is_rejected_rather_than_walked():
+    with pytest.raises(JobValidationError, match="not one of"):
+        next_stage("acquire", "classification")
+
+
+def test_stages_for_rejects_an_unknown_kind():
+    with pytest.raises(JobValidationError, match="no stage list"):
+        stages_for("not-a-real-kind")
 
 
 def test_needs_scratch_known_kind():
     assert needs_scratch("firmware_analysis") is True
 
 
+def test_a_classification_job_takes_no_scratch_lease():
+    """It only touches the DB and the network, so it must not queue behind the
+    single-occupant lease a multi-GB firmware unpack holds for its whole life."""
+    assert needs_scratch("classification") is False
+
+
 def test_needs_scratch_rejects_unknown_kind():
     with pytest.raises(JobValidationError):
         needs_scratch("not-a-real-kind")
+
+
+def test_every_kind_declares_both_a_scratch_answer_and_a_stage_list():
+    """A kind missing from either table is a kind that either shares scratch by accident or
+    inherits somebody else's pipeline."""
+    for kind in JobKind:
+        assert kind in JOB_KIND_NEEDS_SCRATCH
+        assert kind in JOB_KIND_STAGES
 
 
 async def test_claim_job_is_race_free_under_concurrent_workers(db_session_factory):

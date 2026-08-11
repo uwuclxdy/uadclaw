@@ -112,6 +112,8 @@ async def test_created_job_is_pollable_after_the_worker_runs_it(
     assert resp.status_code == 200
     body = resp.json()
     assert body["state"] == "succeeded"
-    assert body["stage"] == "branch"
-    assert "completed stage branch" in body["log_tail"]
+    # A firmware job's last stage is `rule_ladder`. `llm`, `corroborate`, `triage` and
+    # `branch` belong to other kinds; a firmware job used to no-op through all four.
+    assert body["stage"] == "rule_ladder"
+    assert "completed stage rule_ladder" in body["log_tail"]
     assert body["finished_at"] is not None

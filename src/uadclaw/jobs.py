@@ -22,11 +22,12 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from uadclaw.classify import ClassificationJobParams
 from uadclaw.firmware import FirmwareJobParams
 from uadclaw.models import (
     JOB_KIND_NEEDS_SCRATCH,
+    JOB_KIND_STAGES,
     LOG_TAIL_MAX_CHARS,
-    PIPELINE_STAGES,
     Job,
     JobKind,
     JobStageRun,
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 # params uninterpreted.
 JOB_KIND_PARAM_MODELS: dict[JobKind, type[BaseModel]] = {
     JobKind.FIRMWARE_ANALYSIS: FirmwareJobParams,
+    JobKind.CLASSIFICATION: ClassificationJobParams,
 }
 
 
@@ -51,25 +53,45 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def first_stage() -> str:
-    return PIPELINE_STAGES[0]
-
-
-def next_stage(current: str | None) -> str | None:
-    """The stage after `current`, or the first stage if nothing has run yet, or None once
-    the last stage has completed (the job is done)."""
-    if current is None:
-        return PIPELINE_STAGES[0]
+def stages_for(kind: str) -> tuple[str, ...]:
+    """The stages this kind walks, in order. Raises for an unrecognized kind rather than
+    defaulting to the full pipeline: defaulting is how a new kind silently inherits the
+    firmware walk and starts paying for stages nobody asked it to run."""
     try:
-        idx = PIPELINE_STAGES.index(current)
+        return JOB_KIND_STAGES[JobKind(kind)]
+    except (KeyError, ValueError) as exc:
+        valid = ", ".join(k.value for k in JobKind)
+        raise JobValidationError(
+            f"stages_for: kind={kind!r} has no stage list; use one of {valid}"
+        ) from exc
+
+
+def first_stage(kind: str) -> str:
+    return stages_for(kind)[0]
+
+
+def next_stage(current: str | None, kind: str) -> str | None:
+    """The stage after `current` for this KIND, the kind's first stage if nothing has run
+    yet, or None once its last stage has completed.
+
+    Kind-scoped rather than walking the global `PIPELINE_STAGES`: the worker no-ops any
+    stage with no registered handler, so one global walk plus a registered `llm` handler
+    would make every firmware job classify the whole corpus against a paid API the moment it
+    finished unpacking. See `models.JOB_KIND_STAGES`.
+    """
+    stages = stages_for(kind)
+    if current is None:
+        return stages[0]
+    try:
+        idx = stages.index(current)
     except ValueError as exc:
         raise JobValidationError(
-            f"next_stage: stage {current!r} is not one of {PIPELINE_STAGES}; "
-            "fix the caller to pass a valid pipeline stage name"
+            f"next_stage: stage {current!r} is not one of {stages} for kind {kind!r}; "
+            "fix the caller to pass a stage this kind actually walks"
         ) from exc
-    if idx + 1 >= len(PIPELINE_STAGES):
+    if idx + 1 >= len(stages):
         return None
-    return PIPELINE_STAGES[idx + 1]
+    return stages[idx + 1]
 
 
 def needs_scratch(kind: str) -> bool:

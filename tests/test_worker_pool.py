@@ -221,10 +221,13 @@ async def test_resumed_job_restarts_from_its_recorded_stage_not_the_beginning(
 
     await run_pool_until(db_session_factory, settings, handlers, _terminal)
 
-    # Resume must skip acquire/unpack/extract_facts/corpus_graph and start at "filter".
-    assert stage_calls == ["filter", "rule_ladder", "llm", "corroborate", "triage", "branch"]
+    # Resume must skip acquire/unpack/extract_facts/corpus_graph and start at "filter", and
+    # a firmware job ENDS at rule_ladder: `llm` belongs to the classification kind, which a
+    # human queues deliberately because it spends money. A firmware job that walked into it
+    # would classify the whole corpus against a paid API on every unpack.
+    assert stage_calls == ["filter", "rule_ladder"]
 
     async with db_session_factory() as session:
         db_job = await session.get(Job, job_id)
         assert db_job.state == JobState.SUCCEEDED
-        assert db_job.stage == "branch"
+        assert db_job.stage == "rule_ladder"

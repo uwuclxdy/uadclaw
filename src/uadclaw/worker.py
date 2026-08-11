@@ -219,7 +219,9 @@ async def _run_job(
             lease_acquired = True
             scratch_dir = await scratch.prepare_scratch_dir(settings.scratch_root, job_id, attempt)
 
-        stage = jobs_module.next_stage(job.stage)
+        # Scoped to the job's KIND, never the global stage list: a firmware job must not
+        # walk into `llm` and start paying for a model call nobody queued.
+        stage = jobs_module.next_stage(job.stage, job.kind)
         while stage is not None:
             outcome = await _run_one_stage(
                 job_id, worker_id, attempt, stage, scratch_dir, session_factory, stage_handlers
@@ -229,17 +231,17 @@ async def _run_job(
             if outcome is _StageOutcome.FAILED:
                 job_failed = True
                 break
-            stage = jobs_module.next_stage(stage)
+            stage = jobs_module.next_stage(stage, job.kind)
 
         if not job_failed:
             # Commit SUCCEEDED first, clean up scratch second: a cleanup failure must never
-            # roll a job that finished all ten stages back into looking FAILED.
+            # roll a job that finished every stage back into looking FAILED.
             async with session_factory() as session, session.begin():
                 completed = await jobs_module.complete_job(session, job_id, worker_id, attempt)
             if completed is None:
                 logger.warning(
-                    "job %s attempt %d finished every stage but was fenced out before the "
-                    "SUCCEEDED write landed",
+                    "job %s attempt %d finished every stage of its kind but was fenced out "
+                    "before the SUCCEEDED write landed",
                     job_id,
                     attempt,
                 )

@@ -32,15 +32,17 @@ from uadclaw.db import Base
 
 class JobKind(enum.StrEnum):
     FIRMWARE_ANALYSIS = "firmware_analysis"
+    CLASSIFICATION = "classification"
 
 
 # Whether a job kind occupies the scratch lease. FIRMWARE_ANALYSIS unpacks firmware onto
-# disk and needs the single-occupant lease for its whole life; classification (task 7) and
-# corroboration (task 8) only touch the DB and the network, never scratch. The requirement
-# lives on the kind, not on the worker loop, so the pool stays meaningful (able to run
-# scratch-free kinds concurrently) the moment one of those kinds lands.
+# disk and needs the single-occupant lease for its whole life; classification only touches
+# the DB and the network, never scratch. The requirement lives on the kind, not on the
+# worker loop, so the pool stays meaningful — a classification job runs concurrently with a
+# firmware job rather than queueing behind its lease.
 JOB_KIND_NEEDS_SCRATCH: dict[JobKind, bool] = {
     JobKind.FIRMWARE_ANALYSIS: True,
+    JobKind.CLASSIFICATION: False,
 }
 
 
@@ -55,8 +57,8 @@ class JobState(enum.StrEnum):
 # Terminal states a claim/reclaim sweep must never touch.
 TERMINAL_STATES = frozenset({JobState.SUCCEEDED, JobState.FAILED})
 
-# Ordered pipeline stages from docs/pipeline-design.md § Pipeline. A job's `stage` records
-# the furthest point it reached; resuming restarts from that stage, never from the start.
+# Every stage name the design's pipeline has, in design order. This is the vocabulary, NOT
+# the walk: nothing may iterate it to decide what a job runs next (see JOB_KIND_STAGES).
 PIPELINE_STAGES: tuple[str, ...] = (
     "acquire",
     "unpack",
@@ -69,6 +71,30 @@ PIPELINE_STAGES: tuple[str, ...] = (
     "triage",
     "branch",
 )
+
+# The stages each KIND actually walks. A job's `stage` records the furthest point it
+# reached; resuming restarts from the stage after it, never from the beginning.
+#
+# Kind-scoped rather than one global walk, and this is a safety property rather than tidiness.
+# The worker no-ops any stage with no registered handler, so a single global list plus a
+# registered `llm` handler means **every firmware job classifies the entire corpus against a
+# paid API the moment it finishes unpacking**, with nobody having asked for it. Classification
+# costs money and is a separate decision, so it is a separate kind that a human queues.
+#
+# The consequence is deliberate and visible: FIRMWARE_ANALYSIS now ENDS at `rule_ladder`.
+# It used to no-op its way through `llm`, `corroborate`, `triage` and `branch` and finish at
+# `branch`, which recorded four stage runs that never did anything.
+JOB_KIND_STAGES: dict[JobKind, tuple[str, ...]] = {
+    JobKind.FIRMWARE_ANALYSIS: (
+        "acquire",
+        "unpack",
+        "extract_facts",
+        "corpus_graph",
+        "filter",
+        "rule_ladder",
+    ),
+    JobKind.CLASSIFICATION: ("llm",),
+}
 
 # Bound the log tail kept on the job row; older lines fall off rather than growing the row
 # without limit over a long-running or oft-retried job.
@@ -434,4 +460,82 @@ class PackageAnalysis(Base):
     __table_args__ = (
         Index("ix_package_analysis_queued", "queued"),
         Index("ix_package_analysis_floor", "floor"),
+    )
+
+
+class PackageClassification(Base):
+    """What the model proposed for one package, and what it cost.
+
+    A separate table from `package_analysis` on purpose, sharing not one column with it.
+    That table's contract is "nothing on this row is ever model output", and the cheapest way
+    to keep a contract like that true is to leave the model no column to write. A re-run of
+    the classification stage therefore cannot touch an edge or a floor even by mistake: the
+    two live in different tables and are written by different stages.
+
+    One row per package, keyed on the package name rather than on (package, model, run):
+    triage reviews the CURRENT proposal, and a history table nothing reads is a table that
+    silently grows. What is kept instead is enough to tell one proposal from another —
+    `bundle_sha256` pins the exact evidence it answered, `model` and `thinking` pin what
+    answered it, and `attempts` records how many calls it took.
+
+    `usage` is the API's raw envelope, unreshaped and per row. That is deliberate: the cost
+    and cache measurement the design still owes itself reads `prompt_cache_hit_tokens` and
+    `prompt_cache_miss_tokens` off real production rows rather than off a throwaway script,
+    and a field nobody thought to break out today is still there tomorrow.
+
+    A parked row is a recorded terminal state, never an exception that kills the job: one
+    package the model cannot answer must not cost the other 47. `parked_reason` carries the
+    field and the reason the validator refused, because a park nobody can read is a park
+    nobody can clear.
+    """
+
+    __tablename__ = "package_classification"
+
+    package: Mapped[str] = mapped_column(String(255), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    # Which evidence this answers. The model output is not reproducible and the bundle is, so
+    # this column is the whole reproducibility claim: same hash means same question asked.
+    bundle_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Whether thinking mode was on. Its reasoning tokens bill as output at 20x the
+    # thinking-off spend, so the cost comparison needs to know which mode produced each row.
+    thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # --- the proposal (NULL on a parked row: nothing was accepted) ----------------------
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Upstream's key is `list`; the attribute is not, and cannot be. A `list:` mapped_column
+    # BINDS the name inside this class body, so every `Mapped[list[Any]]` annotation after it
+    # resolves `list` to the column and raises `Operator 'getitem' is not supported` at import
+    # time. `package_analysis` already renames upstream's `neededBy` to `needed_by`, so a
+    # column name being ours rather than theirs is the established shape here.
+    uad_list: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    removal: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Fields the model declared it could not determine. A valid, expected outcome.
+    unknown_fields: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    reasoning_brief: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # field name -> `rule:` / `graph:` / `llm:<model>` / `human:`. Read on a re-run: a field
+    # tagged `human:` survives untouched, which is what makes a bad model run re-runnable
+    # without walking over an edit somebody made in triage.
+    provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+    # --- what it cost ------------------------------------------------------------------
+    usage: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    attempts: Mapped[int] = mapped_column(nullable=False, default=0)
+
+    # --- park ---------------------------------------------------------------------------
+    parked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    parked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_package_classification_parked", "parked"),
+        Index("ix_package_classification_bundle_sha256", "bundle_sha256"),
     )
