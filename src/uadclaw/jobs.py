@@ -16,10 +16,13 @@ import logging
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from uadclaw.firmware import FirmwareJobParams
 from uadclaw.models import (
     JOB_KIND_NEEDS_SCRATCH,
     LOG_TAIL_MAX_CHARS,
@@ -31,6 +34,12 @@ from uadclaw.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The params model each job kind's target must satisfy. A kind with no entry takes its
+# params uninterpreted.
+JOB_KIND_PARAM_MODELS: dict[JobKind, type[BaseModel]] = {
+    JobKind.FIRMWARE_ANALYSIS: FirmwareJobParams,
+}
 
 
 class JobValidationError(ValueError):
@@ -76,11 +85,35 @@ def needs_scratch(kind: str) -> bool:
         ) from exc
 
 
-async def create_job(session: AsyncSession, *, kind: str) -> Job:
-    """Validate `kind` at the boundary and insert a new queued job. Raises
-    `JobValidationError` (not a bug in this code) when `kind` isn't a known job kind."""
+def validate_job_params(kind: JobKind, params: dict[str, Any] | None) -> dict[str, Any]:
+    """Parse a job's params into the shape its kind requires, at the boundary, before the
+    row exists. A firmware job whose target is misspelt is a 422 at creation rather than a
+    worker that claims it, waits for the scratch lease and only then discovers the problem.
+
+    `None` stays permitted and validates to `{}`: the substrate's own tests and the no-op
+    stage registry create target-less jobs deliberately, and the acquire stage refuses one
+    with a named error of its own.
+    """
+    if params is None:
+        return {}
+    model = JOB_KIND_PARAM_MODELS.get(kind)
+    if model is None:
+        return dict(params)
     try:
-        JobKind(kind)
+        return model.model_validate(params).model_dump(mode="json", exclude_none=True)
+    except ValidationError as exc:
+        raise JobValidationError(
+            f"create_job: params for kind={kind.value!r} are not valid: {exc}"
+        ) from exc
+
+
+async def create_job(
+    session: AsyncSession, *, kind: str, params: dict[str, Any] | None = None
+) -> Job:
+    """Validate `kind` and `params` at the boundary and insert a new queued job. Raises
+    `JobValidationError` (not a bug in this code) when either is unusable."""
+    try:
+        job_kind = JobKind(kind)
     except ValueError as exc:
         valid = ", ".join(k.value for k in JobKind)
         raise JobValidationError(
@@ -90,6 +123,7 @@ async def create_job(session: AsyncSession, *, kind: str) -> Job:
     job = Job(
         id=uuid.uuid4(),
         kind=kind,
+        params=validate_job_params(job_kind, params),
         state=JobState.QUEUED,
         stage=None,
         attempt=0,

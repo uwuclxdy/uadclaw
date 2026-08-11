@@ -5,6 +5,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel
@@ -32,6 +33,9 @@ class LoginRequest(BaseModel):
 
 class CreateJobRequest(BaseModel):
     kind: str
+    # Shaped by `kind` and validated against that kind's model in `jobs.create_job`, which
+    # is why this is not typed tighter here: the route is generic over job kinds.
+    params: dict[str, Any] | None = None
 
 
 class JobResponse(BaseModel):
@@ -40,6 +44,7 @@ class JobResponse(BaseModel):
 
     id: uuid.UUID
     kind: str
+    params: dict[str, Any]
     state: str
     stage: str | None
     attempt: int
@@ -57,6 +62,7 @@ class JobResponse(BaseModel):
         return cls(
             id=job.id,
             kind=job.kind,
+            params=job.params,
             state=str(job.state),
             stage=job.stage,
             attempt=job.attempt,
@@ -121,7 +127,7 @@ async def create_job_route(payload: CreateJobRequest) -> JobResponse:
     session_factory = get_session_factory()
     async with session_factory() as session, session.begin():
         try:
-            job = await jobs_module.create_job(session, kind=payload.kind)
+            job = await jobs_module.create_job(session, kind=payload.kind, params=payload.params)
         except jobs_module.JobValidationError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)

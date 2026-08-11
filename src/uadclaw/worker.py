@@ -1,11 +1,11 @@
 """Worker: claims jobs (SKIP LOCKED), runs them stage by stage under the scratch lease (for
 kinds that need it), and enforces retention around the outcome.
 
-Real pipeline stage logic (acquire/unpack/extract/...) doesn't exist yet — that's tasks 3+.
-`stage_handlers` is the injection point: production runs the no-op default registry (a job
-completing every stage as a formality proves the substrate), tests inject synthetic
-handlers (sleep, write scratch files, raise) to exercise concurrency, lease contention,
-crash reclaim and retention without needing a real firmware pipeline.
+`stage_handlers` is the injection point: production runs `uadclaw.stages`, which implements
+the stages that exist (acquire and unpack today) and leaves the rest no-ops, so a stage
+landing later is one entry there and no change here. Tests inject synthetic handlers (sleep,
+write scratch files, raise) to exercise concurrency, lease contention, crash reclaim and
+retention without needing a real firmware pipeline.
 
 Every job write is fenced on (job_id, worker_id, attempt) via `uadclaw.jobs`: a worker that
 gets reclaimed — falsely, mid-lease-wait, or genuinely after a crash — stops touching the
@@ -408,6 +408,10 @@ async def run_worker_pool(
 
 
 async def run() -> None:
+    # Imported here, not at module scope: `uadclaw.stages` imports StageContext from this
+    # module, and a top-level import in both directions is a cycle.
+    from uadclaw.stages import pipeline_stage_handlers
+
     settings = get_settings()
     session_factory = get_session_factory()
     logger.info("worker starting: pool_size=%d", settings.worker_pool_size)
@@ -415,6 +419,7 @@ async def run() -> None:
         session_factory=session_factory,
         settings=settings,
         shutdown_event=asyncio.Event(),  # never set: this process runs until killed
+        stage_handlers=pipeline_stage_handlers(),
     )
 
 

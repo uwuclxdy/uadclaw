@@ -7,10 +7,11 @@ firmware-specific columns here, those land with tasks 3+.
 import enum
 import uuid
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from uadclaw.db import Base
@@ -66,6 +67,14 @@ class Job(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    # What this job is FOR, shaped by its kind — for FIRMWARE_ANALYSIS, which driver, device
+    # and build to acquire (see `FirmwareJobParams`). JSONB rather than a firmware-specific
+    # column set: every later job kind (classification, corroboration) carries a different
+    # target, and none of them wants the others' columns nullable on its rows. Validated
+    # against a per-kind model at creation, so nothing here is trusted at read time either.
+    params: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     state: Mapped[JobState] = mapped_column(
         SAEnum(JobState, name="job_state", values_callable=lambda e: [m.value for m in e]),
         nullable=False,
