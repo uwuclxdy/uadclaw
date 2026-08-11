@@ -1,17 +1,22 @@
 """FastAPI app factory."""
 
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import text
 from starlette.middleware.sessions import SessionMiddleware
 
+from uadclaw import jobs as jobs_module
 from uadclaw.auth import AuthMiddleware, log_in, log_out, verify_password
-from uadclaw.db import get_engine
+from uadclaw.db import get_engine, get_session_factory
+from uadclaw.models import Job
 from uadclaw.settings import get_settings
+from uadclaw.stats import StatsResponse, compute_stats
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +28,47 @@ class HealthResponse(BaseModel):
 
 class LoginRequest(BaseModel):
     password: str
+
+
+class CreateJobRequest(BaseModel):
+    kind: str
+
+
+class JobResponse(BaseModel):
+    """The dashboard-pollable shape of a job. Deliberately not the ORM model itself —
+    an API response is its own contract, not whatever columns happen to exist today."""
+
+    id: uuid.UUID
+    kind: str
+    state: str
+    stage: str | None
+    attempt: int
+    worker_id: str | None
+    failure_reason: str | None
+    log_tail: str
+    created_at: datetime
+    claimed_at: datetime | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    heartbeat_at: datetime | None
+
+    @classmethod
+    def from_job(cls, job: Job) -> "JobResponse":
+        return cls(
+            id=job.id,
+            kind=job.kind,
+            state=str(job.state),
+            stage=job.stage,
+            attempt=job.attempt,
+            worker_id=job.worker_id,
+            failure_reason=job.failure_reason,
+            log_tail=job.log_tail,
+            created_at=job.created_at,
+            claimed_at=job.claimed_at,
+            started_at=job.started_at,
+            finished_at=job.finished_at,
+            heartbeat_at=job.heartbeat_at,
+        )
 
 
 router = APIRouter()
@@ -56,6 +102,46 @@ async def login(payload: LoginRequest, request: Request) -> None:
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(request: Request) -> None:
     log_out(request)
+
+
+@router.get("/stats")
+async def stats() -> StatsResponse:
+    """Usage/utilization aggregates for tuning `worker_pool_size`. Behind auth like every
+    other route — protected by default-deny `AuthMiddleware`, no allowlist entry needed."""
+    settings = get_settings()
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        return await compute_stats(session, lookback_seconds=settings.stats_lookback_seconds)
+
+
+@router.post("/jobs", status_code=status.HTTP_201_CREATED)
+async def create_job_route(payload: CreateJobRequest) -> JobResponse:
+    """Start a job the worker will pick up. No UI here — task 9 owns that; this is the
+    substrate the dashboard is built on. Behind auth automatically, like every route."""
+    session_factory = get_session_factory()
+    async with session_factory() as session, session.begin():
+        try:
+            job = await jobs_module.create_job(session, kind=payload.kind)
+        except jobs_module.JobValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+            ) from exc
+        await session.flush()
+        return JobResponse.from_job(job)
+
+
+@router.get("/jobs/{job_id}")
+async def get_job_route(job_id: uuid.UUID) -> JobResponse:
+    """State, stage, timestamps and log tail — the poll target "the worker claims jobs and
+    reports progress the dashboard can poll" (task 2 todo) actually needs."""
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=f"no job with id {job_id}"
+            )
+        return JobResponse.from_job(job)
 
 
 @router.get("/")
