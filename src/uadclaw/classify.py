@@ -199,16 +199,23 @@ class Classification:
 # list on 2026-08-11, only ONE of those rules is precise enough to be allowed to overrule a
 # model, and saying which is the point of this block.
 #
-# Every row below is measured with the predicate THIS module ships, over the entries the OEM
-# rule has not already claimed (it runs first, so that is the population each later rule
-# actually sees). Stating the population matters: over ALL entries instead, the AOSP row
-# reads n=620 / 35.8%, a different number for a rule that never gets those entries.
+# Every row is measured over the entries the OEM rule has not already claimed (it runs
+# first, so that is the population each later rule actually sees). Stating the population
+# matters: over ALL entries instead, the AOSP row reads n=620 / 35.8%, a different number for
+# a rule that never gets those entries.
 #
-#   rule                                             n      agrees with upstream
-#   OEM vendor token in the package name            3147   98.7%
-#   chipset vendor segment -> Misc                   236   76.7%
-#   AOSP namespace (`com.android.`/`android.`)       576   38.4%
-#   `com.google.` prefix -> Google                   367   47.7%
+#   rule                                             n      agrees   predicate
+#   OEM vendor token in the package name            3147   98.7%    OEM_NAME_TOKENS below
+#   AOSP namespace (`com.android.`/`android.`)       576   38.4%    _AOSP_NAMESPACES below
+#   `com.google.` prefix -> Google                   367   47.7%    startswith("com.google.")
+#   chipset vendor segment -> Misc                   236   76.7%    EXPLORATORY, see below
+#
+# The chipset row is the one this module cannot reproduce: there is no chipset rule in
+# `derive_list`, because the measurement is what talked us out of writing one. Its 76.7% was
+# taken over the segment set {qualcomm, qti, mediatek, mtk, unisoc, spreadtrum, sprd}, which
+# lives here in prose and nowhere in code. Recorded rather than dropped because "we looked at
+# this and it did not clear the bar" is the thing a later reader most needs, and a row with
+# no predicate behind it reads as stale comment unless it says so.
 #
 # The bottom three are not close. The AOSP namespace is mostly Oem upstream because every
 # OEM ships packages in it, and `com.google.*` splits between Google's own apps and Google's
@@ -313,8 +320,11 @@ def derive_list(
             detail="signed with the AOSP test key and in the AOSP namespace",
         )
     # Undecided. The partition travels into the bundle as evidence for the model rather than
-    # as a decider: measured, a `vendor`/`odm` partition agrees with upstream's `Misc` on
-    # only 55.6% of the chipset-vendor entries, which is not a rule, it is a coin flip.
+    # as a decider: the closest thing to a partition rule is "chipset-vendor software is
+    # Misc", and that agrees with upstream on 76.7% of the entries it would claim (see the
+    # table above). Three wrong answers in thirteen is a useful prior and nowhere near a rule
+    # allowed to REJECT a model that disagrees, which is the only thing deciding a value
+    # means here.
     return ListDerivation(
         value=None,
         rule="llm:list",
