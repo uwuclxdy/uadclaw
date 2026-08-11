@@ -9,8 +9,37 @@ RUN uv sync --frozen --no-install-project --no-dev
 COPY . .
 RUN uv sync --frozen --no-dev
 
+# `payload-dumper-go` opens A/B OTA `payload.bin` and is packaged by no distribution, so it
+# is built from the pinned module version verified on the dev box rather than pulled as a
+# release asset. CGO stays ON and `liblzma-dev` is required: two of its dependencies (go-xz,
+# gozstd) are cgo wrappers and the build fails outright without either. The result links
+# only against libc, so it drops into the slim runtime image as-is; the builder tracks the
+# runtime's Debian release so that libc is never the newer of the two.
+FROM golang:1.26-trixie AS payload-dumper
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends liblzma-dev \
+ && rm -rf /var/lib/apt/lists/*
+RUN go install github.com/ssut/payload-dumper-go@v0.0.0-20241120142751-a51234eaead2
+
 FROM python:3.12-slim
 WORKDIR /app
+
+# The unpacking toolchain. Versions matter here: 7-Zip >= 24 reads BOTH ext4 and EROFS, which
+# is what collapses selective extraction to a single tool — p7zip 16.02 (the `p7zip-full`
+# transitional package) reads neither. Debian trixie ships 7-Zip 25.01.
+#
+# `lpunpack` (dynamic `super.img` partitions) is deliberately absent: no Debian package
+# provides it. Nothing on the Pixel path needs it — a Pixel factory zip carries raw ext4
+# partition images directly, measured 2026-08-11 — and `uadclaw.unpack` raises a named
+# MissingToolError naming the tool if a super image ever reaches this image. The OEMs that
+# do ship super images arrive with task 11, which is when this needs solving.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      7zip \
+      erofs-utils \
+      android-sdk-libsparse-utils \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=payload-dumper /go/bin/payload-dumper-go /usr/local/bin/payload-dumper-go
 
 # UID 65532 is the distroless / nonroot convention — outside the typical 1000-1001 host range
 # so bind-mounted files on the deploy host don't appear owned by the operator's own user.
