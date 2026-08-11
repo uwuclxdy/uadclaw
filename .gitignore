@@ -1,0 +1,7 @@
+# Local docker-secrets material for compose (real .env is already globally ignored).
+secrets/
+
+# hatchling / uv build output.
+dist/
+build/
+*.egg-info/
