@@ -280,7 +280,7 @@ async def cleanup_scratch_dir(scratch_root: Path, job_id: uuid.UUID, attempt: in
     """Retention on success: delete this attempt's scratch directory (the firmware archive
     plus every extracted APK). Caller commits the SUCCEEDED state in its own transaction
     first — see `worker.py` — so a cleanup failure here never rolls back a job that
-    genuinely finished all ten stages back into looking FAILED."""
+    genuinely finished every stage of its kind back into looking FAILED."""
     await _rmtree(job_scratch_dir(scratch_root, job_id, attempt))
 
 
