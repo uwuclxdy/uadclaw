@@ -8,6 +8,7 @@ dependencies = [
   "alembic>=1.19.1",
   "asyncpg>=0.31.0",
   "fastapi>=0.141.1",
+  "httpx>=0.28.1",
   "itsdangerous>=2.2.0",
   "pydantic>=2.13.4",
   "pydantic-settings>=2.15.0",
@@ -46,3 +47,8 @@ testpaths      = ["tests"]
 addopts        = "-n auto --dist loadscope"
 timeout        = 30
 timeout_method = "thread"
+markers = [
+  # Runs the real extraction chain against a multi-GB local Android image. Skipped unless
+  # UADCLAW_HEAVY_TESTS=1, and skipped (not failed) when the image is not on this box.
+  "heavy: needs a multi-GB local firmware image and the full unpacking toolchain",
+]

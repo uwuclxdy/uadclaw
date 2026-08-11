@@ -64,6 +64,25 @@ class Settings(BaseSettings):
     # something finished, so a wedged system (nothing finishing) still reads accurately.
     stats_lookback_seconds: float = 86_400.0
 
+    # Firmware acquisition (task 3).
+    # Comma-separated driver names to refuse. Kept a plain string rather than a set because
+    # pydantic-settings parses a collection-typed field as JSON from the environment, which
+    # is a worse operator experience for "turn Samsung off": DISABLED_FIRMWARE_DRIVERS=samsung.
+    disabled_firmware_drivers: str = ""
+    pixel_index_url: str = "https://developers.google.com/android/images"
+    # The Pixel factory index is behind a client-side terms wall. Acceptance of Google's
+    # image terms is an act by the operator, so it is configuration and starts UNSET: a bare
+    # fetch answers HTTP 200 with prose and zero download links, which is why the driver
+    # refuses to fetch at all until this is set rather than reporting "no builds".
+    pixel_terms_ack_cookie_name: str = "devsite_wall_acks"
+    pixel_terms_ack_cookie_value: str = ""
+    # Read/connect timeout for firmware HTTP. No total deadline: a factory zip is multi-GB
+    # and a slow-but-progressing transfer is not a failure.
+    firmware_http_timeout_seconds: float = 60.0
+    # `payload-dumper-go` is not packaged by any distro; the worker image vendors it onto
+    # PATH, a dev box may have it anywhere (e.g. ~/go/bin). A bare name is resolved on PATH.
+    payload_dumper_path: str = "payload-dumper-go"
+
     @field_validator("postgres_password", "auth_password", "session_secret")
     @classmethod
     def _reject_blank(cls, value: str) -> str:
@@ -89,6 +108,7 @@ class Settings(BaseSettings):
         "job_claim_poll_interval_seconds",
         "sweep_interval_seconds",
         "stats_lookback_seconds",
+        "firmware_http_timeout_seconds",
     )
     @classmethod
     def _reject_non_positive_duration(cls, value: float) -> float:
@@ -109,6 +129,12 @@ class Settings(BaseSettings):
         if value < 1:
             raise ValueError("max_job_attempts must be >= 1")
         return value
+
+    @property
+    def disabled_firmware_driver_names(self) -> frozenset[str]:
+        return frozenset(
+            name.strip() for name in self.disabled_firmware_drivers.split(",") if name.strip()
+        )
 
     @property
     def database_url(self) -> str:
