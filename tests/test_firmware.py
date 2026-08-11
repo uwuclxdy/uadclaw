@@ -6,6 +6,8 @@ call goes through an `httpx.MockTransport` that records what was actually sent �
 only way to prove the terms acknowledgement cookie leaves the process.
 """
 
+import asyncio
+import datetime
 import hashlib
 from pathlib import Path
 
@@ -18,11 +20,13 @@ from uadclaw.firmware import (
     EmptyFirmwareIndexError,
     FirmwareDownloadError,
     FirmwareDriverDisabledError,
+    FirmwareError,
     FirmwareInputError,
     FirmwareRef,
     FirmwareTermsNotAcknowledgedError,
     TermsRisk,
     UnknownFirmwareDriverError,
+    build_date,
     download_to_file,
     driver_names,
     enabled_driver_names,
@@ -253,3 +257,157 @@ async def test_fetch_refuses_a_ref_from_another_driver(tmp_path):
 
     with pytest.raises(FirmwareInputError):
         await driver.fetch(ref, tmp_path)
+
+
+# --- build selection -----------------------------------------------------------------------
+
+
+def _ref(device: str, build: str) -> FirmwareRef:
+    return FirmwareRef(driver="pixel", device=device, build=build, url="https://x/y.zip")
+
+
+def test_newest_build_comes_from_the_date_not_the_row_order():
+    """Measured against the real index on 2026-08-11: last-row-per-device agrees with the
+    date for 56 of 58 devices and is WRONG for crosshatch and blueline, which both list
+    SP1A.210812.016.C2 (2021-08-12) AFTER RQ3A.211001.001 (2021-10-01)."""
+    refs = [_ref("crosshatch", "RQ3A.211001.001"), _ref("crosshatch", "SP1A.210812.016.C2")]
+
+    assert select_ref(refs, device="crosshatch").build == "RQ3A.211001.001"
+
+
+def test_lexicographic_order_is_not_chronological_order():
+    """The letter prefix resets, so UQ1A (2024) sorts above CP2A (2026)."""
+    refs = [_ref("tegu", "UQ1A.240105.004"), _ref("tegu", "CP2A.260705.006")]
+
+    assert select_ref(refs, device="tegu").build == "CP2A.260705.006"
+
+
+def test_undated_build_ids_fall_back_to_index_order_behind_dated_ones():
+    """487 of the index's 2,293 builds are pre-2016 ids carrying no date field at all."""
+    assert build_date("NDE63H") is None
+    assert build_date("CP2A.260705.006") == datetime.date(2026, 7, 5)
+
+    undated_only = [_ref("razorg", "JLS36C"), _ref("razorg", "JLS36I")]
+    assert select_ref(undated_only, device="razorg").build == "JLS36I"
+
+    mixed = [_ref("razorg", "RQ3A.211001.001"), _ref("razorg", "JLS36I")]
+    assert select_ref(mixed, device="razorg").build == "RQ3A.211001.001"
+
+
+# --- download: the loop, the cleanup, the ceiling, the integrity verdict --------------------
+
+
+async def test_the_download_never_writes_or_hashes_on_the_event_loop(tmp_path, monkeypatch):
+    """~3,500 iterations over a 3.5 GB archive shared the loop with every other worker slot
+    and with the heartbeat task that keeps the job from being reclaimed."""
+    threads: list[str] = []
+    real_to_thread = asyncio.to_thread
+
+    async def _record(func, *args, **kwargs):
+        threads.append(getattr(func, "__name__", repr(func)))
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _record)
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=b"a" * 4096))
+    )
+
+    await download_to_file(client, "https://x/y.zip", tmp_path / "f.zip")
+
+    assert threads and set(threads) == {"_write_and_hash"}
+
+
+async def test_a_download_with_no_published_checksum_is_recorded_as_unverified(tmp_path):
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=b"bytes"))
+    )
+
+    archive = await download_to_file(client, "https://x/y.zip", tmp_path / "f.zip")
+
+    assert archive.integrity_verified is False
+    assert archive.sha256 == hashlib.sha256(b"bytes").hexdigest()
+    assert archive.path.is_file()
+
+
+async def test_a_cancelled_download_leaves_no_partial_behind(tmp_path):
+    """A reclaim or a worker shutdown lands here mid-write; only `httpx.HTTPError` was
+    caught, so a multi-GB `.part` survived every other exit path."""
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        raise asyncio.CancelledError
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+
+    with pytest.raises(asyncio.CancelledError):
+        await download_to_file(client, "https://x/y.zip", tmp_path / "f.zip")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_a_disk_error_mid_write_is_a_named_error_with_no_partial(tmp_path, monkeypatch):
+    def _boom(fh, digest, chunk):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("uadclaw.firmware._write_and_hash", _boom)
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=b"a" * 4096))
+    )
+
+    with pytest.raises(FirmwareDownloadError):
+        await download_to_file(client, "https://x/y.zip", tmp_path / "f.zip")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_a_download_over_the_ceiling_stops_and_cleans_up(tmp_path):
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=b"a" * 8192))
+    )
+
+    with pytest.raises(FirmwareDownloadError) as excinfo:
+        await download_to_file(client, "https://x/y.zip", tmp_path / "f.zip", max_bytes=4096)
+
+    assert "ceiling" in str(excinfo.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+# --- the ack cookie goes to exactly one host ------------------------------------------------
+
+
+async def test_the_terms_cookie_is_not_sent_to_the_download_host(tmp_path):
+    """The terms wall is on the index only — a bare request for a factory zip answers 200,
+    measured 2026-08-11 — and httpx does not strip a caller-supplied Cookie across a
+    cross-origin redirect, so sending it here hands the acknowledgement to the CDN and to
+    wherever the CDN points next."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=b"zip")
+
+    driver = PixelDriver(
+        make_settings(), client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    ref = FirmwareRef(driver="pixel", device="comet", build="A.1", url="https://dl.example/y.zip")
+
+    await driver.fetch(ref, tmp_path)
+
+    assert len(seen) == 1
+    assert "cookie" not in seen[0].headers
+
+
+async def test_a_redirected_index_is_refused_rather_than_followed():
+    """Following it would replay the acknowledgement cookie at whatever host answered."""
+    driver = PixelDriver(
+        make_settings(),
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _r: httpx.Response(302, headers={"location": "https://evil.example/i"})
+            )
+        ),
+    )
+
+    with pytest.raises(FirmwareError) as excinfo:
+        await driver.list_available()
+
+    assert "evil.example" in str(excinfo.value)

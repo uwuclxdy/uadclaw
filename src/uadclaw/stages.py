@@ -45,6 +45,11 @@ class PipelineState(BaseModel):
     ref: FirmwareRef
     # None once `unpack` has deleted the archive it no longer needs.
     archive_path: str | None = None
+    # The digest of what actually arrived, and whether anything could be checked against it.
+    # False means the source published no checksum: the bytes every later stage trusts were
+    # never provable, and that travels with the facts rather than being forgotten here.
+    archive_sha256: str | None = None
+    integrity_verified: bool = False
     partitions: list[str] = []
     artifact_count: int = 0
     apk_count: int = 0
@@ -120,7 +125,23 @@ async def acquire_stage(ctx: StageContext) -> None:
         ref.url,
     )
     archive = await driver.fetch(ref, scratch / FIRMWARE_DIRNAME)
-    await asyncio.to_thread(write_state, scratch, PipelineState(ref=ref, archive_path=str(archive)))
+    if not archive.integrity_verified:
+        logger.warning(
+            "job %s: %s published no checksum for %s, so the archive is integrity-unverified",
+            ctx.job_id,
+            driver.name,
+            ref.build,
+        )
+    await asyncio.to_thread(
+        write_state,
+        scratch,
+        PipelineState(
+            ref=ref,
+            archive_path=str(archive.path),
+            archive_sha256=archive.sha256,
+            integrity_verified=archive.integrity_verified,
+        ),
+    )
 
 
 async def unpack_stage(ctx: StageContext) -> None:

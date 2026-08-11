@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 
 from uadclaw.firmware import (
+    DownloadedArchive,
     EmptyFirmwareIndexError,
     FirmwareDriver,
     FirmwareError,
@@ -96,6 +97,7 @@ class PixelDriver(FirmwareDriver):
         self._cookie_name = settings.pixel_terms_ack_cookie_name
         self._cookie_value = settings.pixel_terms_ack_cookie_value.strip()
         self._timeout = settings.firmware_http_timeout_seconds
+        self._max_archive_bytes = settings.max_firmware_archive_bytes
         # Injected only by tests (a mock transport); production builds one per call so no
         # connection pool outlives the stage that opened it.
         self._client = client
@@ -133,11 +135,24 @@ class PixelDriver(FirmwareDriver):
         client, owned = self._open_client()
         try:
             try:
-                response = await client.get(self._index_url, headers=headers)
+                # `follow_redirects=False` deliberately: the ack cookie is a credential for
+                # this host and httpx does not strip a caller-supplied Cookie header across
+                # a cross-origin redirect. Measured 2026-08-11: this URL answers 200 with no
+                # redirect, so following one would mean the page moved and the operator
+                # should look, not that this should replay the cookie somewhere new.
+                response = await client.get(
+                    self._index_url, headers=headers, follow_redirects=False
+                )
             except httpx.HTTPError as exc:
                 raise FirmwareError(
                     f"PixelDriver.list_available: {self._index_url} is unreachable: {exc}"
                 ) from exc
+            if response.is_redirect:
+                raise FirmwareError(
+                    f"PixelDriver.list_available: {self._index_url} redirected to "
+                    f"{response.headers.get('location')!r}. The index moved; check where before "
+                    "sending Google's terms acknowledgement to a new host."
+                )
             if response.status_code != httpx.codes.OK:
                 raise FirmwareError(
                     f"PixelDriver.list_available: {self._index_url} answered HTTP "
@@ -150,21 +165,25 @@ class PixelDriver(FirmwareDriver):
         logger.info("pixel index: %d factory builds", len(refs))
         return refs
 
-    async def fetch(self, ref: FirmwareRef, dest_dir: Path) -> Path:
+    async def fetch(self, ref: FirmwareRef, dest_dir: Path) -> DownloadedArchive:
         if ref.driver != self.name:
             raise FirmwareInputError(
                 f"PixelDriver.fetch: ref belongs to driver {ref.driver!r}, not {self.name!r}; "
                 "route it to the driver that produced it"
             )
-        headers = self._ack_headers()
+        # No ack cookie here. The terms wall is on the index only: measured 2026-08-11, a
+        # bare request for a factory zip answers 200 with no redirect and no cookie, so
+        # sending one would hand Google's acknowledgement to a CDN that never asked for it
+        # (and, through `follow_redirects`, to wherever that CDN points next).
+        self._ack_headers()  # still refuse to fetch on behalf of an operator who has not accepted
         client, owned = self._open_client()
         try:
             return await download_to_file(
                 client,
                 ref.url,
                 dest_dir / ref.archive_filename,
-                headers=headers,
                 expected_sha256=ref.sha256,
+                max_bytes=self._max_archive_bytes,
             )
         finally:
             if owned:

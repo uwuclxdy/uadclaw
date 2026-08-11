@@ -12,12 +12,16 @@ break without warning, and the rest of the pipeline has to stay green when one d
 """
 
 import abc
+import asyncio
+import datetime
 import hashlib
 import logging
+import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import ClassVar
+from typing import IO, ClassVar
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -117,6 +121,17 @@ class FirmwareRef(BaseModel):
         return f"{self.driver}-{self.device}-{self.build}.zip"
 
 
+@dataclass(frozen=True, slots=True)
+class DownloadedArchive:
+    """What came down, and whether anyone could prove it. `integrity_verified` is False when
+    the source published no checksum to compare against — carried forward rather than assumed
+    either way, since the whole pipeline downstream trusts these bytes."""
+
+    path: Path
+    sha256: str
+    integrity_verified: bool
+
+
 class FirmwareJobParams(BaseModel):
     """A `firmware_analysis` job's target as it arrives from the dashboard.
 
@@ -148,10 +163,36 @@ class FirmwareJobParams(BaseModel):
         )
 
 
+# Android build ids carry their date in the middle field: CP2A.260705.006 -> 2026-07-05.
+# 1,806 of the Pixel index's 2,293 builds parse this way; the other 487 are pre-2016 ids
+# (NDE63H, JLS36C) with no date field at all.
+_BUILD_DATE_RE = re.compile(r"\.(\d{6})\.")
+
+
+def build_date(build: str) -> datetime.date | None:
+    """The build's date, or None for an id that does not carry one."""
+    match = _BUILD_DATE_RE.search(build)
+    if match is None:
+        return None
+    try:
+        return datetime.datetime.strptime(match.group(1), "%y%m%d").date()
+    except ValueError:
+        return None
+
+
 def select_ref(refs: list[FirmwareRef], *, device: str, build: str | None = None) -> FirmwareRef:
-    """Pick one build out of an index listing: the named build, or the last one the source
-    lists for that device (sources list oldest first, so that is the newest). Driver-agnostic
-    on purpose — build selection is not something each OEM should reinvent."""
+    """Pick one build out of an index listing: the named build, or the newest one on offer for
+    that device. Driver-agnostic on purpose — build selection is not something each OEM should
+    reinvent.
+
+    Newest is decided by the date in the build id, not by position. Measured against the real
+    Pixel index on 2026-08-11: taking the last row per device agrees with the date for 56 of
+    58 devices and is WRONG for two — crosshatch and blueline both list SP1A.210812.016.C2
+    (2021-08-12) after RQ3A.211001.001 (2021-10-01). A lexicographic sort is not an option
+    either: the letter prefix resets, so UQ1A (2024) sorts above CP2A (2026). Builds with no
+    parseable date fall back to index order behind every dated build, which keeps the 487
+    pre-2016 ids from ever outranking a real one.
+    """
     for_device = [ref for ref in refs if ref.device == device]
     if not for_device:
         raise FirmwareInputError(
@@ -159,7 +200,15 @@ def select_ref(refs: list[FirmwareRef], *, device: str, build: str | None = None
             f"{len({ref.device for ref in refs})} devices); check the codename"
         )
     if build is None:
-        return for_device[-1]
+        newest = max(
+            enumerate(for_device),
+            key=lambda pair: (
+                build_date(pair[1].build) is not None,
+                build_date(pair[1].build) or datetime.date.min,
+                pair[0],
+            ),
+        )[1]
+        return newest
     wanted = build.upper()
     for ref in for_device:
         if ref.build.upper() == wanted:
@@ -187,9 +236,10 @@ class FirmwareDriver(abc.ABC):
         returning an empty list, because "the index parsed to nothing" is a failure."""
 
     @abc.abstractmethod
-    async def fetch(self, ref: FirmwareRef, dest_dir: Path) -> Path:
-        """Download `ref` into `dest_dir` (created if absent) and return the archive path.
-        Writes nothing outside `dest_dir`: the caller owns retention of that directory."""
+    async def fetch(self, ref: FirmwareRef, dest_dir: Path) -> DownloadedArchive:
+        """Download `ref` into `dest_dir` (created if absent) and return the archive with the
+        digest of what actually arrived. Writes nothing outside `dest_dir`: the caller owns
+        retention of that directory."""
 
 
 DriverFactory = Callable[[Settings], FirmwareDriver]
@@ -231,6 +281,11 @@ def get_driver(name: str, settings: Settings) -> FirmwareDriver:
     return factory(settings)
 
 
+def _write_and_hash(fh: IO[bytes], digest: "hashlib._Hash", chunk: bytes) -> None:
+    fh.write(chunk)
+    digest.update(chunk)
+
+
 async def download_to_file(
     client: httpx.AsyncClient,
     url: str,
@@ -238,12 +293,20 @@ async def download_to_file(
     *,
     headers: dict[str, str] | None = None,
     expected_sha256: str | None = None,
-) -> Path:
+    max_bytes: int | None = None,
+) -> DownloadedArchive:
     """Stream `url` to `dest`, verifying the checksum the index published when there is one.
+    Returns the archive's sha256 alongside its path, so a caller can record what it got.
 
     Downloads land on a `.part` sibling and are renamed only once the body is complete and
     the digest matches, so a truncated or corrupted transfer can never be mistaken for a
-    finished archive by a later stage (or by a resumed attempt).
+    finished archive by a later stage (or by a resumed attempt). Every failure mode deletes
+    that sibling, including cancellation: a reclaim or a shutdown lands here mid-write, and a
+    3.5 GB orphan is exactly the shape retention exists to prevent.
+
+    The write and the hash both run in a worker thread. They are 3,500 iterations over a
+    multi-GB body, and inline they would block the event loop this worker shares with every
+    other slot and with the heartbeat task that keeps the job from being reclaimed.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_name(dest.name + ".part")
@@ -259,14 +322,24 @@ async def download_to_file(
                 )
             with partial.open("wb") as fh:
                 async for chunk in response.aiter_bytes(_DOWNLOAD_CHUNK_BYTES):
-                    fh.write(chunk)
-                    digest.update(chunk)
                     written += len(chunk)
-    except httpx.HTTPError as exc:
+                    if max_bytes is not None and written > max_bytes:
+                        raise FirmwareDownloadError(
+                            f"download_to_file: {url} exceeded the {max_bytes}-byte ceiling after "
+                            f"{written} bytes. Raise MAX_FIRMWARE_ARCHIVE_BYTES if this firmware "
+                            "is genuinely that large; scratch is sized for one image at a time."
+                        )
+                    await asyncio.to_thread(_write_and_hash, fh, digest, chunk)
+    except (httpx.HTTPError, OSError) as exc:
         partial.unlink(missing_ok=True)
         raise FirmwareDownloadError(
-            f"download_to_file: transport error fetching {url} after {written} bytes: {exc}"
+            f"download_to_file: {url} failed after {written} bytes: {exc}"
         ) from exc
+    except BaseException:
+        # Cancellation (worker shutdown, job reclaim) and every other exit path: the partial
+        # file is worthless to anyone and nothing else is tracking it.
+        partial.unlink(missing_ok=True)
+        raise
 
     actual = digest.hexdigest()
     if expected_sha256 is not None and actual != expected_sha256:
@@ -275,6 +348,16 @@ async def download_to_file(
             f"download_to_file: {url} downloaded {written} bytes with sha256 {actual}, but the "
             f"index published {expected_sha256}. The partial file was deleted; retry the job."
         )
+    if expected_sha256 is None:
+        # Not fatal — some sources publish no checksum — but it must not be silent: the
+        # archive is integrity-unverified and the caller records that alongside the digest.
+        logger.warning(
+            "%s came with no published checksum; recording it as integrity-unverified (sha256=%s)",
+            dest.name,
+            actual,
+        )
     partial.replace(dest)
     logger.info("downloaded %s (%d bytes, sha256=%s)", dest.name, written, actual)
-    return dest
+    return DownloadedArchive(
+        path=dest, sha256=actual, integrity_verified=expected_sha256 is not None
+    )
