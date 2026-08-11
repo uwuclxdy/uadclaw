@@ -58,6 +58,19 @@ class _SkipBlankSecretFiles(SecretsSettingsSource):
         return kept
 
 
+def _ordered_names(raw: str) -> tuple[str, ...]:
+    """A comma-separated operator list, deduplicated, in the order it was written.
+
+    Order is preserved rather than sorted because two drivers key "newest build" on index
+    order, and dedup keeps a doubled entry from doubling a crawl.
+    """
+    seen: dict[str, None] = {}
+    for name in raw.split(","):
+        if name.strip():
+            seen.setdefault(name.strip(), None)
+    return tuple(seen)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         secrets_dir="/run/secrets",
@@ -152,6 +165,17 @@ class Settings(BaseSettings):
     # would be thousands of requests per job against a mirror that asks for non-commercial
     # use. The operator names the handful of devices worth tracking instead.
     motorola_devices: str = ""
+    # Samsung (task 11). The PUBLIC version index only. The two FUS endpoints that resolve and
+    # serve the binary are reverse-engineered and live in the driver beside the request shapes
+    # they belong to: an operator cannot repair a protocol change by repointing a host.
+    samsung_index_url: str = "https://fota-cloud-dn.ospserver.net/firmware"
+    # Samsung models (`SM-S911U,SM-S928B`) and CSC region codes (`XAA,EUX`), comma-separated
+    # and both required. The index answers ONE model/CSC pair at a time and 403s for a pair
+    # that does not exist, so there is no catalogue of either to enumerate — the driver probes
+    # the grid the operator names. The two multiply into one request each, so a wide grid is
+    # a wide crawl; the driver caps the product.
+    samsung_models: str = ""
+    samsung_regions: str = ""
     # Read/connect timeout for firmware HTTP. No total deadline: a factory zip is multi-GB
     # and a slow-but-progressing transfer is not a failure.
     firmware_http_timeout_seconds: float = 60.0
@@ -160,9 +184,12 @@ class Settings(BaseSettings):
     payload_dumper_path: str = "payload-dumper-go"
     # Ceiling on a single downloaded archive and on any one member unpacked out of it. Not a
     # disk quota: it stops a mislabelled URL or a decompression bomb from filling scratch
-    # before anything else notices. A Pixel factory zip is ~3.5 GB, so this leaves headroom
-    # for the largest OEM images without leaving the ceiling meaningless.
-    max_firmware_archive_bytes: int = 16 * 1024**3
+    # before anything else notices. A Pixel factory zip is ~3.5 GB and the largest firmware
+    # measured anywhere is Samsung's SM-S928B at 19,252,866,736 bytes encrypted (2026-08-11),
+    # which the previous 16 GiB ceiling refused outright. 32 GiB is that build plus ~1.7x
+    # headroom: enough that a real firmware never trips it, small enough that a runaway
+    # response still stops well short of filling scratch.
+    max_firmware_archive_bytes: int = 32 * 1024**3
 
     # Fact extraction (task 4). Fraction of one device's APKs that may fail to parse before
     # the whole device is refused. The measured baseline is 0 of 312 on real Pixel firmware,
@@ -320,12 +347,18 @@ class Settings(BaseSettings):
 
     @property
     def motorola_device_names(self) -> tuple[str, ...]:
-        """Deduplicated, in the order the operator wrote them, so a crawl is reproducible."""
-        seen: dict[str, None] = {}
-        for name in self.motorola_devices.split(","):
-            if name.strip():
-                seen.setdefault(name.strip(), None)
-        return tuple(seen)
+        return _ordered_names(self.motorola_devices)
+
+    @property
+    def samsung_model_names(self) -> tuple[str, ...]:
+        return _ordered_names(self.samsung_models)
+
+    @property
+    def samsung_region_names(self) -> tuple[str, ...]:
+        """Configured order is load-bearing, not cosmetic: no Samsung version string carries a
+        parseable date, so `select_ref` resolves "newest" as the last row for a model — which
+        is the last CSC listed here."""
+        return _ordered_names(self.samsung_regions)
 
     @property
     def database_url(self) -> str:

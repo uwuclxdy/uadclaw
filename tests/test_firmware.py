@@ -160,7 +160,7 @@ def test_registry_resolves_a_known_driver():
     driver = get_driver("pixel", make_settings())
 
     assert driver.name == "pixel"
-    assert driver_names() == ("motorola", "nothing", "pixel", "xiaomi")
+    assert driver_names() == ("motorola", "nothing", "pixel", "samsung", "xiaomi")
 
 
 def test_unknown_driver_name_is_refused_by_name():
@@ -175,15 +175,18 @@ def test_a_disabled_driver_is_refused_with_its_own_error():
 
     with pytest.raises(FirmwareDriverDisabledError):
         get_driver("pixel", settings)
-    assert enabled_driver_names(settings) == ("motorola", "nothing", "xiaomi")
-    assert driver_names() == ("motorola", "nothing", "pixel", "xiaomi")
+    assert enabled_driver_names(settings) == ("motorola", "nothing", "samsung", "xiaomi")
+    assert driver_names() == ("motorola", "nothing", "pixel", "samsung", "xiaomi")
 
 
 def test_disable_list_tolerates_spacing_and_unrelated_names():
-    settings = make_settings(disabled_firmware_drivers=" samsung , oppo ")
+    # `oppo` and `vivo` are task 11's remaining OEMs and neither has a driver yet, so this
+    # keeps testing what it is named for. It used to say `samsung`, which stopped being an
+    # unrelated name the moment that driver landed — and it would have gone on passing.
+    settings = make_settings(disabled_firmware_drivers=" oppo , vivo ")
 
-    assert settings.disabled_firmware_driver_names == frozenset({"samsung", "oppo"})
-    assert enabled_driver_names(settings) == ("motorola", "nothing", "pixel", "xiaomi")
+    assert settings.disabled_firmware_driver_names == frozenset({"oppo", "vivo"})
+    assert enabled_driver_names(settings) == ("motorola", "nothing", "pixel", "samsung", "xiaomi")
 
 
 # --- ref selection and validation ---------------------------------------------------------

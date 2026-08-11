@@ -10,6 +10,11 @@ dependencies = [
   # repo's measured baseline (312/312 real Pixel APKs, zero errors) is against 4.1.x.
   "androguard>=4.1.4,<5",
   "asyncpg>=0.31.0",
+  # AES-128-ECB for the Samsung driver's `.enc4` decrypt. Declared rather than leaned on as
+  # androguard's transitive dependency, which it already is — the same call `pyyaml` gets
+  # below, and for the same reason: a dependency this code imports directly is this project's
+  # to pin, not something to inherit from a library that could drop it.
+  "cryptography>=50.0.0",
   "fastapi>=0.141.1",
   "httpx>=0.28.1",
   "itsdangerous>=2.2.0",

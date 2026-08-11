@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<versioninfo>
+	<url>https://fota-cloud-dn.ospserver.net/firmware/</url>
+	<firmware>
+		<model>SM-S911U</model>
+		<cc>XAA</cc>
+		<version>
+			<latest o="16">S911USQS8FZG1/S911UOYN8FZG1/S911USQS8FZG1</latest>
+			<upgrade>
+				<value rcount='9' fwsize='430897413'>S911USQU6EYI7/S911UOYN6EYI7/S911USQU6EYI7</value>
+				<value rcount='1' fwsize='457180362'>S911USQU7FZE2/S911UOYN7FZE2/S911USQU7FZE2</value>
+				<value rcount='8' fwsize='432730120'>S911USQS6EYJ5/S911UOYN6EYJ5/S911USQS6EYJ5</value>
+				<value rcount='2' fwsize='4166618722'>S911USQS7EZCI/S911UOYN7EZCI/S911USQS7EZCI</value>
+				<value rcount='1' fwsize='458788337'>S911USQS7FZE3/S911UOYN7FZE3/S911USQS7FZE3</value>
+				<value rcount='5' fwsize='443104265'>S911USQS6EZA1/S911UOYN6EZA1/S911USQS6EZA1</value>
+				<value rcount='7' fwsize='482169769'>S911USQS6EYK3/S911UOYN6EYK3/S911USQS6EYK3</value>
+				<value rcount='4' fwsize='463183039'>S911USQS7EZB6/S911UOYN7EZB6/S911USQS7EZB6</value>
+				<value rcount='3' fwsize='440694754'>S911USQS7EZC1/S911UOYN7EZC1/S911USQS7EZC1</value>
+				<value rcount='1' fwsize='451993027'>S911USQS8FZF5/S911UOYN8FZF5/S911USQS8FZF5</value>
+				<value rcount='6' fwsize='439981369'>S911USQS6EYL1/S911UOYN6EYL1/S911USQS6EYL1</value>
+			</upgrade>
+		</version>
+	</firmware>
+	<polling>
+		<period>1</period>
+		<time>15</time>
+		<range>23</range>
+	</polling>
+	<ActiveDeviceInfo>
+		<CycleOfDeviceHeartbeat>14</CycleOfDeviceHeartbeat>
+		<ServiceURL>https://ifota-apis.samsungdm.com/device/fumo/deviceheartbeat</ServiceURL>
+	</ActiveDeviceInfo>
+	<WiFiConnectedPollingInfo>
+		<Cycle></Cycle>
+		<Activated>FALSE</Activated>
+	</WiFiConnectedPollingInfo>
+</versioninfo>

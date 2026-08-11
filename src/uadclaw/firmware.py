@@ -106,7 +106,12 @@ class FirmwareRef(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     driver: str = Field(pattern=r"^[a-z0-9_]{1,32}$")
-    device: str = Field(pattern=r"^[A-Za-z0-9_]{1,64}$")
+    # `-` is in the DEVICE charset for the same reason it is in the build charset below: every
+    # Samsung model name carries one (`SM-S928B`) and transliterating it changes the product's
+    # identity, which then reaches a human in triage and `package_facts.device_count` as a
+    # name no Samsung document spells. It cannot spell a separator or a traversal, and
+    # `unpack.safe_component` already treats it as a harmless path component.
+    device: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
     # `-` is in the charset because two of the six sources spell their build ids with it and
     # neither can be transliterated without changing the identity: a Nothing release tag is
     # `B4.1-260723-1820` and a Motorola build is `V1TRS35H.60-33-7`. It is the same charset
@@ -164,7 +169,9 @@ class FirmwareJobParams(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     driver: str = Field(pattern=r"^[a-z0-9_]{1,32}$")
-    device: str = Field(pattern=r"^[A-Za-z0-9_]{1,64}$")
+    # Same charset as `FirmwareRef.device`, and the two must not disagree: a narrower one here
+    # is a 422 on a device the driver itself offers (`SM-S928B`).
+    device: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
     # Same charset as `FirmwareRef.build` and for the same reason: a job that names a real
     # Nothing or Motorola build must be creatable, and the two must not disagree about what a
     # build id may spell — a narrower one here is a 422 on a build the driver itself offers.
@@ -279,12 +286,14 @@ def _driver_factories() -> dict[str, DriverFactory]:
     from uadclaw.drivers.motorola import MotorolaDriver
     from uadclaw.drivers.nothing import NothingDriver
     from uadclaw.drivers.pixel import PixelDriver
+    from uadclaw.drivers.samsung import SamsungDriver
     from uadclaw.drivers.xiaomi import XiaomiDriver
 
     return {
         MotorolaDriver.name: MotorolaDriver,
         NothingDriver.name: NothingDriver,
         PixelDriver.name: PixelDriver,
+        SamsungDriver.name: SamsungDriver,
         XiaomiDriver.name: XiaomiDriver,
     }
 

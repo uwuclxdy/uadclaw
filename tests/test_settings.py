@@ -261,3 +261,33 @@ def test_a_credential_is_a_secret_str(monkeypatch, tmp_path):
 
     for field_name in FIELD_BY_ENV_NAME.values():
         assert isinstance(getattr(settings, field_name), SecretStr), field_name
+
+
+def test_the_archive_ceiling_admits_the_largest_firmware_anyone_has_measured(monkeypatch, tmp_path):
+    """`download_to_file` refuses a body past this, so the ceiling decides which OEMs are
+    downloadable at all. Samsung's SM-S928B is 19,252,866,736 bytes encrypted (measured
+    2026-08-11) and the previous 16 GiB default refused it outright — after transferring 16 GiB
+    of it. Pinned with headroom on both sides: a real firmware must fit, and the ceiling must
+    stay far below the disk it protects."""
+    _set_required_env(monkeypatch)
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    largest_measured = 19_252_866_736
+    assert settings.max_firmware_archive_bytes > largest_measured
+    assert settings.max_firmware_archive_bytes < 64 * 1024**3
+
+
+def test_an_operator_name_list_keeps_its_order_and_drops_duplicates(monkeypatch, tmp_path):
+    """Order is load-bearing for two drivers: no Samsung or Motorola version string carries a
+    parseable date, so `select_ref` resolves "newest" as the LAST row it was given."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("SAMSUNG_REGIONS", " XAA , EUX ,XAA, ")
+    monkeypatch.setenv("SAMSUNG_MODELS", "SM-S928B,SM-S911U")
+    monkeypatch.setenv("MOTOROLA_DEVICES", "rtwo, bronco ,rtwo")
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.samsung_region_names == ("XAA", "EUX")
+    assert settings.samsung_model_names == ("SM-S928B", "SM-S911U")
+    assert settings.motorola_device_names == ("rtwo", "bronco")

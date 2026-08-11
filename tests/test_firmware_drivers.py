@@ -1,4 +1,4 @@
-"""The Xiaomi, Nothing and Motorola drivers: index parsing, ordering, terms and fetch.
+"""The Xiaomi, Nothing, Motorola and Samsung drivers: index parsing, ordering, terms and fetch.
 
 No network. Each driver reads a trimmed slice of its real index out of `tests/fixtures/`:
 
@@ -12,18 +12,40 @@ No network. Each driver reads a trimmed slice of its real index out of `tests/fi
   its tag, one with no image archive at all, and one release-tooling tag with no codename.
 - `motorola_h5ai_listings.json` — the h5ai API's real responses for the 7 paths one `rtwo`
   crawl touches, ancestor chains included, because filtering those out is load-bearing.
+- `samsung_version_index.xml`, `samsung_binary_inform.xml`, `samsung_access_denied.xml` — the
+  three real documents `SM-S911U`/`XAA` returned on 2026-08-11, byte for byte. The inform
+  response is what the decryption key is derived from, so the key this suite asserts is the
+  one measured against the live server rather than one recomputed from the same code.
 
 Every HTTP call goes through an `httpx.MockTransport` that records what was sent.
 """
 
+import hashlib
 import json
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from uadclaw.drivers.motorola import MotorolaDriver, parse_firmware_filename
 from uadclaw.drivers.nothing import NothingDriver, parse_releases
+from uadclaw.drivers.samsung import (
+    AES_BLOCK_BYTES,
+    DOWNLOAD_URL,
+    MAX_INDEX_PROBES,
+    SamsungDriver,
+    SamsungProtocolError,
+    auth_signature,
+    binary_init_body,
+    decrypt_archive,
+    logic_check,
+    normalize_version,
+    parse_binary_inform,
+    parse_version_index,
+)
 from uadclaw.drivers.xiaomi import (
     WORKING_CDN_HOST,
     XiaomiDriver,
@@ -78,12 +100,12 @@ def mock_client(handler) -> httpx.AsyncClient:
 
 
 def test_every_driver_is_registered_and_resolvable():
-    assert driver_names() == ("motorola", "nothing", "pixel", "xiaomi")
+    assert driver_names() == ("motorola", "nothing", "pixel", "samsung", "xiaomi")
     for name in driver_names():
         assert get_driver(name, make_settings()).name == name
 
 
-@pytest.mark.parametrize("disabled", ["xiaomi", "nothing", "motorola"])
+@pytest.mark.parametrize("disabled", ["xiaomi", "nothing", "motorola", "samsung"])
 def test_disabling_one_driver_leaves_the_others_resolvable(disabled):
     """Task 11's whole point: a source that breaks is switched off without touching a stage."""
     settings = make_settings(disabled_firmware_drivers=disabled)
@@ -99,8 +121,8 @@ def test_disabling_one_driver_leaves_the_others_resolvable(disabled):
         assert get_driver(name, settings).name == name
 
 
-def test_all_three_new_drivers_can_be_disabled_at_once():
-    settings = make_settings(disabled_firmware_drivers="xiaomi, nothing ,motorola")
+def test_all_four_new_drivers_can_be_disabled_at_once():
+    settings = make_settings(disabled_firmware_drivers="xiaomi, nothing ,motorola,samsung")
 
     assert enabled_driver_names(settings) == ("pixel",)
 
@@ -581,12 +603,592 @@ async def test_motorola_fetch_records_the_archive_as_integrity_unverified(tmp_pa
     assert archive.path.name == "motorola-rtwo-V1TRS35H.60-33-7_RETAIL.zip"
 
 
+# --- Samsung ---------------------------------------------------------------------------------
+
+SAMSUNG_MODEL = "SM-S911U"
+SAMSUNG_REGION = "XAA"
+SAMSUNG_BUILD = "S911USQS8FZG1_XAA"
+SAMSUNG_VERSION = "S911USQS8FZG1/S911UOYN8FZG1/S911USQS8FZG1/S911USQS8FZG1"
+SAMSUNG_BINARY_NAME = "SM-S911U_2_20260708221800_qd55e39o59_fac.zip.enc4"
+# Measured against the live server on 2026-08-11, not recomputed here: this is the key that
+# actually decrypted the first block of the real 11,565,187,312-byte archive to `PK\x03\x04`.
+SAMSUNG_KEY = bytes.fromhex("b7f921b15f9e3004f4241aaa2b7f4a82")
+
+
+def samsung_settings(**overrides) -> Settings:
+    return make_settings(
+        **{"samsung_models": SAMSUNG_MODEL, "samsung_regions": SAMSUNG_REGION, **overrides}
+    )
+
+
+def samsung_fixture(name: str) -> str:
+    return (FIXTURES / f"samsung_{name}.xml").read_text(encoding="utf-8")
+
+
+def samsung_index_url(model: str = SAMSUNG_MODEL, region: str = SAMSUNG_REGION) -> str:
+    return f"https://fota-cloud-dn.ospserver.net/firmware/{region}/{model}/version.xml"
+
+
+def pkcs7_encrypt(plaintext: bytes, key: bytes) -> bytes:
+    padding = AES_BLOCK_BYTES - len(plaintext) % AES_BLOCK_BYTES
+    encryptor = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
+    return encryptor.update(plaintext + bytes([padding]) * padding) + encryptor.finalize()
+
+
+def samsung_plain_archive() -> bytes:
+    """A stand-in for the factory zip: a real zip, because the decrypt asserts the magic."""
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("AP_S911USQS8FZG1_meta_OS16.tar.md5", b"tar-bytes" * 512)
+        zf.writestr("BL_S911USQS8FZG1.tar.md5", b"bl-bytes" * 128)
+    return buffer.getvalue()
+
+
+def samsung_client(
+    *,
+    seen: list[httpx.Request] | None = None,
+    index: dict[str, str] | None = None,
+    inform: str | None = None,
+    body: bytes | None = None,
+) -> httpx.AsyncClient:
+    """The whole chain: the public index, the three FUS posts, and the binary.
+
+    Each FUS response carries its OWN `NONCE` header, so a client that keeps signing with the
+    first one is visibly wrong rather than accidentally fine.
+    """
+    served_index = (
+        {samsung_index_url(): samsung_fixture("version_index")} if index is None else index
+    )
+    nonces = iter(["nonce-generate-01", "nonce-inform-002", "nonce-init-0003"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(request)
+        url = str(request.url)
+        if "version.xml" in url:
+            document = served_index.get(url)
+            if document is None:
+                return httpx.Response(403, text=samsung_fixture("access_denied"))
+            return httpx.Response(200, text=document)
+        if url.startswith(DOWNLOAD_URL):
+            return httpx.Response(200, content=body if body is not None else b"")
+        headers = {"NONCE": next(nonces)}
+        if url.endswith("GenerateNonce.do"):
+            return httpx.Response(200, text="", headers=headers)
+        if url.endswith("BinaryInform.do"):
+            return httpx.Response(
+                200,
+                text=inform if inform is not None else samsung_fixture("binary_inform"),
+                headers=headers,
+            )
+        return httpx.Response(
+            200,
+            text="<FUSMsg><FUSBody><Results><Status>S00</Status></Results></FUSBody></FUSMsg>",
+            headers=headers,
+        )
+
+    return mock_client(handler)
+
+
+def samsung_ref(build: str = SAMSUNG_BUILD, device: str = SAMSUNG_MODEL) -> FirmwareRef:
+    return FirmwareRef(driver="samsung", device=device, build=build, url=samsung_index_url(device))
+
+
+def test_samsung_index_puts_the_csc_in_the_build_and_the_model_in_the_device():
+    """Two CSCs of one model are two regional firmware lines of ONE phone: the CSC in `device`
+    would make that phone count twice toward `package_facts.device_count`."""
+    ref = parse_version_index(
+        samsung_fixture("version_index"),
+        model=SAMSUNG_MODEL,
+        region=SAMSUNG_REGION,
+        source_url=samsung_index_url(),
+    )
+
+    assert ref.device == "SM-S911U"
+    assert ref.build == SAMSUNG_BUILD
+    assert ref.android_version == "16"
+    # A Samsung build has no download URL until an authenticated inform call produces one, so
+    # the ref names the document the offer came from.
+    assert ref.url == samsung_index_url()
+    assert ref.archive_filename == "samsung-SM-S911U-S911USQS8FZG1_XAA.zip"
+
+
+def test_samsung_normalizes_the_three_part_index_version_to_the_four_fus_wants():
+    assert normalize_version("A/B/C") == "A/B/C/A"
+    assert normalize_version("A/B//D") == "A/B/A/D"
+    assert normalize_version(SAMSUNG_VERSION) == SAMSUNG_VERSION
+
+
+async def test_samsung_reads_a_403_as_a_pair_that_does_not_exist_rather_than_a_failure():
+    """`SM-A546B` answers 403 under DBT, XEO, BTU and ATT and 200 under EUX. Coding that as an
+    error would make one wrong pairing fail the whole grid."""
+    driver = SamsungDriver(
+        samsung_settings(samsung_models="SM-S911U,SM-A546B", samsung_regions="XAA,DBT"),
+        client=samsung_client(),
+    )
+
+    refs = await driver.list_available()
+
+    assert [(ref.device, ref.build) for ref in refs] == [("SM-S911U", SAMSUNG_BUILD)]
+
+
+async def test_samsung_grid_where_no_pair_exists_is_an_error_not_an_empty_catalogue():
+    driver = SamsungDriver(
+        samsung_settings(samsung_models="SM-X999Z"), client=samsung_client(index={})
+    )
+
+    with pytest.raises(EmptyFirmwareIndexError) as excinfo:
+        await driver.list_available()
+
+    assert "SM-X999Z/XAA" in str(excinfo.value)
+
+
+async def test_samsung_index_answering_200_with_no_latest_build_is_an_error():
+    """A pair that does not exist answers 403, so a 200 carrying nothing is a shape change."""
+    driver = SamsungDriver(
+        samsung_settings(),
+        client=samsung_client(
+            index={samsung_index_url(): "<versioninfo><firmware/></versioninfo>"}
+        ),
+    )
+
+    with pytest.raises(EmptyFirmwareIndexError) as excinfo:
+        await driver.list_available()
+
+    assert "no <latest> build" in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
-    "driver_class", [XiaomiDriver, NothingDriver, MotorolaDriver], ids=lambda c: c.name
+    ("models", "regions"),
+    [("", "XAA"), ("SM-S911U", ""), ("", "")],
+)
+async def test_samsung_without_a_configured_grid_refuses_rather_than_guessing(models, regions):
+    driver = SamsungDriver(
+        samsung_settings(samsung_models=models, samsung_regions=regions), client=samsung_client()
+    )
+
+    with pytest.raises(FirmwareInputError) as excinfo:
+        await driver.list_available()
+
+    assert "SAMSUNG_MODELS" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("models", "regions", "offender"),
+    [
+        ("../../etc", "XAA", "../../etc"),
+        ("SM-S911U", "xaa", "xaa"),
+        ("SM-S911U", "XA", "XA"),
+        ("sm-s911u", "XAA", "sm-s911u"),
+    ],
+)
+async def test_samsung_refuses_a_model_or_csc_that_is_not_one(models, regions, offender):
+    """Both reach a URL, so both are refused rather than transliterated."""
+    driver = SamsungDriver(
+        samsung_settings(samsung_models=models, samsung_regions=regions), client=samsung_client()
+    )
+
+    with pytest.raises(FirmwareInputError) as excinfo:
+        await driver.list_available()
+
+    assert offender in str(excinfo.value)
+
+
+async def test_samsung_refuses_a_grid_past_the_probe_ceiling():
+    """The grid MULTIPLIES: models times CSCs is the request count against someone else's
+    index, so it is capped on the product rather than on either axis."""
+    models = ",".join(f"SM-X{index:03d}" for index in range(MAX_INDEX_PROBES // 2 + 1))
+    driver = SamsungDriver(
+        samsung_settings(samsung_models=models, samsung_regions="XAA,EUX"), client=samsung_client()
+    )
+
+    with pytest.raises(FirmwareInputError) as excinfo:
+        await driver.list_available()
+
+    assert str(MAX_INDEX_PROBES) in str(excinfo.value)
+
+
+async def test_samsung_newest_resolves_to_the_last_configured_csc():
+    """No Samsung version string carries a parseable date, so `select_ref` falls back to row
+    order — and across two CSCs of one model there is no "newer", only the operator's order."""
+    eux_index = samsung_fixture("version_index").replace("S911USQS8FZG1", "S911BXXU9GZH2")
+    driver = SamsungDriver(
+        samsung_settings(samsung_regions="XAA,EUX"),
+        client=samsung_client(
+            index={
+                samsung_index_url(): samsung_fixture("version_index"),
+                samsung_index_url(region="EUX"): eux_index,
+            }
+        ),
+    )
+
+    refs = await driver.list_available()
+
+    assert [ref.build for ref in refs] == [SAMSUNG_BUILD, "S911BXXU9GZH2_EUX"]
+    assert select_ref(refs, device=SAMSUNG_MODEL).build == "S911BXXU9GZH2_EUX"
+    assert select_ref(refs, device=SAMSUNG_MODEL, build=SAMSUNG_BUILD).build == SAMSUNG_BUILD
+
+
+def test_samsung_inform_derives_the_decryption_key_measured_against_the_live_server():
+    """`md5(logic_check(BINARY_SW_VERSION, LOGIC_VALUE_FACTORY))`. The expected value is the
+    key that really decrypted the real archive, so this fails if either input is read from the
+    wrong field — which is exactly how every retired client broke."""
+    binary = parse_binary_inform(
+        samsung_fixture("binary_inform"), model=SAMSUNG_MODEL, region=SAMSUNG_REGION
+    )
+
+    assert binary.key == SAMSUNG_KEY
+    assert binary.filename == SAMSUNG_BINARY_NAME
+    assert binary.model_path == "/neofus/911/"
+    assert binary.size == 11565187312
+    assert binary.version == SAMSUNG_VERSION
+    assert binary.model_type == "9"
+    assert binary.region == SAMSUNG_REGION
+    assert binary.download_url == (f"{DOWNLOAD_URL}?file=/neofus/911/{SAMSUNG_BINARY_NAME}")
+    # https, not the plain http samloader-rs uses: this pipeline never pulls firmware in the
+    # clear, and the host serves the same path over TLS (measured 2026-08-11, 206 + a correct
+    # Content-Range).
+    assert binary.download_url.startswith("https://")
+
+
+def test_samsung_inform_reads_binary_sw_version_and_not_the_field_retired_clients_read():
+    """`LATEST_FW_VERSION` is ABSENT from this response and `BINARY_SW_VERSION` is present, so
+    a client reading only the former derives its key from nothing and decrypts to garbage of
+    exactly the right size."""
+    document = samsung_fixture("binary_inform")
+    assert "LATEST_FW_VERSION" not in document
+
+    fallback = document.replace("BINARY_SW_VERSION", "LATEST_FW_VERSION")
+    binary = parse_binary_inform(fallback, model=SAMSUNG_MODEL, region=SAMSUNG_REGION)
+
+    assert binary.version == SAMSUNG_VERSION
+    assert binary.key == SAMSUNG_KEY
+
+
+def test_samsung_key_comes_from_the_factory_logic_value_and_not_the_home_one():
+    """The real response carries the SAME value in both fields, so no assertion against it can
+    tell the two apart — swapping them there is an equivalent mutant. This forces them apart so
+    the choice is pinned, and `LOGIC_VALUE_FACTORY` is the one FUS derives the factory
+    binary's key from."""
+    document = samsung_fixture("binary_inform")
+    assert document.count("xs6z6jreet76o8j3") == 2, "fixture no longer carries both values"
+    split = document.replace(
+        "<LOGIC_VALUE_HOME><Data>xs6z6jreet76o8j3</Data>",
+        "<LOGIC_VALUE_HOME><Data>zzzzzzzzzzzzzzzz</Data>",
+    )
+
+    binary = parse_binary_inform(split, model=SAMSUNG_MODEL, region=SAMSUNG_REGION)
+
+    assert binary.key == SAMSUNG_KEY
+    # Positive control: the home value really would produce a different key, so the assertion
+    # above is discriminating rather than insensitive to the field it names.
+    home_only = split.replace("LOGIC_VALUE_FACTORY", "LOGIC_VALUE_UNUSED")
+    assert parse_binary_inform(home_only, model=SAMSUNG_MODEL, region=SAMSUNG_REGION).key != (
+        SAMSUNG_KEY
+    )
+
+
+def test_samsung_inform_that_is_not_s00_is_a_protocol_error():
+    denied = samsung_fixture("binary_inform").replace(
+        "<Status>S00</Status>", "<Status>408</Status>"
+    )
+
+    with pytest.raises(SamsungProtocolError) as excinfo:
+        parse_binary_inform(denied, model=SAMSUNG_MODEL, region=SAMSUNG_REGION)
+
+    assert "408" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("dropped", ["BINARY_NAME", "MODEL_PATH", "LOGIC_VALUE"])
+def test_samsung_inform_missing_a_field_the_download_needs_is_a_protocol_error(dropped):
+    document = samsung_fixture("binary_inform").replace(dropped, "REMOVED_FIELD")
+
+    with pytest.raises(SamsungProtocolError) as excinfo:
+        parse_binary_inform(document, model=SAMSUNG_MODEL, region=SAMSUNG_REGION)
+
+    assert dropped in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "binary_name",
+    [
+        "../../etc/passwd",
+        "SM-S911U.zip.enc4&file=/other/thing",
+        "SM S911U.zip.enc4",
+        "",
+    ],
+)
+def test_samsung_refuses_a_binary_name_that_could_reshape_the_download_url(binary_name):
+    """`BINARY_NAME` and `MODEL_PATH` arrive inside a document downloaded from a third party
+    and are the only untrusted values in the request URL."""
+    document = samsung_fixture("binary_inform").replace(SAMSUNG_BINARY_NAME, binary_name)
+
+    with pytest.raises(SamsungProtocolError):
+        parse_binary_inform(document, model=SAMSUNG_MODEL, region=SAMSUNG_REGION)
+
+
+@pytest.mark.parametrize("model_path", ["/neofus/911", "neofus/911/", "/neofus/../911/"])
+def test_samsung_refuses_a_model_path_that_is_not_one(model_path):
+    document = samsung_fixture("binary_inform").replace(
+        "<MODEL_PATH><Data>/neofus/911/</Data>", f"<MODEL_PATH><Data>{model_path}</Data>"
+    )
+
+    with pytest.raises(SamsungProtocolError):
+        parse_binary_inform(document, model=SAMSUNG_MODEL, region=SAMSUNG_REGION)
+
+
+@pytest.mark.parametrize("declared", ["11565187313", "0", "-16", "eleven"])
+def test_samsung_refuses_a_declared_size_that_is_not_a_whole_number_of_aes_blocks(declared):
+    """A `.enc4` is padded to the 16-byte block, so a size that is not a multiple of one is a
+    protocol change rather than a small firmware."""
+    document = samsung_fixture("binary_inform").replace(
+        "<BINARY_BYTE_SIZE><Data>11565187312</Data>", f"<BINARY_BYTE_SIZE><Data>{declared}</Data>"
+    )
+
+    with pytest.raises(SamsungProtocolError):
+        parse_binary_inform(document, model=SAMSUNG_MODEL, region=SAMSUNG_REGION)
+
+
+def test_samsung_document_carrying_a_dtd_is_refused_unparsed():
+    """Same threat and the same mitigation `etcconfig` applies to a vendor image's config
+    files: `xml.etree` expands internal entities and no Samsung document has a DTD."""
+    bomb = (
+        '<?xml version="1.0"?><!DOCTYPE versioninfo [<!ENTITY a "aaaaaaaaaa">]>'
+        "<versioninfo><firmware><version><latest>&a;</latest></version></firmware></versioninfo>"
+    )
+
+    with pytest.raises(SamsungProtocolError) as excinfo:
+        parse_version_index(bomb, model=SAMSUNG_MODEL, region=SAMSUNG_REGION, source_url="fixture")
+
+    assert "DTD" in str(excinfo.value)
+
+
+def test_samsung_document_past_the_byte_ceiling_is_refused_unparsed():
+    with pytest.raises(SamsungProtocolError) as excinfo:
+        parse_binary_inform("<FUSMsg>" + " " * (1024 * 1024), model="M", region="XAA")
+
+    assert "ceiling" in str(excinfo.value)
+
+
+def test_samsung_auth_signature_encrypts_the_raw_nonce_and_never_decrypts_it():
+    """One AES-128-ECB block over `nonce[:16]` right-padded with ASCII `0`. Every published
+    Python client tries to DECRYPT this value first, gets an empty string, and reads as a
+    network problem rather than as a protocol change."""
+    assert auth_signature("abc") == "cc10cf6cabc638ad81d70765ffe4b83c"
+    # Padding is applied to the same 16 bytes a longer nonce would be truncated to, so these
+    # two must agree.
+    assert auth_signature("abc0000000000000") == auth_signature("abc")
+    assert auth_signature("abc00000000000009999") == auth_signature("abc")
+    assert len(auth_signature("")) == 32
+
+
+def test_samsung_init_logic_check_is_computed_over_the_filename_slice():
+    """The call whose OMISSION answers HTTP 401 after the whole transfer. Its `LOGIC_CHECK`
+    input is `filename[-25:-9]` — sliced from the END, so it is independent of how long the
+    model name is."""
+    binary = parse_binary_inform(
+        samsung_fixture("binary_inform"), model=SAMSUNG_MODEL, region=SAMSUNG_REGION
+    )
+    nonce = "nonce-init-0003"
+
+    body = binary_init_body(binary, nonce=nonce)
+
+    assert SAMSUNG_BINARY_NAME[-25:-9] == "0_qd55e39o59_fac"
+    assert f"<LOGIC_CHECK><Data>{logic_check('0_qd55e39o59_fac', nonce)}</Data>" in body
+    assert f"<BINARY_NAME><Data>{SAMSUNG_BINARY_NAME}</Data>" in body
+    assert "<DEVICE_MODEL_TYPE><Data>9</Data>" in body
+    assert "<DEVICE_LOCAL_CODE><Data>XAA</Data>" in body
+
+
+def test_samsung_terms_state_the_reverse_engineered_posture_rather_than_a_public_one():
+    posture = SamsungDriver(samsung_settings()).terms()
+
+    assert posture.risk is TermsRisk.REVERSE_ENGINEERED
+    assert "no credential is presented" in posture.summary
+
+
+async def test_samsung_fetch_walks_the_whole_handshake_and_decrypts_what_it_downloads(tmp_path):
+    """The end-to-end shape, hermetically: index, nonce, inform, init, binary — in that order,
+    each request signed with the nonce the PREVIOUS response issued."""
+    plaintext = samsung_plain_archive()
+    seen: list[httpx.Request] = []
+    driver = SamsungDriver(
+        samsung_settings(),
+        client=samsung_client(seen=seen, body=pkcs7_encrypt(plaintext, SAMSUNG_KEY)),
+    )
+
+    archive = await driver.fetch(samsung_ref(), tmp_path)
+
+    assert [request.url.path.rsplit("/", 1)[-1] for request in seen] == [
+        "version.xml",
+        "NF_SmartDownloadGenerateNonce.do",
+        "NF_SmartDownloadBinaryInform.do",
+        "NF_SmartDownloadBinaryInitForMass.do",
+        "NF_SmartDownloadBinaryForMass.do",
+    ]
+    # The nonce ROTATES on every response carrying one, and the next request must be signed
+    # with the newest. A client that signs everything with the first works until it does not.
+    assert 'nonce="nonce-inform-002"' in seen[3].headers["authorization"]
+    assert 'nonce="nonce-init-0003"' in seen[4].headers["authorization"]
+    assert auth_signature("nonce-init-0003") in seen[4].headers["authorization"]
+    assert seen[4].headers["user-agent"] == "SMART 2.0"
+
+    assert archive.path.read_bytes() == plaintext
+    assert archive.path.name == "samsung-SM-S911U-S911USQS8FZG1_XAA.zip"
+    assert archive.sha256 == hashlib.sha256(plaintext).hexdigest()
+    # FUS publishes no digest of the plaintext this pipeline keeps.
+    assert archive.integrity_verified is False
+    # The encrypted form is decrypted IN PLACE and renamed, so nothing is left beside it.
+    assert [path.name for path in tmp_path.iterdir()] == [archive.path.name]
+
+
+async def test_samsung_fetch_refuses_a_wrong_key_rather_than_keeping_the_garbage(tmp_path):
+    """A wrong key yields a file of exactly the right size and complete garbage, which no
+    exception reports on its own."""
+    plaintext = samsung_plain_archive()
+    wrong = bytes(16)
+    driver = SamsungDriver(
+        samsung_settings(), client=samsung_client(body=pkcs7_encrypt(plaintext, wrong))
+    )
+
+    with pytest.raises(FirmwareDownloadError) as excinfo:
+        await driver.fetch(samsung_ref(), tmp_path)
+
+    assert "padding" in str(excinfo.value) or "zip magic" in str(excinfo.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_samsung_fetch_refuses_a_body_that_decrypts_to_something_other_than_a_zip(tmp_path):
+    """Valid padding is not proof: it is one byte value in 256 by luck, so the magic is
+    checked too."""
+    driver = SamsungDriver(
+        samsung_settings(),
+        client=samsung_client(body=pkcs7_encrypt(b"7z\xbc\xaf'\x1c" * 8, SAMSUNG_KEY)),
+    )
+
+    with pytest.raises(FirmwareDownloadError) as excinfo:
+        await driver.fetch(samsung_ref(), tmp_path)
+
+    assert "zip magic" in str(excinfo.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_samsung_fetch_refuses_a_build_the_index_no_longer_publishes(tmp_path):
+    """Samsung's index carries only the CURRENT build per pair, so a stale ref cannot be
+    resolved — and resolving it to whatever is current would download a build nobody named."""
+    driver = SamsungDriver(samsung_settings(), client=samsung_client())
+
+    with pytest.raises(FirmwareInputError) as excinfo:
+        await driver.fetch(samsung_ref(build="S911USQS7EYH1_XAA"), tmp_path)
+
+    assert "S911USQS7EYH1_XAA" in str(excinfo.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_samsung_fetch_refuses_a_pair_the_index_stopped_publishing_at_all(tmp_path):
+    driver = SamsungDriver(samsung_settings(), client=samsung_client(index={}))
+
+    with pytest.raises(FirmwareError) as excinfo:
+        await driver.fetch(samsung_ref(), tmp_path)
+
+    assert "403" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("build", ["S911USQS8FZG1", "S911USQS8FZG1_xaa", "_XAA"])
+async def test_samsung_fetch_refuses_a_build_that_is_not_a_samsung_build_id(build, tmp_path):
+    driver = SamsungDriver(samsung_settings(), client=samsung_client())
+
+    with pytest.raises(FirmwareInputError) as excinfo:
+        await driver.fetch(samsung_ref(build=build), tmp_path)
+
+    assert "<PDA>_<CSC>" in str(excinfo.value)
+
+
+async def test_samsung_fetch_refuses_a_binary_resolved_for_another_region(tmp_path):
+    """Asked for XAA and given a binary for another CSC: that is firmware for a phone nobody
+    asked about, and it would be recorded under this device's name."""
+    driver = SamsungDriver(
+        samsung_settings(),
+        client=samsung_client(
+            inform=samsung_fixture("binary_inform").replace(
+                "<BINARY_LOCAL_CODE><Data>XAA</Data>", "<BINARY_LOCAL_CODE><Data>EUX</Data>"
+            )
+        ),
+    )
+
+    with pytest.raises(SamsungProtocolError) as excinfo:
+        await driver.fetch(samsung_ref(), tmp_path)
+
+    assert "EUX" in str(excinfo.value)
+
+
+def test_samsung_decrypt_strips_the_padding_and_digests_the_plaintext(tmp_path):
+    """The digest covers what this pipeline KEEPS, not the padded form that was on the wire —
+    otherwise the archive's recorded identity is of a file nobody has."""
+    plaintext = samsung_plain_archive()
+    path = tmp_path / "archive.zip.enc4"
+    path.write_bytes(pkcs7_encrypt(plaintext, SAMSUNG_KEY))
+
+    digest = decrypt_archive(path, SAMSUNG_KEY, context="test")
+
+    assert path.read_bytes() == plaintext
+    assert digest == hashlib.sha256(plaintext).hexdigest()
+    assert path.stat().st_size == len(plaintext)
+
+
+def test_samsung_decrypt_spans_the_chunk_boundary_it_reads_in(tmp_path):
+    """The in-place decrypt reads in 4 MB chunks and holds back the final block for the
+    padding, so an archive several chunks long is the case that separates a working seek from
+    one that rewrites the same offset."""
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("AP.tar.md5", bytes(range(256)) * 40_000)
+    plaintext = buffer.getvalue()
+    assert len(plaintext) > 4 * 1024 * 1024 * 2, "fixture must span more than two read chunks"
+    path = tmp_path / "archive.zip.enc4"
+    path.write_bytes(pkcs7_encrypt(plaintext, SAMSUNG_KEY))
+
+    digest = decrypt_archive(path, SAMSUNG_KEY, context="test")
+
+    assert path.read_bytes() == plaintext
+    assert digest == hashlib.sha256(plaintext).hexdigest()
+
+
+@pytest.mark.parametrize("size", [0, 17])
+def test_samsung_decrypt_refuses_a_file_that_is_not_whole_aes_blocks(size, tmp_path):
+    path = tmp_path / "archive.zip.enc4"
+    path.write_bytes(b"x" * size)
+
+    with pytest.raises(FirmwareDownloadError) as excinfo:
+        decrypt_archive(path, SAMSUNG_KEY, context="test")
+
+    assert "16-byte" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("declared_padding", [0, AES_BLOCK_BYTES + 1, 200])
+def test_samsung_decrypt_refuses_padding_no_pkcs7_encoder_would_write(declared_padding, tmp_path):
+    plaintext = samsung_plain_archive()
+    forged = plaintext + bytes([declared_padding]) * (
+        AES_BLOCK_BYTES - len(plaintext) % AES_BLOCK_BYTES
+    )
+    encryptor = Cipher(algorithms.AES(SAMSUNG_KEY), modes.ECB()).encryptor()
+    path = tmp_path / "archive.zip.enc4"
+    path.write_bytes(encryptor.update(forged) + encryptor.finalize())
+
+    with pytest.raises(FirmwareDownloadError) as excinfo:
+        decrypt_archive(path, SAMSUNG_KEY, context="test")
+
+    assert "padding" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "driver_class",
+    [XiaomiDriver, NothingDriver, MotorolaDriver, SamsungDriver],
+    ids=lambda c: c.name,
 )
 async def test_a_driver_refuses_a_ref_belonging_to_another_driver(driver_class, tmp_path):
     driver = driver_class(
-        make_settings(motorola_devices="rtwo"),
+        samsung_settings(motorola_devices="rtwo"),
         client=mock_client(lambda _r: httpx.Response(200, content=b"")),
     )
     ref = FirmwareRef(driver="pixel", device="comet", build="A.1", url="https://x/y.zip")
