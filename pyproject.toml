@@ -6,6 +6,9 @@ requires-python = ">=3.12"
 license         = { text = "MIT" }
 dependencies = [
   "alembic>=1.19.1",
+  # Pinned to a minor floor deliberately: androguard 4.x is not a drop-in for 3.x, and this
+  # repo's measured baseline (312/312 real Pixel APKs, zero errors) is against 4.1.x.
+  "androguard>=4.1.4,<5",
   "asyncpg>=0.31.0",
   "fastapi>=0.141.1",
   "httpx>=0.28.1",
