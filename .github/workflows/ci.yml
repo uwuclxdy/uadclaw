@@ -44,3 +44,16 @@ jobs:
 
       - name: pytest
         run: uv run pytest -q
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # GitHub-hosted runners build with BuildKit by default, so this only proves the
+      # BuildKit path. `deploy.sh` builds over ssh on a host whose builder nobody asserts —
+      # the Dockerfile writes its tarball sha256 twice for exactly that reason (`ADD
+      # --checksum` is silently ignored by the legacy builder; the `sha256sum -c` inside the
+      # `RUN` is the half that holds there). A green run here does not prove the
+      # legacy-builder path.
+      - name: docker build
+        run: docker build .
