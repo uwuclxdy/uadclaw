@@ -343,7 +343,9 @@ async def test_the_samsung_driver_reaches_the_acquire_stage_and_lands_a_plain_zi
     state = read_state(scratch)
     assert state.ref.device == "SM-S911U"
     assert state.ref.build == "S911USQS8FZG1_XAA"
-    assert state.integrity_verified is False
+    # Verified against the CRC32 FUS published for the encrypted body, which the acquire stage
+    # records and the dashboard reads.
+    assert state.integrity_verified is True
     archive = Path(state.archive_path)
     assert archive.name == "samsung-SM-S911U-S911USQS8FZG1_XAA.zip"
     assert archive.read_bytes() == plaintext

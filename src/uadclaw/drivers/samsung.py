@@ -38,6 +38,14 @@ assumed: the PKCS#7 padding is validated strictly and the result must open with 
 because a wrong key yields a file of exactly the right size and complete garbage, which no
 exception would otherwise report.
 
+**FUS does publish an integrity value, and it covers the encrypted body.** `BINARY_CRC` is the
+CRC32 of the `.enc4` — measured 2026-08-11 over the full 11,565,187,312-byte `SM-S911U`/`XAA`
+download, whose CRC32 is 949352961, exactly what the inform response declared; the plaintext's
+is 3102581189 and matches nothing. So it is checked, in the decrypt pass that already reads
+every ciphertext byte, and a Samsung archive comes back `integrity_verified=True` rather than
+trusting bytes nobody vouched for. It is a CRC rather than a cryptographic digest — it catches
+a corrupt transfer, not a hostile one — which is the same standing Xiaomi's md5 has here.
+
 **What lands on disk is a Samsung factory zip, which `uadclaw.unpack` cannot yet open.** Its
 six members are `.tar.md5` archives (a tar with an md5 line appended) holding LZ4-framed
 images — measured on `SM-S911U/XAA`: the AP member is 11,465,093,243 bytes of tar whose first
@@ -51,6 +59,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -112,6 +121,8 @@ _BINARY_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{25,160}$")
 # than escaped; these two were the exception until a reviewer said so.
 _VERSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}(?:/[A-Za-z0-9._-]{0,64}){1,3}$")
 _MODEL_TYPE_RE = re.compile(r"^[0-9]{1,4}$")
+# An unsigned 32-bit CRC in decimal, which is what `BINARY_CRC` carries (949352961).
+_CRC32_RE = re.compile(r"^(?:[0-9]{1,10})$")
 # The lookahead is what refuses a `.` or `..` COMPONENT: the charset alone admits both, and a
 # `/neofus/../911/` reaching a server that normalises its own paths asks for a resource this
 # pipeline never named. Same call `unpack.safe_archive_path` makes about an image listing.
@@ -307,6 +318,12 @@ class SamsungBinary:
     key: bytes
     model_type: str
     region: str
+    # `BINARY_CRC` is the CRC32 of the ENCRYPTED body, measured 2026-08-11: the full 11.5 GB
+    # `SM-S911U`/`XAA` download hashes to 949352961, which is exactly what the inform response
+    # declared, while the plaintext's CRC (3102581189) is not. So Samsung does publish an
+    # integrity value for the download, and it is the only one either half of this protocol
+    # offers. None when the response omits it rather than assumed.
+    crc32: int | None = None
 
     @property
     def download_url(self) -> str:
@@ -404,7 +421,14 @@ def parse_binary_inform(text: str, *, model: str, region: str) -> SamsungBinary:
             f"parse_binary_inform: FUS declares {size} bytes for {model}/{region}, which is not "
             "a positive multiple of the 16-byte AES block every `.enc4` is padded to"
         )
+    declared_crc = fields.get("BINARY_CRC", "")
+    if declared_crc and not _CRC32_RE.match(declared_crc):
+        raise SamsungProtocolError(
+            f"parse_binary_inform: BINARY_CRC is {declared_crc!r} for {model}/{region}, not the "
+            "unsigned 32-bit CRC of the encrypted body that this field has always carried"
+        )
     return SamsungBinary(
+        crc32=int(declared_crc) if declared_crc else None,
         version=version,
         filename=filename,
         model_path=model_path,
@@ -415,7 +439,9 @@ def parse_binary_inform(text: str, *, model: str, region: str) -> SamsungBinary:
     )
 
 
-def decrypt_archive(path: Path, key: bytes, *, context: str) -> str:
+def decrypt_archive(
+    path: Path, key: bytes, *, context: str, expected_crc32: int | None = None
+) -> str:
     """AES-128-ECB decrypt `path` in place, strip its PKCS#7 padding, return the plaintext's
     sha256. Blocking: every caller runs it through `asyncio.to_thread`.
 
@@ -430,6 +456,11 @@ def decrypt_archive(path: Path, key: bytes, *, context: str) -> str:
 
     - the padding must be valid PKCS#7 (measured: 14 bytes of `0x0e` on the real archive);
     - the result must open with the zip magic.
+
+    `expected_crc32` is `BINARY_CRC` from the inform response, which is the CRC32 of the
+    ENCRYPTED body. It is checked HERE because this is the pass that already reads every
+    ciphertext byte — computing it during the download would mean two passes over 11.5 GB, and
+    computing it afterwards is impossible once the file has been decrypted in place.
     """
     size = path.stat().st_size
     if size == 0 or size % AES_BLOCK_BYTES:
@@ -439,12 +470,14 @@ def decrypt_archive(path: Path, key: bytes, *, context: str) -> str:
         )
     decryptor = Cipher(algorithms.AES(key), modes.ECB()).decryptor()  # noqa: S305
     digest = hashlib.sha256()
+    ciphertext_crc = 0
     tail = b""
     with path.open("r+b") as fh:
         offset = 0
         while offset < size:
             fh.seek(offset)
             chunk = fh.read(min(_DECRYPT_CHUNK_BYTES, size - offset))
+            ciphertext_crc = zlib.crc32(chunk, ciphertext_crc)
             plain = decryptor.update(chunk)
             fh.seek(offset)
             fh.write(plain)
@@ -459,6 +492,15 @@ def decrypt_archive(path: Path, key: bytes, *, context: str) -> str:
                 digest.update(plain[:-AES_BLOCK_BYTES])
         decryptor.finalize()
 
+        if expected_crc32 is not None and ciphertext_crc != expected_crc32:
+            # Checked before the padding, because this one names the right suspect: a body
+            # that did not arrive intact is a transfer failure, and the padding check below
+            # would report the same corruption as a wrong decryption key.
+            raise FirmwareDownloadError(
+                f"{context}: the encrypted body hashes to CRC32 {ciphertext_crc}, but FUS "
+                f"declared {expected_crc32}. The download is corrupt rather than mis-keyed; "
+                "retry the job."
+            )
         padding = tail[-1]
         if not 1 <= padding <= AES_BLOCK_BYTES or tail[-padding:] != bytes([padding]) * padding:
             raise FirmwareDownloadError(
@@ -836,7 +878,8 @@ class SamsungDriver(FirmwareDriver):
             # Refused rather than dropped. Every other driver hands `published_digest()` to
             # `download_to_file`, and doing that here would check an md5 of the CIPHERTEXT
             # against a digest an operator computed over an archive — a mismatch that reads as
-            # a corrupt download and is not one. `sha256` is honoured, against the plaintext.
+            # a corrupt download and is not one. `sha256` is honoured, against the plaintext,
+            # and the source's own CRC32 over the ciphertext is checked regardless.
             raise FirmwareInputError(
                 f"SamsungDriver.fetch: {ref.build} pins an md5. FUS serves an encrypted body, "
                 "so a digest can only be checked against the decrypted archive, and this "
@@ -874,10 +917,10 @@ class SamsungDriver(FirmwareDriver):
                 )
                 arrived = encrypted.stat().st_size
                 if arrived != binary.size:
-                    # FUS publishes no digest, so the declared byte size is the only thing the
-                    # source says about the bytes it served. A short body that happens to end
-                    # on a 16-byte boundary decrypts to valid-looking blocks and is caught two
-                    # steps later as bad padding, which names the key rather than the transfer.
+                    # Cheaper and more specific than the CRC below, which only fires after
+                    # 11.5 GB has been read again: a short body that happens to end on a
+                    # 16-byte boundary would otherwise be reported by whichever check runs
+                    # next, and neither of those names the transfer.
                     raise FirmwareDownloadError(
                         f"SamsungDriver.fetch: {binary.filename} arrived as {arrived} bytes, but "
                         f"FUS declared {binary.size}. The transfer was truncated (or the build "
@@ -888,6 +931,7 @@ class SamsungDriver(FirmwareDriver):
                     encrypted,
                     binary.key,
                     context=f"SamsungDriver.fetch[{ref.build}]",
+                    expected_crc32=binary.crc32,
                 )
                 if ref.sha256 is not None and sha256 != ref.sha256:
                     # An operator can pin a digest in a job's params. For every other driver
@@ -909,23 +953,33 @@ class SamsungDriver(FirmwareDriver):
         finally:
             if owned:
                 await client.aclose()
-        if ref.sha256 is None:
+        # Verified when something OUTSIDE this pipeline said what the bytes should be: FUS's
+        # own `BINARY_CRC` over the encrypted body, or a sha256 an operator pinned in the
+        # job's params. Both are checked above; this only records which of them was available.
+        verified = binary.crc32 is not None or ref.sha256 is not None
+        if not verified:
             logger.warning(
-                "%s decrypted to %d bytes, sha256=%s: FUS publishes no digest of the plaintext "
-                "this pipeline keeps, so the archive is integrity-unverified — what IS proven "
-                "is that it decrypted to valid PKCS#7 padding and the zip magic",
+                "%s decrypted to %d bytes, sha256=%s: this response carried no BINARY_CRC and "
+                "the job pinned no digest, so the archive is integrity-unverified — what IS "
+                "proven is that it decrypted to valid PKCS#7 padding and the zip magic",
                 dest.name,
                 dest.stat().st_size,
                 sha256,
             )
-            return DownloadedArchive(path=dest, sha256=sha256, integrity_verified=False)
-        logger.info(
-            "%s decrypted to %d bytes and matches the sha256 this job pinned (%s)",
-            dest.name,
-            dest.stat().st_size,
-            sha256,
-        )
-        # Verified against a digest a HUMAN supplied, which is the only kind available here:
-        # the source publishes none. Same meaning the field carries everywhere else — somebody
-        # could prove these bytes are the bytes that were meant.
-        return DownloadedArchive(path=dest, sha256=sha256, integrity_verified=True)
+        else:
+            logger.info(
+                "%s decrypted to %d bytes, sha256=%s, verified against %s",
+                dest.name,
+                dest.stat().st_size,
+                sha256,
+                " and ".join(
+                    filter(
+                        None,
+                        [
+                            f"the CRC32 FUS published ({binary.crc32})" if binary.crc32 else "",
+                            "the sha256 this job pinned" if ref.sha256 else "",
+                        ],
+                    )
+                ),
+            )
+        return DownloadedArchive(path=dest, sha256=sha256, integrity_verified=verified)

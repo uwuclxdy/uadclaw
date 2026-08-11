@@ -24,6 +24,7 @@ import hashlib
 import json
 import logging
 import zipfile
+import zlib
 from io import BytesIO
 from pathlib import Path
 
@@ -661,6 +662,7 @@ def samsung_client(
     inform: str | None = None,
     body: bytes | None = None,
     declared_size: int | None = None,
+    declared_crc32: int | None = None,
     init_status: str = "S00",
     nonce_header: bool = True,
 ) -> httpx.AsyncClient:
@@ -669,9 +671,10 @@ def samsung_client(
     Each FUS response carries its OWN `NONCE` header, so a client that keeps signing with the
     first one is visibly wrong rather than accidentally fine.
 
-    `BINARY_BYTE_SIZE` is rewritten to the length actually served, because the real fixture
-    declares the real 11.5 GB build and `fetch` compares the two. `declared_size` forces them
-    apart for the test that is about exactly that mismatch.
+    `BINARY_BYTE_SIZE` and `BINARY_CRC` are rewritten to describe the body actually served,
+    because the real fixture describes the real 11.5 GB build and `fetch` checks both against
+    what arrives. `declared_size` and `declared_crc32` force them apart for the tests that are
+    about exactly those mismatches.
     """
     served_index = (
         {samsung_index_url(): samsung_fixture("version_index")} if index is None else index
@@ -679,9 +682,13 @@ def samsung_client(
     served_inform = inform if inform is not None else samsung_fixture("binary_inform")
     if inform is None:
         size = declared_size if declared_size is not None else len(body or b"")
+        crc = declared_crc32 if declared_crc32 is not None else zlib.crc32(body or b"")
         served_inform = served_inform.replace(
             "<BINARY_BYTE_SIZE><Data>11565187312</Data>",
             f"<BINARY_BYTE_SIZE><Data>{size}</Data>",
+        ).replace(
+            "<BINARY_CRC><Data>949352961</Data>",
+            f"<BINARY_CRC><Data>{crc}</Data>",
         )
     nonces = iter(["nonce-generate-01", "nonce-inform-002", "nonce-init-0003"])
 
@@ -1082,8 +1089,9 @@ async def test_samsung_fetch_walks_the_whole_handshake_and_decrypts_what_it_down
     assert archive.path.read_bytes() == plaintext
     assert archive.path.name == "samsung-SM-S911U-S911USQS8FZG1_XAA.zip"
     assert archive.sha256 == hashlib.sha256(plaintext).hexdigest()
-    # FUS publishes no digest of the plaintext this pipeline keeps.
-    assert archive.integrity_verified is False
+    # `BINARY_CRC` is the CRC32 of the ENCRYPTED body and it was checked, so the archive is
+    # verified against something the SOURCE published rather than against nothing.
+    assert archive.integrity_verified is True
     # The encrypted form is decrypted IN PLACE and renamed, so nothing is left beside it.
     assert [path.name for path in tmp_path.iterdir()] == [archive.path.name]
 
@@ -1335,6 +1343,46 @@ async def test_samsung_stops_reading_a_response_that_passes_the_ceiling():
     assert "ceiling" in str(excinfo.value)
     # 1 MiB ceiling over 64 KB chunks: it stops around 17, and must never reach 256.
     assert served_chunks <= 20, served_chunks
+
+
+async def test_samsung_fetch_refuses_a_body_whose_crc_fus_did_not_declare(tmp_path):
+    """`BINARY_CRC` is the CRC32 of the ENCRYPTED body — measured over the full 11.5 GB
+    download, which hashes to exactly the 949352961 the inform response declared while the
+    plaintext hashes to 3102581189. It is the one integrity value either half of this
+    protocol publishes, so a mismatch is a corrupt transfer named as such rather than left to
+    the padding check, which would blame the key."""
+    plaintext = samsung_plain_archive()
+    driver = SamsungDriver(
+        samsung_settings(),
+        client=samsung_client(body=pkcs7_encrypt(plaintext, SAMSUNG_KEY), declared_crc32=12345),
+    )
+
+    with pytest.raises(FirmwareDownloadError) as excinfo:
+        await driver.fetch(samsung_ref(), tmp_path)
+
+    assert "CRC32" in str(excinfo.value)
+    assert "12345" in str(excinfo.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_samsung_archive_is_unverified_when_the_response_carries_no_crc(tmp_path):
+    """The claim has to track what was actually checked: no CRC and no pinned digest means
+    nothing outside this pipeline said what these bytes should be."""
+    plaintext = samsung_plain_archive()
+    inform = samsung_fixture("binary_inform").replace(
+        "<BINARY_CRC><Data>949352961</Data>", "<BINARY_CRC><Data></Data>"
+    )
+    body = pkcs7_encrypt(plaintext, SAMSUNG_KEY)
+    inform = inform.replace(
+        "<BINARY_BYTE_SIZE><Data>11565187312</Data>",
+        f"<BINARY_BYTE_SIZE><Data>{len(body)}</Data>",
+    )
+    driver = SamsungDriver(samsung_settings(), client=samsung_client(inform=inform, body=body))
+
+    archive = await driver.fetch(samsung_ref(), tmp_path)
+
+    assert archive.integrity_verified is False
+    assert archive.path.read_bytes() == plaintext
 
 
 async def test_samsung_fetch_refuses_a_build_the_index_no_longer_publishes(tmp_path):
