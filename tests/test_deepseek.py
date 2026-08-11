@@ -361,7 +361,7 @@ def test_a_blank_key_is_refused_at_the_point_of_use_not_at_settings_load(monkeyp
     monkeypatch.setenv("SESSION_SECRET", "z")
     monkeypatch.setenv("DEEPSEEK_KEY", "")
     settings = Settings()
-    assert settings.deepseek_key == ""
+    assert settings.deepseek_key.get_secret_value() == ""
     with pytest.raises(DeepSeekConfigError, match="DEEPSEEK_KEY is empty"):
         require_api_key(settings)
 

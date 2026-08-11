@@ -66,7 +66,7 @@ def settings(test_env) -> Settings:
     the thing that prints one.
     """
     loaded = Settings()
-    if not loaded.deepseek_key.strip():
+    if not loaded.deepseek_key.get_secret_value().strip():
         pytest.skip("DEEPSEEK_KEY is not configured on this box")
     return loaded
 

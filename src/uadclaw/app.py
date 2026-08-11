@@ -100,7 +100,7 @@ async def health() -> HealthResponse:
 @router.post("/login", status_code=status.HTTP_204_NO_CONTENT)
 async def login(payload: LoginRequest, request: Request) -> None:
     settings = get_settings()
-    if not verify_password(payload.password, settings.auth_password):
+    if not verify_password(payload.password, settings.auth_password.get_secret_value()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="bad credentials")
     log_in(request)
 
@@ -170,7 +170,7 @@ def create_app() -> FastAPI:
     app.add_middleware(AuthMiddleware)
     app.add_middleware(
         SessionMiddleware,
-        secret_key=settings.session_secret,
+        secret_key=settings.session_secret.get_secret_value(),
         session_cookie=settings.session_cookie_name,
         same_site="lax",
         https_only=settings.cookie_secure,

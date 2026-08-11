@@ -2,18 +2,60 @@
 
 Reads from a mounted Docker-secrets directory (`/run/secrets`) first, falling back to
 environment variables (and a local `.env` for dev) of the same name. `secrets_dir` is a
-no-op when the directory does not exist, which is what makes the fallback work.
+no-op when the directory does not exist, which is what makes the fallback work, and a
+BLANK file there is a no-op too — see `_SkipBlankSecretFiles`.
+
+Every credential is a `SecretStr` and no validation error carries its input, because a
+settings failure is HTTP-readable: five stage handlers call `get_settings()`, `worker.py`
+persists `traceback.format_exc()` into `jobs.failure_reason` plus a line into `log_tail`,
+and both columns are exposed on `JobResponse`.
 """
 
+import logging
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
+    SecretsSettingsSource,
     SettingsConfigDict,
 )
+
+logger = logging.getLogger(__name__)
+
+
+class _SkipBlankSecretFiles(SecretsSettingsSource):
+    """A blank secret file contributes nothing, so the next source supplies the value.
+
+    File secrets outrank the environment here on purpose (see `settings_customise_sources`),
+    and `SecretsSettingsSource` returns `""` for a file it could read but that holds nothing.
+    A 0-byte `secrets/<name>` — the placeholder written to satisfy a `docker compose` secret
+    declaration — therefore SHADOWS a set environment variable of the same name instead of
+    deferring to it. Only what a blank file contributes changes; the order does not.
+    """
+
+    def __call__(self) -> dict[str, Any]:
+        # The base class already strips what it reads, so a whitespace-only file arrives
+        # here as "" too. Absent files are not in this dict at all, so the normal local run
+        # (no secrets dir, four values from the environment) stays silent.
+        kept = {}
+        for name, value in super().__call__().items():
+            if value == "":
+                # Never silent: an operator who truncates a credential file mid-rotation
+                # gets a stale environment variable of the same name promoted to live, and
+                # before this source existed that combination refused to start instead.
+                logger.warning(
+                    "ignoring blank secret file, falling back to the environment: "
+                    "field=%s secrets_dir=%s",
+                    name,
+                    self.secrets_dir,
+                )
+            else:
+                kept[name] = value
+        return kept
 
 
 class Settings(BaseSettings):
@@ -22,18 +64,29 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # A rendered ValidationError prints the offending `input_value`, and for THIS model
+        # that value is a credential. Two shapes, both measured: a `missing` error renders
+        # the whole merged source dict (head and tail of every credential the sources had
+        # already collected, ~22 of a 35-character key), and an after-validator error
+        # renders the RAW source string — a `SecretStr` annotation is no protection there,
+        # because the mask only exists once the value is validated. Off across the board
+        # rather than per field: the leaked field is never the field that failed.
+        #
+        # The trade is that a bad non-secret setting no longer names the value it got, so
+        # the validators below name the constraint and where to fix it instead.
+        hide_input_in_errors=True,
     )
 
     # Postgres
     postgres_host: str = "postgres"
     postgres_port: int = 5432
     postgres_user: str = "uadclaw"
-    postgres_password: str
+    postgres_password: SecretStr
     postgres_db: str = "uadclaw"
 
     # Auth: single credential, single-user login (LAN-only deployment).
-    auth_password: str
-    session_secret: str
+    auth_password: SecretStr
+    session_secret: SecretStr
     session_cookie_name: str = "uadclaw_session"
     # Plain-HTTP LAN-only deployment by default; flip on if ever put behind TLS.
     cookie_secure: bool = False
@@ -133,7 +186,7 @@ class Settings(BaseSettings):
     # rule_ladder, milestone M2) is independently useful and must boot on a box that has no
     # DeepSeek account at all. A blank key is refused at the point of use instead, by
     # `deepseek.require_api_key`, naming the setting and where to put it.
-    deepseek_key: str = ""
+    deepseek_key: SecretStr = SecretStr("")
     # The OpenAI-format endpoint, never `/anthropic`. `usage.prompt_cache_hit_tokens` and
     # `prompt_cache_miss_tokens` are what the cost measurement (task 8) reads, and the
     # Anthropic wire format does not carry them.
@@ -186,13 +239,17 @@ class Settings(BaseSettings):
 
     @field_validator("postgres_password", "auth_password", "session_secret")
     @classmethod
-    def _reject_blank(cls, value: str) -> str:
+    def _reject_blank(cls, value: SecretStr) -> SecretStr:
         # An empty auth_password makes `hmac.compare_digest("", "")` true (anyone logs in);
         # an empty session_secret signs cookies with an empty HMAC key (any cookie payload
         # is forgeable offline, no request to /login required). Fail at startup, not at
-        # the first exploited request.
-        if not value.strip():
-            raise ValueError("must not be empty or whitespace-only")
+        # the first exploited request. The message carries the fix because the error is
+        # not allowed to carry the value (`hide_input_in_errors` above).
+        if not value.get_secret_value().strip():
+            raise ValueError(
+                "must not be empty or whitespace-only: mount a non-empty file of this name "
+                "in the secrets dir, or set the environment variable of the same name"
+            )
         return value
 
     @field_validator("worker_pool_size")
@@ -272,8 +329,10 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        """A plain `str`: SQLAlchemy and `alembic/env.py` both want a DSN, not a wrapper."""
         return (
-            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"postgresql+asyncpg://{self.postgres_user}"
+            f":{self.postgres_password.get_secret_value()}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
@@ -290,7 +349,17 @@ class Settings(BaseSettings):
         # an env var silently beats the mounted secret file. The design is "secrets dir
         # with env-var fallback" — the file must win when present; env is the fallback
         # for when there's no mounted secrets dir at all (local/dev).
-        return init_settings, file_secret_settings, env_settings, dotenv_settings
+        #
+        # Rebuilt rather than wrapped: `_settings_warn_unused_config_keys` decides whether
+        # `secrets_dir` was honoured with an `isinstance` check, so a delegating wrapper
+        # would warn that the key is ignored while it is being read. `secrets_dir` is the
+        # only constructor argument pydantic-settings resolves from anything but
+        # `model_config` (it carries an `_secrets_dir` init override), so passing it across
+        # reproduces the source this replaces.
+        non_blank_secrets = _SkipBlankSecretFiles(
+            settings_cls, secrets_dir=file_secret_settings.secrets_dir
+        )
+        return init_settings, non_blank_secrets, env_settings, dotenv_settings
 
 
 @lru_cache

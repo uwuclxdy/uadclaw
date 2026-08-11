@@ -157,7 +157,7 @@ def require_api_key(settings: Settings) -> str:
     deterministic pipeline (acquire through rule_ladder, milestone M2) is independently
     useful and must boot on a box with no DeepSeek account at all.
     """
-    key = settings.deepseek_key.strip()
+    key = settings.deepseek_key.get_secret_value().strip()
     if not key:
         raise DeepSeekConfigError(
             "deepseek: DEEPSEEK_KEY is empty, so the classification stage has nothing to "
