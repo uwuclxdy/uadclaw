@@ -1,5 +1,10 @@
-"""The real `acquire`, `unpack` and `extract_facts` pipeline stages, wired to the worker's
-`StageHandler` signature.
+"""The real pipeline stage handlers, wired to the worker's `StageHandler` signature.
+
+Two job kinds run through here and they share nothing but the signature. `firmware_analysis`
+walks `acquire` → `unpack` → `extract_facts` → `corpus_graph` → `filter` → `rule_ladder` and
+lives on disk; `classification` walks `llm` alone, holds no scratch lease, and is the only
+stage in this repo that spends money. Which stages a kind walks is `models.JOB_KIND_STAGES`,
+and it is per kind precisely so a firmware job cannot wander into `llm`.
 
 Every stage writes only inside the job's own `ctx.scratch_dir`, and none of them writes a job
 row: job state is the worker's, fenced on `(job_id, worker_id, attempt)`. The handoff between
@@ -23,6 +28,25 @@ from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
+from uadclaw.bundle import EvidenceBundle, PackageIdentity, build_bundles
+from uadclaw.classify import (
+    SYSTEM_PROMPT,
+    Classification,
+    ClassificationJobParams,
+    ClassificationRejected,
+    ListDerivation,
+    derive_list,
+    user_prompt,
+    validate_response,
+)
+from uadclaw.classifystore import (
+    existing_bundle_hashes,
+    load_identities,
+    park_package,
+    require_queue,
+    select_candidates,
+    store_classification,
+)
 from uadclaw.corpus import EDGE_LIBRARY, EDGE_OVERLAY, build_graph
 from uadclaw.corpusstore import (
     load_config_inputs,
@@ -32,6 +56,7 @@ from uadclaw.corpusstore import (
     store_floors,
     store_graph,
 )
+from uadclaw.deepseek import ChatResult, DeepSeekClient, DeepSeekMalformedError
 from uadclaw.etcconfig import parse_config_inputs
 from uadclaw.facts import ApkFacts, ApkParseError, parse_apk
 from uadclaw.factstore import record_device_scan, store_device_facts
@@ -43,7 +68,7 @@ from uadclaw.firmware import (
     get_driver,
     select_ref,
 )
-from uadclaw.ladder import compute_floors
+from uadclaw.ladder import RemovalFloor, compute_floors
 from uadclaw.models import Job
 from uadclaw.settings import get_settings
 from uadclaw.unpack import canonical_device_path, extract_artifacts, unpack_to_partitions
@@ -495,9 +520,205 @@ async def rule_ladder_stage(ctx: StageContext) -> None:
     )
 
 
+async def _classification_params(ctx: StageContext) -> ClassificationJobParams:
+    async with ctx.session_factory() as session:
+        job = await session.get(Job, ctx.job_id)
+        params = dict(job.params) if job is not None else None
+    if params is None:
+        raise StageInputError(f"_classification_params: job {ctx.job_id} no longer exists")
+    try:
+        return ClassificationJobParams.model_validate(params)
+    except ValidationError as exc:
+        raise StageInputError(
+            f"_classification_params: job {ctx.job_id} carries params a classification job "
+            f"cannot run from ({params!r}): {exc}"
+        ) from exc
+
+
+async def _classify_one(
+    client: DeepSeekClient,
+    bundle: EvidenceBundle,
+    *,
+    floor: RemovalFloor,
+    derivation: ListDerivation,
+    max_attempts: int,
+) -> tuple[Classification | None, str | None, ChatResult | None, int]:
+    """One package: call, validate, retry a bounded number of times, then give up.
+
+    Returns `(classification, park_reason, last_result, attempts)`. Giving up returns a
+    reason rather than raising, because one package the model cannot answer must not cost
+    the other 47 — the caller records a park row and moves on.
+
+    **This loop and the client's are one layer each, not two on top of each other.** The
+    client retries the WIRE (429/500/503, a transport error, a body that is not JSON, the
+    documented empty-content bug) and never sees a field. This loop retries the SEMANTICS: a
+    well-formed JSON object whose `removal` sits below the floor, or whose description is
+    four characters long. They are different failures with different fixes, and a validator
+    rejection re-sent unchanged is exactly the retry the design asks for.
+
+    A `DeepSeekBudgetError`, a bad credential and an empty balance all abort the whole job
+    rather than parking a package: none of them is about this package, and burning the
+    retry cap on each of 48 packages against a dead account is not a diagnosis.
+    """
+    user = user_prompt(bundle)
+    last_result: ChatResult | None = None
+    reason = "no attempt was made"
+    for attempt in range(1, max_attempts + 1):
+        result = await client.complete_json(system=SYSTEM_PROMPT, user=user)
+        last_result = result
+        try:
+            payload = result.json_object()
+            classification = validate_response(
+                payload, bundle=bundle, floor=floor, derivation=derivation, model=result.model
+            )
+        except (ClassificationRejected, DeepSeekMalformedError) as exc:
+            reason = f"attempt {attempt}/{max_attempts}: {exc}"
+            logger.warning("classification rejected: package=%s %s", bundle.package, reason)
+            continue
+        return classification, None, result, attempt
+    return None, reason, last_result, max_attempts
+
+
+async def llm_stage(ctx: StageContext) -> None:
+    """Classify every candidate the filter queued, one validated proposal at a time.
+
+    Database and network only — no scratch, which is why `classification` is registered with
+    `JOB_KIND_NEEDS_SCRATCH[CLASSIFICATION] = False` and runs alongside a firmware job rather
+    than queueing behind its single-occupant lease.
+
+    The deterministic view is RECOMPUTED here rather than read back out of `package_analysis`.
+    That is deliberate on two counts: `ladder.compute_floors` is the only constructor of a
+    `RemovalFloor` and reviving one from JSONB would be a second one, weakening the type that
+    makes a below-floor value unrepresentable; and a floor read from a row could be stale
+    against a corpus that grew since, so the bundle would attest evidence that no longer
+    holds.
+    """
+    settings = get_settings()
+    params = await _classification_params(ctx)
+    limit = min(
+        params.limit or settings.classification_max_packages, settings.classification_max_packages
+    )
+    upstream = await asyncio.to_thread(load_upstream_list, settings.upstream_list_path)
+
+    async with ctx.session_factory() as session:
+        corpus = await require_corpus(session)
+        config = await load_config_inputs(session)
+        identities = await load_identities(session)
+        queue = await require_queue(session)
+        existing = await existing_bundle_hashes(session)
+
+    graph = build_graph(corpus, platform_libraries=config.platform_libraries)
+    floors = compute_floors(corpus, config=config)
+    bundles = build_bundles(
+        corpus, floors=floors, identities=identities, graph=graph, upstream=upstream
+    )
+    candidates = select_candidates(
+        queued=queue,
+        bundles=bundles,
+        existing=existing,
+        packages=params.packages,
+        reclassify=params.reclassify,
+        limit=limit,
+    )
+    if not candidates:
+        logger.info(
+            "job %s llm: nothing to classify — %d queued package(s), all already answered "
+            "against their current evidence bundle. Pass reclassify=true to ask again.",
+            ctx.job_id,
+            len(queue),
+        )
+        return
+
+    logger.info(
+        "job %s llm: classifying %d of %d queued package(s) with %s (thinking=%s)",
+        ctx.job_id,
+        len(candidates),
+        len(queue),
+        settings.deepseek_model,
+        settings.deepseek_thinking,
+    )
+    counts = {"classified": 0, "parked": 0}
+    async with DeepSeekClient.from_settings(settings) as client:
+        await asyncio.gather(
+            *[
+                _classify_and_store(
+                    ctx,
+                    client,
+                    bundles[package],
+                    floor=floors[package],
+                    identity=identities.get(package),
+                    max_attempts=settings.deepseek_max_attempts,
+                    counts=counts,
+                )
+                for package in candidates
+            ]
+        )
+    logger.info(
+        "job %s llm: %d classified, %d parked out of %d candidate(s)",
+        ctx.job_id,
+        counts["classified"],
+        counts["parked"],
+        len(candidates),
+    )
+
+
+async def _classify_and_store(
+    ctx: StageContext,
+    client: DeepSeekClient,
+    bundle: EvidenceBundle,
+    *,
+    floor: RemovalFloor,
+    identity: PackageIdentity | None,
+    max_attempts: int,
+    counts: dict[str, int],
+) -> None:
+    """One package end to end, in its own transaction.
+
+    Per package rather than one transaction for the batch: a database error on package 30
+    must not discard 29 answers that were already paid for.
+    """
+    item = bundle.payload.get("facts", {})
+    derivation = derive_list(
+        bundle.package,
+        cert_issuer=identity.cert_issuer if identity else None,
+        partitions=tuple(item.get("partitions", ())),
+    )
+    classification, reason, result, attempts = await _classify_one(
+        client, bundle, floor=floor, derivation=derivation, max_attempts=max_attempts
+    )
+    at = datetime.now(UTC)
+    usage = result.usage if result is not None else {}
+    async with ctx.session_factory() as session, session.begin():
+        if classification is None:
+            await park_package(
+                session,
+                bundle.package,
+                bundle_sha256=bundle.sha256,
+                model=client.model,
+                thinking=client.thinking,
+                reason=reason or "the model produced nothing usable",
+                usage=usage,
+                attempts=attempts,
+                at=at,
+            )
+            counts["parked"] += 1
+            return
+        await store_classification(
+            session,
+            classification,
+            model=result.model if result is not None else client.model,
+            thinking=client.thinking,
+            usage=usage,
+            attempts=attempts,
+            at=at,
+        )
+        counts["classified"] += 1
+
+
 def pipeline_stage_handlers() -> dict[str, StageHandler]:
-    """The stages that have real implementations. The worker no-ops any stage missing from
-    this mapping, so tasks 5+ each add one entry here and nothing else."""
+    """The stages that have real implementations, across every job kind. The worker no-ops
+    any stage missing from this mapping, and `models.JOB_KIND_STAGES` decides which of them
+    a given job walks — an entry here does NOT put a stage into every kind's pipeline."""
     return {
         "acquire": acquire_stage,
         "unpack": unpack_stage,
@@ -505,4 +726,5 @@ def pipeline_stage_handlers() -> dict[str, StageHandler]:
         "corpus_graph": corpus_graph_stage,
         "filter": filter_stage,
         "rule_ladder": rule_ladder_stage,
+        "llm": llm_stage,
     }
