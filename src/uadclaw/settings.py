@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     # Total bytes of scratch artifacts kept on disk for jobs no longer actively owned
     # (failed, orphaned, or a superseded attempt); oldest evicted first once a new one
     # would push the total over this ceiling.
+    #
+    # NOTE at this default a failed FIRMWARE_ANALYSIS job is always evicted whole: one peaks
+    # near 15 GB (a 3.5 GB archive, its partition images, and the extracted tree), so the
+    # "keep failed artifacts for debugging" intent never applies to that kind. Raise this
+    # past a single job's peak if post-mortem access to a failed unpack is wanted.
     failure_retention_bytes: int = 5_000_000_000
     # A job stuck CLAIMED/RUNNING past this many claims is parked FAILED instead of
     # requeued forever ahead of healthy jobs (claim ordering is FIFO by created_at, so an
@@ -82,6 +87,11 @@ class Settings(BaseSettings):
     # `payload-dumper-go` is not packaged by any distro; the worker image vendors it onto
     # PATH, a dev box may have it anywhere (e.g. ~/go/bin). A bare name is resolved on PATH.
     payload_dumper_path: str = "payload-dumper-go"
+    # Ceiling on a single downloaded archive and on any one member unpacked out of it. Not a
+    # disk quota: it stops a mislabelled URL or a decompression bomb from filling scratch
+    # before anything else notices. A Pixel factory zip is ~3.5 GB, so this leaves headroom
+    # for the largest OEM images without leaving the ceiling meaningless.
+    max_firmware_archive_bytes: int = 16 * 1024**3
 
     @field_validator("postgres_password", "auth_password", "session_secret")
     @classmethod

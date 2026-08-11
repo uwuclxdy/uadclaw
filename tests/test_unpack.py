@@ -5,22 +5,32 @@ their real offsets. The chain itself (7z, lpunpack, simg2img) is exercised again
 multi-GB image in `test_unpack_chain_heavy.py`.
 """
 
+import asyncio
 import struct
 import zipfile
+from pathlib import Path
 
 import pytest
 
+from uadclaw import unpack as unpack_module
 from uadclaw.settings import Settings
 from uadclaw.unpack import (
     ContainerFormat,
+    DuplicatePartitionError,
+    PartitionImage,
     UnpackError,
+    UnsafePathError,
+    _extract_zip_member,
     _harvest_erofs_staging,
     canonical_device_path,
     detect_format,
+    ensure_within,
+    extract_artifacts,
     matches_artifact_patterns,
     normalize_partition_name,
     parse_7z_listing,
     read_gpt_partitions,
+    safe_archive_path,
     unpack_to_partitions,
 )
 
@@ -265,3 +275,200 @@ def test_7z_listing_parse_skips_folders_and_symlinks():
         "system/priv-app/Settings/Settings.apk",
         "etc/sysconfig/google.xml",
     ]
+
+
+# --- untrusted names reaching a filesystem path -------------------------------------------
+#
+# One defect, three doors: a GPT partition name, a zip member name and a path out of an image
+# listing are all attacker-influenced and all end up joined to a destination directory.
+
+
+def test_a_gpt_partition_name_cannot_escape_the_work_directory(tmp_path):
+    """`../../pwned` as a partition name carved attacker-controlled bytes outside scratch,
+    then escaped a second time as the extraction destination. Reproduced end to end."""
+    work = tmp_path / "work"
+    escape_target = tmp_path / "pwned.img"
+    disk = _synthetic_gpt(tmp_path / "disk.img", [("../../pwned", 4, 40)])
+    raw = bytearray(disk.read_bytes())
+    raw[4 * 512 + 1024 + 0x38 : 4 * 512 + 1024 + 0x38 + 2] = b"\x53\xef"
+    disk.write_bytes(bytes(raw))
+
+    partitions = asyncio.run(unpack_to_partitions(disk, work, settings=make_settings()))
+
+    assert [p.name for p in partitions] == ["pwned"]
+    assert not escape_target.exists()
+    assert not (tmp_path / "slices").exists()
+    for partition in partitions:
+        assert partition.path.resolve().is_relative_to(work.resolve())
+
+
+def test_a_partition_name_that_is_only_dots_is_refused(tmp_path):
+    disk = _synthetic_gpt(tmp_path / "disk.img", [("..", 4, 40)])
+    raw = bytearray(disk.read_bytes())
+    raw[4 * 512 + 1024 + 0x38 : 4 * 512 + 1024 + 0x38 + 2] = b"\x53\xef"
+    disk.write_bytes(bytes(raw))
+
+    with pytest.raises(UnsafePathError):
+        asyncio.run(unpack_to_partitions(disk, tmp_path / "work", settings=make_settings()))
+
+
+def test_two_zip_members_with_one_basename_do_not_overwrite_each_other(tmp_path):
+    """`a/system.img` and `b/system.img` both reduced to one path, so the second silently
+    replaced the first and a whole partition's APKs disappeared."""
+    archive = tmp_path / "firmware.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("a/system.img", magic_blob(EXT4_MAGIC_AT))
+        zf.writestr("b/system.img", magic_blob(EXT4_MAGIC_AT, size=9000))
+
+    first = _extract_zip_member(archive, "a/system.img", tmp_path / "out")
+    second = _extract_zip_member(archive, "b/system.img", tmp_path / "out")
+
+    assert first != second
+    assert first.stat().st_size != second.stat().st_size  # neither clobbered the other
+
+
+def test_an_ambiguous_partition_identity_is_refused_rather_than_resolved(tmp_path):
+    archive = tmp_path / "firmware.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("a/system.img", magic_blob(EXT4_MAGIC_AT))
+        zf.writestr("b/system.img", magic_blob(EXT4_MAGIC_AT))
+
+    with pytest.raises(DuplicatePartitionError) as excinfo:
+        asyncio.run(unpack_to_partitions(archive, tmp_path / "work", settings=make_settings()))
+
+    assert "system" in str(excinfo.value)
+
+
+def test_ab_slots_keep_both_files_and_settle_on_slot_a(tmp_path):
+    """`lpunpack` on a retrofitted A/B super emits `system_a` and `system_b`; both used to
+    normalise to `system` and the second extraction wrote over the first."""
+    disk = _synthetic_gpt(tmp_path / "disk.img", [("system_a", 4, 20), ("system_b", 21, 40)])
+    raw = bytearray(disk.read_bytes())
+    for lba in (4, 21):
+        raw[lba * 512 + 1024 + 0x38 : lba * 512 + 1024 + 0x38 + 2] = b"\x53\xef"
+    disk.write_bytes(bytes(raw))
+
+    partitions = asyncio.run(
+        unpack_to_partitions(disk, tmp_path / "work", settings=make_settings())
+    )
+
+    assert [p.name for p in partitions] == ["system"]
+    assert [p.slot for p in partitions] == ["system_a"]
+    carved = sorted(path.name for path in (tmp_path / "work" / "slices").iterdir())
+    assert carved == ["system_a.img", "system_b.img"]  # slot B kept its own file, unclobbered
+
+
+def test_safe_archive_path_refuses_absolute_and_traversing_entries():
+    for path in ("/etc/passwd", "../../etc/passwd", "a/../../b", "\\windows\\x"):
+        with pytest.raises(UnsafePathError):
+            safe_archive_path(path, context="test")
+    assert safe_archive_path("system/priv-app/X/X.apk", context="test")
+
+
+def test_ensure_within_refuses_an_absolute_join(tmp_path):
+    """`Path("/a/b") / "/etc/passwd"` is `/etc/passwd`, and every `exists()` check downstream
+    of that happily passes."""
+    with pytest.raises(UnsafePathError):
+        ensure_within(tmp_path, Path("/etc/passwd"), context="test")
+    assert ensure_within(tmp_path, Path("a/b.apk"), context="test") == (tmp_path / "a/b.apk")
+
+
+# --- emptiness is an error at both scales -------------------------------------------------
+
+
+def _stub_extraction(monkeypatch, listings: dict[str, list[str]]):
+    """Drive `extract_artifacts` without the toolchain: `listings` maps a partition image's
+    stem to what `7z l` would have reported for it."""
+
+    async def _list(image: Path) -> list[str]:
+        return listings[image.stem]
+
+    async def _extract(image: Path, names, dest: Path) -> None:
+        for name in names:
+            target = dest / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"x")
+
+    monkeypatch.setattr(unpack_module, "_list_ext4", _list)
+    monkeypatch.setattr(unpack_module, "_extract_ext4", _extract)
+
+
+def _image(tmp_path: Path, name: str, fmt=ContainerFormat.EXT4) -> PartitionImage:
+    path = tmp_path / f"{name}.img"
+    path.write_bytes(magic_blob(EXT4_MAGIC_AT))
+    return PartitionImage(name=name, path=path, fmt=fmt)
+
+
+async def test_a_partition_that_yields_nothing_is_a_named_error(tmp_path, monkeypatch):
+    """The guard used to be computed across ALL partitions, so on a real device four
+    populated partitions and one silently empty one still returned hundreds of APKs and a job
+    recorded SUCCEEDED."""
+    _stub_extraction(
+        monkeypatch,
+        {
+            "system": ["system/priv-app/A/A.apk"],
+            "product": ["media/audio/x.ogg", "lib64/libc.so"],
+        },
+    )
+    partitions = [_image(tmp_path, "system"), _image(tmp_path, "product")]
+
+    with pytest.raises(unpack_module.NothingExtractedError) as excinfo:
+        await extract_artifacts(partitions, tmp_path / "out")
+
+    assert "'product'" in str(excinfo.value)
+    assert "2 entries" in str(excinfo.value)
+
+
+async def test_a_partition_that_never_carries_apps_may_be_empty(tmp_path, monkeypatch):
+    """`system_other` and every `*_dlkm` genuinely hold no app — measured 429 and 333 entries
+    with zero matches on oriole — so their emptiness is a rule, not silence."""
+    _stub_extraction(
+        monkeypatch,
+        {"system": ["system/priv-app/A/A.apk"], "vendor_dlkm": ["lib/modules/x.ko"]},
+    )
+    partitions = [_image(tmp_path, "system"), _image(tmp_path, "vendor_dlkm")]
+
+    artifacts = await extract_artifacts(partitions, tmp_path / "out")
+
+    assert [artifact.image_path for artifact in artifacts] == ["system/priv-app/A/A.apk"]
+
+
+async def test_an_erofs_partition_before_an_ext4_one_does_not_crash(tmp_path, monkeypatch):
+    """`entries` was bound only in the ext4 branch and read for every partition. `_unpack_zip`
+    iterates members in zip order, not sorted, so a build whose first .img is EROFS raised
+    UnboundLocalError on the very first partition — and Android 13+ ships vendor/odm as
+    EROFS."""
+    _stub_extraction(monkeypatch, {"system": ["system/priv-app/A/A.apk"]})
+
+    async def _no_erofs_artifacts(image, dest, patterns):
+        return []
+
+    monkeypatch.setattr(unpack_module, "_extract_erofs", _no_erofs_artifacts)
+    partitions = [
+        _image(tmp_path, "system_dlkm", fmt=ContainerFormat.EROFS),
+        _image(tmp_path, "system"),
+    ]
+
+    artifacts = await extract_artifacts(partitions, tmp_path / "out")
+
+    assert [artifact.partition for artifact in artifacts] == ["system"]
+
+
+async def test_an_absolute_path_in_a_listing_never_reaches_the_extractor(tmp_path, monkeypatch):
+    """`dest / "/etc/passwd"` is `/etc/passwd`, and the `is_file()` check after extraction
+    then passes, so `local_path` pointed outside scratch where task 4 reads it and retention
+    never deletes it."""
+    handed_to_extractor: list[list[str]] = []
+    _stub_extraction(monkeypatch, {"system": ["system/a/A.apk", "/etc/cron.d/pwned.apk"]})
+    real_extract = unpack_module._extract_ext4
+
+    async def _spy(image, names, dest):
+        handed_to_extractor.append(list(names))
+        await real_extract(image, names, dest)
+
+    monkeypatch.setattr(unpack_module, "_extract_ext4", _spy)
+
+    with pytest.raises(UnsafePathError):
+        await extract_artifacts([_image(tmp_path, "system")], tmp_path / "out")
+
+    assert handed_to_extractor == []  # refused before the extractor could act on it

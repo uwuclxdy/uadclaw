@@ -24,6 +24,8 @@ sniffed, because that same sniffing is what produced the wrong answer.
 
 import asyncio
 import logging
+import os
+import re
 import shutil
 import struct
 import zipfile
@@ -31,7 +33,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from fnmatch import fnmatch
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from uadclaw.settings import Settings
 
@@ -56,13 +58,31 @@ class ToolFailedError(UnpackError):
 
 
 class NothingExtractedError(UnpackError):
-    """Extraction completed and produced no APK at all.
+    """Extraction completed and produced nothing where something was expected.
 
     Its own type because this is the failure that looks like success: a glob that matches
     nothing, a partition list that came out empty, or an archive whose root is one level
     deeper than assumed all end here, and every one of them would otherwise flow downstream
-    as "this build has no preinstalled apps".
+    as "this build has no preinstalled apps". Raised per partition as well as overall — a
+    build with four populated partitions and one silently empty one is the same bug wearing
+    a smaller number.
     """
+
+
+class UnsafePathError(UnpackError):
+    """A name taken from archive or image metadata would have written outside the directory
+    it was given, or could not be reduced to a usable path component.
+
+    Its own type because the input is attacker-influenced: partition names come out of a GPT
+    as raw UTF-16, member names out of a zip's central directory, and file paths out of a
+    filesystem image, none of them written by us.
+    """
+
+
+class DuplicatePartitionError(UnpackError):
+    """Two partitions in one image claim the same identity. Refused rather than resolved:
+    silently letting the second overwrite the first loses a whole partition's APKs, and
+    guessing which one the device would have mounted is not something this can know."""
 
 
 class ContainerFormat(StrEnum):
@@ -142,6 +162,18 @@ _TOOL_PROVIDERS = {
     "fsck.erofs": "erofs-utils",
 }
 
+# Partitions that legitimately carry no APK and no config input, so yielding nothing is not
+# an extraction failure for them. Measured: `system_other` (the inactive slot's staging
+# partition, 429 entries on oriole, zero matches) and every `*_dlkm` partition (kernel modules
+# only — 333 entries on oriole's vendor_dlkm, 105 on the emulator's system_dlkm). Anything
+# else that comes back empty is a bug in the patterns or the extraction, and says so.
+PARTITIONS_ALLOWED_EMPTY = frozenset({"system_other", "cache", "metadata", "userdata"})
+
+
+def partition_may_be_empty(name: str) -> bool:
+    return name in PARTITIONS_ALLOWED_EMPTY or name.endswith("_dlkm")
+
+
 # Matched against the partition-relative path with a leading "/" prepended, so a pattern
 # starting with `*/` matches both a nested root (`system/etc/...`) and a partition rooted
 # directly at `etc/`. Measured on real firmware: `roles.xml` is simply absent from some
@@ -161,12 +193,14 @@ ARTIFACT_PATTERNS: tuple[str, ...] = (
 
 @dataclass(frozen=True, slots=True)
 class PartitionImage:
-    """One filesystem image, named by the partition it came from with any A/B slot suffix
-    already stripped, so `system_a` from one device and `system` from another compare."""
+    """One filesystem image. `name` is the identity with any A/B slot suffix stripped, so
+    `system_a` from one device and `system` from another compare; `slot` keeps the spelling
+    the source used, which is what keeps two slots' files apart on disk."""
 
     name: str
     path: Path
     fmt: ContainerFormat
+    slot: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +296,82 @@ def normalize_partition_name(name: str) -> str:
     return name
 
 
+# --- Untrusted names -> paths. Every path built from bytes this pipeline did not write goes
+# through these three, and every filesystem write built from one asserts containment right
+# before it happens. GPT partition names are raw UTF-16 out of a disk image, zip member names
+# come from a downloaded archive's central directory, and file paths come out of a filesystem
+# image: none of them is ours, and all three end up in a path. -------------------------------
+
+_SAFE_COMPONENT_RE = re.compile(r"[^A-Za-z0-9._-]")
+_MAX_COMPONENT_CHARS = 96
+
+
+def safe_component(name: str, *, context: str) -> str:
+    """Reduce an untrusted name to a single, harmless path component.
+
+    Everything outside `[A-Za-z0-9._-]` becomes `_`, so a separator can never survive, and a
+    name that reduces to nothing usable (empty, `.`, `..`, all separators) is refused rather
+    than replaced with a default: a partition called `..` is not a partition this pipeline
+    should be quietly renaming and carrying on with.
+    """
+    component = _SAFE_COMPONENT_RE.sub("_", Path(name).name.strip())[:_MAX_COMPONENT_CHARS]
+    if not component or set(component) <= {"."}:
+        raise UnsafePathError(
+            f"{context}: {name!r} does not reduce to a usable path component; refusing to "
+            "build a path from it"
+        )
+    return component
+
+
+def ensure_within(root: Path, candidate: Path, *, context: str) -> Path:
+    """Assert `candidate` is inside `root` immediately before writing to it.
+
+    Belt and braces on top of `safe_component`: this also catches an absolute path arriving
+    from somewhere that never went through it (`Path("/a/b") / "/etc/passwd"` is
+    `/etc/passwd`, and every `exists()` check downstream of that happily passes).
+    """
+    resolved_root = root.resolve()
+    resolved = (root / candidate if not candidate.is_absolute() else candidate).resolve()
+    if not resolved.is_relative_to(resolved_root):
+        raise UnsafePathError(
+            f"{context}: {candidate} resolves to {resolved}, outside {resolved_root}; refusing "
+            "to touch it"
+        )
+    return resolved
+
+
+def unique_path(directory: Path, filename: str) -> Path:
+    """A path in `directory` that no earlier caller took, deterministically.
+
+    Two zip members `a/system.img` and `b/system.img` reduce to one basename, and an A/B
+    super image carves `system_a` and `system_b`; without this the second write silently
+    replaces the first and a whole partition's APKs vanish with nothing raised.
+    """
+    stem, dot, suffix = filename.partition(".")
+    candidate = directory / filename
+    counter = 2
+    while candidate.exists():
+        candidate = directory / f"{stem}-{counter}{dot}{suffix}"
+        counter += 1
+    return candidate
+
+
+def safe_archive_path(path: str, *, context: str) -> str:
+    """Validate a path read out of an archive or filesystem listing before it is joined to a
+    destination. Absolute paths and `..` segments are refused, not sanitised: normal firmware
+    has neither (5,000+ entries measured across five partitions), so one is a malformed or
+    hostile image and the job should stop rather than quietly relocate the file."""
+    if not path or path.startswith("/") or path.startswith("\\"):
+        raise UnsafePathError(f"{context}: refusing absolute path {path!r} from an image listing")
+    parts = PurePosixPath(path).parts
+    if any(part in {"..", "."} for part in parts) or ":" in parts[0]:
+        raise UnsafePathError(
+            f"{context}: refusing path {path!r} from an image listing: it contains a traversal "
+            "or drive component"
+        )
+    return path
+
+
 def canonical_device_path(partition: str, image_path: str) -> str:
     """The absolute path this file has on a running device.
 
@@ -301,6 +411,18 @@ def _tool_path(name: str, configured: str | None = None) -> str:
     return resolved
 
 
+def _drop_consumed_intermediate(source: Path, depth: int) -> None:
+    """Delete an intermediate this module produced, never the caller's own input.
+
+    At depth 0 `source` is the archive the acquire stage downloaded and still records in the
+    job's state file; deleting it there turns a resumable failure into a full re-download.
+    Reachable the moment a driver hands back a bare `super.img` or `payload.bin` rather than a
+    zip, which is a normal shape for several OEMs.
+    """
+    if depth > 0:
+        source.unlink(missing_ok=True)
+
+
 async def _run_tool(argv: Sequence[str], *, ok_codes: Sequence[int] = (0,)) -> str:
     """Run an unpacking tool, returning its stdout. `create_subprocess_exec` + `communicate`
     rather than `subprocess.run`: these all run inside the worker's event loop, and both
@@ -325,21 +447,38 @@ async def _run_tool(argv: Sequence[str], *, ok_codes: Sequence[int] = (0,)) -> s
 def _safe_member_name(member: str) -> str:
     """The basename of a zip member, refusing anything that could escape the destination.
     Members come from an archive downloaded off the internet; they are never trusted."""
-    name = Path(member).name
-    if not name or name in {".", ".."} or "/" in name or "\\" in name:
-        raise UnpackError(f"_safe_member_name: refusing zip member {member!r}: unusable name")
-    return name
+    return safe_component(member, context="_safe_member_name")
 
 
-def _extract_zip_member(archive: Path, member: str, dest_dir: Path) -> Path:
+def _extract_zip_member(
+    archive: Path, member: str, dest_dir: Path, *, max_bytes: int | None = None
+) -> Path:
+    """One member out, onto a path that is inside `dest_dir` and that no earlier member took.
+
+    `a/system.img` and `b/system.img` share a basename; before `unique_path` the second wrote
+    over the first and a whole partition's APKs disappeared with nothing raised.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / _safe_member_name(member)
-    with zipfile.ZipFile(archive) as zf, zf.open(member) as src, dest.open("wb") as out:
-        shutil.copyfileobj(src, out, length=4 * 1024 * 1024)
+    dest = unique_path(dest_dir, _safe_member_name(member))
+    ensure_within(dest_dir, dest, context="_extract_zip_member")
+    with zipfile.ZipFile(archive) as zf:
+        declared = zf.getinfo(member).file_size
+        if max_bytes is not None and declared > max_bytes:
+            raise UnpackError(
+                f"_extract_zip_member: {member!r} in {archive.name} declares {declared} bytes, "
+                f"over the {max_bytes}-byte ceiling; raise max_firmware_archive_bytes if this "
+                "firmware is genuinely that large"
+            )
+        with zf.open(member) as src, dest.open("wb") as out:
+            shutil.copyfileobj(src, out, length=4 * 1024 * 1024)
     return dest
 
 
-def _copy_slice(source: Path, dest: Path, *, offset: int, size: int) -> Path:
+def _copy_slice(source: Path, dest: Path, *, root: Path, offset: int, size: int) -> Path:
+    # Checked against `root`, never against `dest.parent`: the parent of an escaping path is
+    # itself outside, so containment against it is a tautology that passes for exactly the
+    # input it is supposed to catch.
+    ensure_within(root, dest, context="_copy_slice")
     dest.parent.mkdir(parents=True, exist_ok=True)
     remaining = size
     with source.open("rb") as src, dest.open("wb") as out:
@@ -366,9 +505,52 @@ async def unpack_to_partitions(
 
     Everything is written under `workdir`, which the caller owns and is expected to delete
     once the files worth keeping have been extracted out of it — these are the multi-GB
-    intermediates retention exists for.
+    intermediates retention exists for. `source` itself is never deleted; intermediates this
+    function creates under `workdir` are, as soon as the next step has consumed them.
     """
-    return await _unpack(source, source.stem, workdir, settings, depth=0)
+    return _resolve_partition_identities(
+        await _unpack(source, source.stem, workdir, settings, depth=0)
+    )
+
+
+def _resolve_partition_identities(partitions: list[PartitionImage]) -> list[PartitionImage]:
+    """Settle A/B slots and refuse a genuine identity collision.
+
+    `lpunpack` on a retrofitted A/B super emits `system_a` and `system_b`, which normalise to
+    one name; extracting both would double every package, and letting the second overwrite
+    the first loses one. Slot A wins (it is the slot a factory image populates) and slot B is
+    dropped with a warning. Anything else that collides — two zip members named `system.img`
+    under different directories — is ambiguous in a way nothing here can resolve, so it is a
+    named error.
+    """
+    by_slot = {partition.name: partition for partition in partitions}
+    kept: list[PartitionImage] = []
+    for partition in partitions:
+        if partition.name.endswith("_b") and partition.name[:-2] + "_a" in by_slot:
+            logger.warning(
+                "partition %s dropped: slot A of the same partition is present in this image",
+                partition.name,
+            )
+            continue
+        kept.append(partition)
+
+    seen: dict[str, PartitionImage] = {}
+    resolved: list[PartitionImage] = []
+    for partition in kept:
+        identity = normalize_partition_name(partition.name)
+        if identity in seen:
+            raise DuplicatePartitionError(
+                f"_resolve_partition_identities: {partition.path.name} and "
+                f"{seen[identity].path.name} both claim partition {identity!r}. Refusing to "
+                "guess which one the device would mount; extract them as separate jobs."
+            )
+        seen[identity] = partition
+        resolved.append(
+            PartitionImage(
+                name=identity, path=partition.path, fmt=partition.fmt, slot=partition.name
+            )
+        )
+    return resolved
 
 
 async def _unpack(
@@ -393,7 +575,11 @@ async def _unpack(
         case ContainerFormat.GPT_DISK:
             return await _unpack_gpt(source, workdir, settings, depth)
         case ContainerFormat.EXT4 | ContainerFormat.EROFS:
-            return [PartitionImage(name=normalize_partition_name(name), path=source, fmt=fmt)]
+            # The name stays as the source spelled it (slot suffix included); collapsing
+            # `system_a` to `system` here is what let two slots overwrite each other.
+            return [
+                PartitionImage(name=safe_component(name, context="_unpack"), path=source, fmt=fmt)
+            ]
         case _:
             raise UnsupportedContainerError(
                 f"_unpack: {source} is not a container this pipeline reads (leading bytes match "
@@ -413,17 +599,36 @@ async def _unpack_zip(
     # .zip` and keeps only bootloader/radio blobs at the top level, so the nested archive
     # wins outright rather than being merged with the outer one's images.
     if nested_zips:
+        if images:
+            logger.info(
+                "%s: taking %d nested archive(s) and ignoring %d top-level .img member(s): %s",
+                source.name,
+                len(nested_zips),
+                len(images),
+                ", ".join(sorted(Path(image).name for image in images)),
+            )
         found: list[PartitionImage] = []
         for member in nested_zips:
             extracted = await asyncio.to_thread(
-                _extract_zip_member, source, member, workdir / "nested"
+                _extract_zip_member,
+                source,
+                member,
+                workdir / "nested",
+                max_bytes=settings.max_firmware_archive_bytes,
             )
             found.extend(await _unpack(extracted, extracted.stem, workdir, settings, depth + 1))
+            # The nested archive is an intermediate like any other: once its members are out,
+            # it is a duplicate copy of gigabytes nothing reads again.
+            await asyncio.to_thread(extracted.unlink, True)
         return found
 
     if payloads:
         extracted = await asyncio.to_thread(
-            _extract_zip_member, source, payloads[0], workdir / "payload"
+            _extract_zip_member,
+            source,
+            payloads[0],
+            workdir / "payload",
+            max_bytes=settings.max_firmware_archive_bytes,
         )
         return await _unpack(extracted, "payload", workdir, settings, depth + 1)
 
@@ -439,7 +644,13 @@ async def _unpack_zip(
         stem = Path(member).stem
         if normalize_partition_name(stem) in _NON_FILESYSTEM_IMAGES:
             continue
-        extracted = await asyncio.to_thread(_extract_zip_member, source, member, workdir / "images")
+        extracted = await asyncio.to_thread(
+            _extract_zip_member,
+            source,
+            member,
+            workdir / "images",
+            max_bytes=settings.max_firmware_archive_bytes,
+        )
         try:
             found.extend(await _unpack(extracted, stem, workdir, settings, depth + 1))
         except UnsupportedContainerError:
@@ -461,9 +672,9 @@ async def _unpack_sparse(
 ) -> list[PartitionImage]:
     raw_dir = workdir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    raw = raw_dir / f"{name}.raw.img"
+    raw = unique_path(raw_dir, f"{safe_component(name, context='_unpack_sparse')}.raw.img")
     await _run_tool([_tool_path("simg2img"), str(source), str(raw)])
-    await asyncio.to_thread(source.unlink, True)
+    _drop_consumed_intermediate(source, depth)
     return await _unpack(raw, name, workdir, settings, depth + 1)
 
 
@@ -473,7 +684,7 @@ async def _unpack_super(
     parts_dir = workdir / "parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
     await _run_tool([_tool_path("lpunpack"), str(source), str(parts_dir)])
-    await asyncio.to_thread(source.unlink, True)
+    _drop_consumed_intermediate(source, depth)
     found: list[PartitionImage] = []
     for image in sorted(parts_dir.glob("*.img")):
         found.extend(await _unpack(image, image.stem, workdir, settings, depth + 1))
@@ -497,11 +708,20 @@ async def _unpack_gpt(
         fmt = await asyncio.to_thread(detect_format, source, offset=part.offset)
         if fmt is ContainerFormat.UNKNOWN:
             continue
-        name = normalize_partition_name(part.name or f"part{part.offset}")
-        if name in _NON_FILESYSTEM_IMAGES:
+        # The name is raw UTF-16 out of the disk image. A partition called `../../pwned`
+        # otherwise carved attacker-controlled bytes outside the scratch directory, and the
+        # same name then escaped a second time as the extraction destination.
+        name = safe_component(part.name or f"part{part.offset}", context="_unpack_gpt")
+        if normalize_partition_name(name) in _NON_FILESYSTEM_IMAGES:
             continue
+        slices_dir.mkdir(parents=True, exist_ok=True)
         carved = await asyncio.to_thread(
-            _copy_slice, source, slices_dir / f"{name}.img", offset=part.offset, size=part.size
+            _copy_slice,
+            source,
+            unique_path(slices_dir, f"{name}.img"),
+            root=workdir,
+            offset=part.offset,
+            size=part.size,
         )
         found.extend(await _unpack(carved, name, workdir, settings, depth + 1))
     if not found:
@@ -530,7 +750,7 @@ async def _unpack_payload(
             str(source),
         ]
     )
-    await asyncio.to_thread(source.unlink, True)
+    _drop_consumed_intermediate(source, depth)
     found: list[PartitionImage] = []
     for image in sorted(out_dir.glob("*.img")):
         if normalize_partition_name(image.stem) in _NON_FILESYSTEM_IMAGES:
@@ -617,18 +837,24 @@ async def _extract_ext4(image: Path, names: Sequence[str], dest: Path) -> None:
 
 
 def _harvest_erofs_staging(staging: Path, dest: Path, patterns: Sequence[str]) -> list[str]:
+    """`os.walk(followlinks=False)` rather than `rglob`: not descending into a symlinked
+    directory is what stops a partition image's own symlink from walking the host filesystem,
+    and on `rglob` that is an interpreter default (3.13 added `recurse_symlinks`) rather than
+    anything this code states. Stated here instead."""
     moved: list[str] = []
-    for path in sorted(staging.rglob("*")):
-        if path.is_symlink() or not path.is_file():
-            continue
-        relative = path.relative_to(staging).as_posix()
-        if not matches_artifact_patterns(relative, patterns):
-            continue
-        target = dest / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(path), str(target))
-        moved.append(relative)
-    return moved
+    for root, _dirs, files in os.walk(staging, followlinks=False):
+        for filename in sorted(files):
+            path = Path(root) / filename
+            if path.is_symlink() or not path.is_file():
+                continue
+            relative = path.relative_to(staging).as_posix()
+            if not matches_artifact_patterns(relative, patterns):
+                continue
+            target = ensure_within(dest, Path(relative), context="_harvest_erofs_staging")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), str(target))
+            moved.append(relative)
+    return sorted(moved)
 
 
 async def _extract_erofs(image: Path, dest: Path, patterns: Sequence[str]) -> list[str]:
@@ -637,7 +863,7 @@ async def _extract_erofs(image: Path, dest: Path, patterns: Sequence[str]) -> li
     mode, so the whole partition is unpacked into a temporary tree, the wanted paths are
     moved out, and the tree is deleted — the caller still ends up with only the selected
     files, at the cost of transient disk for one partition."""
-    staging = image.with_suffix(image.suffix + ".erofs-out")
+    staging = unique_path(image.parent, image.name + ".erofs-out")
     await _run_tool([_tool_path("fsck.erofs"), f"--extract={staging}", str(image)])
     dest.mkdir(parents=True, exist_ok=True)
     try:
@@ -655,29 +881,48 @@ async def extract_artifacts(
     """Pull every APK plus the config inputs later stages read out of `partitions`, into
     `dest_dir/<partition>/<path-inside-the-image>`.
 
-    Raises `NothingExtractedError` when no APK came out at all. An extraction that quietly
-    produces nothing is indistinguishable from a build with no preinstalled apps, and the
-    measured failure modes here (a glob that matches no directory, a deeper archive root)
-    both produce exactly that.
+    Emptiness is an error at BOTH scales. A partition that yields nothing raises unless it is
+    one that legitimately holds nothing (see `partition_may_be_empty`), because a whole
+    partition matching nothing is the same bug as the whole build matching nothing, only
+    quieter: four populated partitions out of five still returns hundreds of APKs and a job
+    that records SUCCEEDED. And a run that yields no APK anywhere raises regardless, since
+    that is indistinguishable from a build with no preinstalled apps.
     """
     artifacts: list[ExtractedArtifact] = []
     for partition in partitions:
-        dest = dest_dir / partition.name
+        dest = ensure_within(dest_dir, Path(partition.name), context="extract_artifacts")
         if partition.fmt is ContainerFormat.EROFS:
+            listed = None
             wanted = await _extract_erofs(partition.path, dest, patterns)
         else:
             entries = await _list_ext4(partition.path)
+            listed = len(entries)
             wanted = [path for path in entries if matches_artifact_patterns(path, patterns)]
-            if not wanted:
-                logger.warning(
-                    "partition %s: %d entries listed, none matched the artifact patterns",
-                    partition.name,
-                    len(entries),
+            # Validated BEFORE the extractor sees them, not after: an absolute or traversing
+            # path must never be handed to a tool that will act on it.
+            for path in wanted:
+                safe_archive_path(path, context=f"extract_artifacts[{partition.name}]")
+            if wanted:
+                await _extract_ext4(partition.path, wanted, dest)
+
+        if not wanted:
+            if not partition_may_be_empty(partition.name):
+                raise NothingExtractedError(
+                    f"extract_artifacts: partition {partition.name!r} "
+                    f"({partition.path.name}, {partition.fmt}) yielded no artifact at all out of "
+                    f"{'an unlisted image' if listed is None else f'{listed} entries'}. A "
+                    "partition matching nothing is an extraction failure, not an empty "
+                    "partition: check the artifact patterns against a listing of this image, or "
+                    "add it to PARTITIONS_ALLOWED_EMPTY if it genuinely carries no app."
                 )
-                continue
-            await _extract_ext4(partition.path, wanted, dest)
+            logger.info(
+                "partition %s yielded nothing, which is expected for this partition",
+                partition.name,
+            )
+            continue
+
         for path in wanted:
-            local = dest / path
+            local = ensure_within(dest, Path(path), context="extract_artifacts")
             if not local.is_file():
                 raise UnpackError(
                     f"extract_artifacts: {partition.name}/{path} was listed inside "
@@ -693,10 +938,10 @@ async def extract_artifacts(
                 )
             )
         logger.info(
-            "partition %s: extracted %d of %d entries",
+            "partition %s: extracted %d artifact(s) out of %s",
             partition.name,
             len(wanted),
-            len(entries),
+            "an unlisted image" if listed is None else f"{listed} entries",
         )
 
     apks = sum(1 for artifact in artifacts if artifact.image_path.endswith(".apk"))
