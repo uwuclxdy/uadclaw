@@ -65,6 +65,7 @@ UNION_FIELDS: tuple[str, ...] = (
     "uses_libraries_optional",
     "protected_broadcasts",
     "provider_authorities",
+    "queries_packages",
     "intent_filters",
 )
 
@@ -150,6 +151,7 @@ def observation_row(
         "uses_libraries_optional": list(facts.uses_libraries_optional),
         "protected_broadcasts": list(facts.protected_broadcasts),
         "provider_authorities": list(facts.provider_authorities),
+        "queries_packages": list(facts.queries_packages),
         "intent_filters": [item.as_json() for item in facts.intent_filters],
     }
 

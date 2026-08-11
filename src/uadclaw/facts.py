@@ -130,6 +130,10 @@ class ApkFacts:
     uses_libraries_optional: tuple[str, ...] = ()
     protected_broadcasts: tuple[str, ...] = ()
     provider_authorities: tuple[str, ...] = ()
+    # `<queries><package name="X">`. Deliberately NOT a dependency edge: a caller is expected
+    # to handle the queried package being absent, so this is evidence for the human and the
+    # model only (`docs/pipeline-design.md` §4).
+    queries_packages: tuple[str, ...] = ()
     intent_filters: tuple[IntentFilterFact, ...] = field(default_factory=tuple)
     is_input_method: bool = False
     is_device_admin: bool = False
@@ -350,6 +354,7 @@ def parse_apk(path: Path, *, partition: str, device_path: str) -> ApkFacts:
         uses_libraries_optional=uses_optional,
         protected_broadcasts=_child_names(root, "protected-broadcast"),
         provider_authorities=_provider_authorities(application),
+        queries_packages=_child_names(root.find("queries"), "package"),
         intent_filters=filters,
         is_input_method=_declares(filters, "service", INPUT_METHOD_ACTION),
         is_device_admin=_declares(filters, "receiver", DEVICE_ADMIN_ACTION),

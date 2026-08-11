@@ -206,8 +206,19 @@ class DeviceScan(Base):
     failures: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
+    # This device's `/etc` rule-ladder inputs (privapp allowlists, static roles), parsed by
+    # the `rule_ladder` stage out of the config XMLs the unpack stage kept. They live here
+    # rather than in scratch because scratch dies with the job while the ladder is
+    # corpus-wide: without this column, device B's ladder run cannot see device A's
+    # allowlist. Shape: `uadclaw.etcconfig.ConfigInputs.as_json()`.
+    config_inputs: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
 
-    __table_args__ = (Index("ix_device_scans_device_key", "device_key"),)
+    __table_args__ = (
+        Index("ix_device_scans_device_key", "device_key"),
+        Index("ix_device_scans_job_id", "job_id"),
+    )
 
 
 class PackageObservation(Base):
@@ -260,6 +271,9 @@ class PackageObservation(Base):
     uses_libraries_optional: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     protected_broadcasts: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     provider_authorities: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    queries_packages: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
     intent_filters: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
 
     __table_args__ = (
@@ -331,6 +345,9 @@ class PackageFact(Base):
     uses_libraries_optional: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     protected_broadcasts: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     provider_authorities: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    queries_packages: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
     intent_filters: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
 
     has_conflict: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -341,4 +358,80 @@ class PackageFact(Base):
     __table_args__ = (
         Index("ix_package_facts_device_count", "device_count"),
         Index("ix_package_facts_has_conflict", "has_conflict"),
+    )
+
+
+class PackageAnalysis(Base):
+    """What the deterministic core (design §4-§6) concluded about one package.
+
+    Nothing on this row is ever model output. `dependencies` and `needed_by` come from the
+    corpus graph and `floor`/`floor_rule` from the rule ladder, so every column here carries
+    `graph:` or `rule:` provenance by construction — which is the point: a re-run of the LLM
+    stage rewrites nothing here, and a wrong edge cannot arrive from a model.
+
+    One row per package in the corpus, not per candidate: a package already in `uad_lists.json`
+    still gets its edges and its floor, because a mechanically derived `neededBy` on an
+    existing entry and a floor above an existing `removal` are corrections worth proposing.
+    `queued` is the only column that answers "does this reach the additions queue".
+
+    The three stages write disjoint column sets and each is nullable until its stage has run:
+    `corpus_graph` writes the edges and evidence, `filter` writes `upstream_present`/`queued`,
+    `rule_ladder` writes the floor. NULL therefore means "that stage has not run for this
+    package", which is a different thing from `false` and must stay distinguishable.
+    """
+
+    __tablename__ = "package_analysis"
+
+    package: Mapped[str] = mapped_column(String(255), primary_key=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    # --- corpus_graph -----------------------------------------------------------------
+    # The two emitted fields, in the upstream schema's meaning. Stored rather than derived
+    # from `edges` on read, for the same reason `device_count` is stored: a value that ships
+    # upstream must have exactly one spelling.
+    dependencies: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    needed_by: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # Why each of the above exists: [{"kind", "dependent", "provider", "detail"}].
+    edges: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # Relations recorded but deliberately NOT emitted as edges (declared package queries,
+    # required libraries no corpus package provides). Shape: `uadclaw.corpus.PackageEvidence`.
+    evidence: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+    # --- filter -----------------------------------------------------------------------
+    upstream_present: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    queued: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # `uadclaw.filters.FilterVerdict`: why it is or is not in the queue.
+    filter_verdict: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Which bytes of `uad_lists.json` decided `upstream_present` — path, sha256, entry count
+    # and when that copy was obtained. Recorded per row because the list is an external input
+    # that changes what gets proposed, so "it was already upstream" has to name its evidence.
+    upstream_provenance: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    # --- rule_ladder ------------------------------------------------------------------
+    # The floor, never a rating: the model may raise it and never lower it.
+    floor: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    floor_rule: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Every rule that fired, strictest first: [{"rule", "floor", "detail"}]. The triage card
+    # shows this, so a reviewer can see why a package is pinned where it is.
+    floor_reasons: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # Privileged-permission allowlist membership, an INTEGRATION score and never a boot-risk
+    # flag: AOSP's "device won't boot" clause fires when a package that is still present
+    # requests a permission that is not allowlisted, which is a ROM-build error. Removing the
+    # app removes the request. See `docs/domain-knowledge.md` § AOSP semantics.
+    privapp_allowlisted: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    privapp_permission_count: Mapped[int | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        Index("ix_package_analysis_queued", "queued"),
+        Index("ix_package_analysis_floor", "floor"),
     )
