@@ -160,7 +160,7 @@ def test_registry_resolves_a_known_driver():
     driver = get_driver("pixel", make_settings())
 
     assert driver.name == "pixel"
-    assert driver_names() == ("pixel",)
+    assert driver_names() == ("motorola", "nothing", "pixel", "xiaomi")
 
 
 def test_unknown_driver_name_is_refused_by_name():
@@ -175,15 +175,15 @@ def test_a_disabled_driver_is_refused_with_its_own_error():
 
     with pytest.raises(FirmwareDriverDisabledError):
         get_driver("pixel", settings)
-    assert enabled_driver_names(settings) == ()
-    assert driver_names() == ("pixel",)
+    assert enabled_driver_names(settings) == ("motorola", "nothing", "xiaomi")
+    assert driver_names() == ("motorola", "nothing", "pixel", "xiaomi")
 
 
 def test_disable_list_tolerates_spacing_and_unrelated_names():
     settings = make_settings(disabled_firmware_drivers=" samsung , oppo ")
 
     assert settings.disabled_firmware_driver_names == frozenset({"samsung", "oppo"})
-    assert enabled_driver_names(settings) == ("pixel",)
+    assert enabled_driver_names(settings) == ("motorola", "nothing", "pixel", "xiaomi")
 
 
 # --- ref selection and validation ---------------------------------------------------------
@@ -228,7 +228,7 @@ async def test_download_verifies_the_published_checksum(tmp_path):
     dest = tmp_path / "firmware.zip"
 
     await download_to_file(
-        client, "https://x/y.zip", dest, expected_sha256=hashlib.sha256(body).hexdigest()
+        client, "https://x/y.zip", dest, expected_digest=hashlib.sha256(body).hexdigest()
     )
 
     assert dest.read_bytes() == body
@@ -241,9 +241,54 @@ async def test_download_with_a_bad_checksum_leaves_nothing_behind(tmp_path):
     dest = tmp_path / "firmware.zip"
 
     with pytest.raises(FirmwareDownloadError):
-        await download_to_file(client, "https://x/y.zip", dest, expected_sha256="0" * 64)
+        await download_to_file(client, "https://x/y.zip", dest, expected_digest="0" * 64)
 
     assert list(tmp_path.iterdir()) == []
+
+
+async def test_download_refuses_a_digest_algorithm_that_is_not_on_the_allowlist(tmp_path):
+    """`hashlib.new` accepts `md4` and whatever else the local OpenSSL exposes; an index
+    naming one must fail here rather than be verified against a broken digest."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=b"x")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(FirmwareInputError) as excinfo:
+        await download_to_file(
+            client,
+            "https://x/y.zip",
+            tmp_path / "f.zip",
+            expected_digest="0" * 32,
+            digest_algorithm="md4",
+        )
+
+    assert "md4" in str(excinfo.value)
+    assert seen == []
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_download_returns_a_sha256_even_when_it_verified_an_md5(tmp_path):
+    """The source's algorithm decides what is CHECKED; the pipeline's identity for the
+    archive is always sha256, and `PipelineState.archive_sha256` records it."""
+    body = b"xiaomi-rom" * 32
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=body))
+    )
+
+    archive = await download_to_file(
+        client,
+        "https://x/y.zip",
+        tmp_path / "f.zip",
+        expected_digest=hashlib.md5(body).hexdigest(),  # noqa: S324 - what Xiaomi publishes
+        digest_algorithm="md5",
+    )
+
+    assert archive.integrity_verified is True
+    assert archive.sha256 == hashlib.sha256(body).hexdigest()
 
 
 async def test_fetch_refuses_a_ref_from_another_driver(tmp_path):

@@ -1,0 +1,2394 @@
+{
+ "/firmware/lenomola/": {
+  "items": [
+   {
+    "href": "/",
+    "time": 1734608796000,
+    "size": 24852572839007,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/ar/",
+    "time": 1608516425000,
+    "size": 41,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/donate_me/",
+    "time": 1741587121000,
+    "size": 854,
+    "managed": false,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/",
+    "time": 1757320584000,
+    "size": 24798777325435,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/docomo/",
+    "time": 1745057148000,
+    "size": 14176528123,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/fcnt/",
+    "time": 1757320604000,
+    "size": 27117758852,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/gsi/",
+    "time": 1706374808000,
+    "size": 63727906327,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/halium/",
+    "time": 1602799158000,
+    "size": 15784481595,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/hmd/",
+    "time": 1732433977000,
+    "size": 13027,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/",
+    "time": 1774108845000,
+    "size": 22695570845219,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2020/",
+    "time": 1722569793000,
+    "size": 6204,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2021/",
+    "time": 1736402589000,
+    "size": 8234,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2022/",
+    "time": 1775243658000,
+    "size": 6868,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/",
+    "time": 1765073948000,
+    "size": 9098731208537,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2024/",
+    "time": 1736484862000,
+    "size": 8325671744554,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2025/",
+    "time": 1765106373000,
+    "size": 5212341204628,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2026/",
+    "time": 1781035682000,
+    "size": 53335912928,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/_obsoleted_/",
+    "time": 1736670885000,
+    "size": 32679,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenowow/",
+    "time": 1781674579000,
+    "size": 1808355552927,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/nec/",
+    "time": 1739216671000,
+    "size": 173502097803,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/twrp/",
+    "time": 1625817206000,
+    "size": 542131046,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/general/",
+    "time": 1734608758000,
+    "size": 908,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/iso/",
+    "time": 1596399395000,
+    "size": 17747722961,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/software/",
+    "time": 1746333052000,
+    "size": 1093577073,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/trademark_warning/",
+    "time": 1706378347000,
+    "size": 10,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/README.html",
+    "time": 1722447118000,
+    "size": 3210
+   }
+  ]
+ },
+ "/firmware/lenomola/2023/rtwo/": {
+  "items": [
+   {
+    "href": "/",
+    "time": 1734608796000,
+    "size": 24852572839007,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/ar/",
+    "time": 1608516425000,
+    "size": 41,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/donate_me/",
+    "time": 1741587121000,
+    "size": 854,
+    "managed": false,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/",
+    "time": 1757320584000,
+    "size": 24798777325435,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/docomo/",
+    "time": 1745057148000,
+    "size": 14176528123,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/fcnt/",
+    "time": 1757320604000,
+    "size": 27117758852,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/gsi/",
+    "time": 1706374808000,
+    "size": 63727906327,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/halium/",
+    "time": 1602799158000,
+    "size": 15784481595,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/hmd/",
+    "time": 1732433977000,
+    "size": 13027,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/",
+    "time": 1774108845000,
+    "size": 22695570845219,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2020/",
+    "time": 1722569793000,
+    "size": 6204,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2021/",
+    "time": 1736402589000,
+    "size": 8234,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2022/",
+    "time": 1775243658000,
+    "size": 6868,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/",
+    "time": 1765073948000,
+    "size": 9098731208537,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/aion/",
+    "time": 1702000386000,
+    "size": 82512358176,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/bangkk/",
+    "time": 1722622108000,
+    "size": 475053436082,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/bronco/",
+    "time": 1724296336000,
+    "size": 320372234298,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancun/",
+    "time": 1730754013000,
+    "size": 220657295030,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancunf/",
+    "time": 1716568252000,
+    "size": 671927211247,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancunf_retcn/",
+    "time": 1714037314000,
+    "size": 19791158613,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/devonf/",
+    "time": 1713863189000,
+    "size": 307458355469,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/devonn/",
+    "time": 1716799415000,
+    "size": 150344790813,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/fogos/",
+    "time": 1706203433000,
+    "size": 739788600241,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/fogos_retcn/",
+    "time": 1703784624000,
+    "size": 20377615978,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/genevn/",
+    "time": 1724992373000,
+    "size": 283922901116,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/gnevan/",
+    "time": 1702446323000,
+    "size": 104682874158,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lynkco/",
+    "time": 1734753757000,
+    "size": 1123037003870,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lynkco_retcn/",
+    "time": 1686237545000,
+    "size": 30448647845,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lyriq/",
+    "time": 1714409454000,
+    "size": 500200385166,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/manaus/",
+    "time": 1702449400000,
+    "size": 977546482073,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penang/",
+    "time": 1702000310000,
+    "size": 483542517195,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penang_retcn/",
+    "time": 1672752600000,
+    "size": 44434962622,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penangf/",
+    "time": 1702005523000,
+    "size": 395179450402,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/pnangn/",
+    "time": 1688748968000,
+    "size": 356553988572,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/",
+    "time": 1688750288000,
+    "size": 258441517712,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/",
+    "time": 1722489833000,
+    "size": 253750805729,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo_retcn/",
+    "time": 1677178764000,
+    "size": 43715162064,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/sabahl/",
+    "time": 1716574223000,
+    "size": 488871005096,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/zeekr/",
+    "time": 1701275980000,
+    "size": 961328196088,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/zeekr_retcn/",
+    "time": 1686236158000,
+    "size": 38543048699,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2024/",
+    "time": 1736484862000,
+    "size": 8325671744554,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2025/",
+    "time": 1765106373000,
+    "size": 5212341204628,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2026/",
+    "time": 1781035682000,
+    "size": 53335912928,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/_obsoleted_/",
+    "time": 1736670885000,
+    "size": 32679,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenowow/",
+    "time": 1781674579000,
+    "size": 1808355552927,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/nec/",
+    "time": 1739216671000,
+    "size": 173502097803,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/twrp/",
+    "time": 1625817206000,
+    "size": 542131046,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/general/",
+    "time": 1734608758000,
+    "size": 908,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/iso/",
+    "time": 1596399395000,
+    "size": 17747722961,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/software/",
+    "time": 1746333052000,
+    "size": 1093577073,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/trademark_warning/",
+    "time": 1706378347000,
+    "size": 10,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/README.html",
+    "time": 1765073948000,
+    "size": 2908
+   },
+   {
+    "href": "/firmware/README.html",
+    "time": 1722447118000,
+    "size": 3210
+   }
+  ]
+ },
+ "/firmware/lenomola/2023/rtwo/official/": {
+  "items": [
+   {
+    "href": "/",
+    "time": 1734608796000,
+    "size": 24852572839007,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/ar/",
+    "time": 1608516425000,
+    "size": 41,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/donate_me/",
+    "time": 1741587121000,
+    "size": 854,
+    "managed": false,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/",
+    "time": 1757320584000,
+    "size": 24798777325435,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/docomo/",
+    "time": 1745057148000,
+    "size": 14176528123,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/fcnt/",
+    "time": 1757320604000,
+    "size": 27117758852,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/gsi/",
+    "time": 1706374808000,
+    "size": 63727906327,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/halium/",
+    "time": 1602799158000,
+    "size": 15784481595,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/hmd/",
+    "time": 1732433977000,
+    "size": 13027,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/",
+    "time": 1774108845000,
+    "size": 22695570845219,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2020/",
+    "time": 1722569793000,
+    "size": 6204,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2021/",
+    "time": 1736402589000,
+    "size": 8234,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2022/",
+    "time": 1775243658000,
+    "size": 6868,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/",
+    "time": 1765073948000,
+    "size": 9098731208537,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/aion/",
+    "time": 1702000386000,
+    "size": 82512358176,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/bangkk/",
+    "time": 1722622108000,
+    "size": 475053436082,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/bronco/",
+    "time": 1724296336000,
+    "size": 320372234298,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancun/",
+    "time": 1730754013000,
+    "size": 220657295030,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancunf/",
+    "time": 1716568252000,
+    "size": 671927211247,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancunf_retcn/",
+    "time": 1714037314000,
+    "size": 19791158613,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/devonf/",
+    "time": 1713863189000,
+    "size": 307458355469,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/devonn/",
+    "time": 1716799415000,
+    "size": 150344790813,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/fogos/",
+    "time": 1706203433000,
+    "size": 739788600241,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/fogos_retcn/",
+    "time": 1703784624000,
+    "size": 20377615978,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/genevn/",
+    "time": 1724992373000,
+    "size": 283922901116,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/gnevan/",
+    "time": 1702446323000,
+    "size": 104682874158,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lynkco/",
+    "time": 1734753757000,
+    "size": 1123037003870,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lynkco_retcn/",
+    "time": 1686237545000,
+    "size": 30448647845,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lyriq/",
+    "time": 1714409454000,
+    "size": 500200385166,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/manaus/",
+    "time": 1702449400000,
+    "size": 977546482073,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penang/",
+    "time": 1702000310000,
+    "size": 483542517195,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penang_retcn/",
+    "time": 1672752600000,
+    "size": 44434962622,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penangf/",
+    "time": 1702005523000,
+    "size": 395179450402,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/pnangn/",
+    "time": 1688748968000,
+    "size": 356553988572,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/",
+    "time": 1688750288000,
+    "size": 258441517712,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/",
+    "time": 1722489833000,
+    "size": 253750805729,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/Boost/",
+    "time": 1760633603000,
+    "size": 21387941759,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/CC/",
+    "time": 1750247069000,
+    "size": 21387833685,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/OPENMX/",
+    "time": 1760633690000,
+    "size": 27089758249,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAIL/",
+    "time": 1760633675000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAR/",
+    "time": 1760633836000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETCA/",
+    "time": 1758389355000,
+    "size": 21387879679,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETEU/",
+    "time": 1760633768000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETGB/",
+    "time": 1760633768000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETUS/",
+    "time": 1760633814000,
+    "size": 27171626438,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/TELEU/",
+    "time": 1760633739000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo_retcn/",
+    "time": 1677178764000,
+    "size": 43715162064,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/sabahl/",
+    "time": 1716574223000,
+    "size": 488871005096,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/zeekr/",
+    "time": 1701275980000,
+    "size": 961328196088,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/zeekr_retcn/",
+    "time": 1686236158000,
+    "size": 38543048699,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2024/",
+    "time": 1736484862000,
+    "size": 8325671744554,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2025/",
+    "time": 1765106373000,
+    "size": 5212341204628,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2026/",
+    "time": 1781035682000,
+    "size": 53335912928,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/_obsoleted_/",
+    "time": 1736670885000,
+    "size": 32679,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenowow/",
+    "time": 1781674579000,
+    "size": 1808355552927,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/nec/",
+    "time": 1739216671000,
+    "size": 173502097803,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/twrp/",
+    "time": 1625817206000,
+    "size": 542131046,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/general/",
+    "time": 1734608758000,
+    "size": 908,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/iso/",
+    "time": 1596399395000,
+    "size": 17747722961,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/software/",
+    "time": 1746333052000,
+    "size": 1093577073,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/trademark_warning/",
+    "time": 1706378347000,
+    "size": 10,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/README.html",
+    "time": 1765073948000,
+    "size": 2908
+   },
+   {
+    "href": "/firmware/README.html",
+    "time": 1722447118000,
+    "size": 3210
+   }
+  ]
+ },
+ "/firmware/lenomola/2023/rtwo/official/RETAIL/": {
+  "items": [
+   {
+    "href": "/",
+    "time": 1734608796000,
+    "size": 24852572839007,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/ar/",
+    "time": 1608516425000,
+    "size": 41,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/donate_me/",
+    "time": 1741587121000,
+    "size": 854,
+    "managed": false,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/",
+    "time": 1757320584000,
+    "size": 24798777325435,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/docomo/",
+    "time": 1745057148000,
+    "size": 14176528123,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/fcnt/",
+    "time": 1757320604000,
+    "size": 27117758852,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/gsi/",
+    "time": 1706374808000,
+    "size": 63727906327,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/halium/",
+    "time": 1602799158000,
+    "size": 15784481595,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/hmd/",
+    "time": 1732433977000,
+    "size": 13027,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/",
+    "time": 1774108845000,
+    "size": 22695570845219,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2020/",
+    "time": 1722569793000,
+    "size": 6204,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2021/",
+    "time": 1736402589000,
+    "size": 8234,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2022/",
+    "time": 1775243658000,
+    "size": 6868,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/",
+    "time": 1765073948000,
+    "size": 9098731208537,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/aion/",
+    "time": 1702000386000,
+    "size": 82512358176,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/bangkk/",
+    "time": 1722622108000,
+    "size": 475053436082,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/bronco/",
+    "time": 1724296336000,
+    "size": 320372234298,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancun/",
+    "time": 1730754013000,
+    "size": 220657295030,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancunf/",
+    "time": 1716568252000,
+    "size": 671927211247,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancunf_retcn/",
+    "time": 1714037314000,
+    "size": 19791158613,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/devonf/",
+    "time": 1713863189000,
+    "size": 307458355469,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/devonn/",
+    "time": 1716799415000,
+    "size": 150344790813,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/fogos/",
+    "time": 1706203433000,
+    "size": 739788600241,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/fogos_retcn/",
+    "time": 1703784624000,
+    "size": 20377615978,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/genevn/",
+    "time": 1724992373000,
+    "size": 283922901116,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/gnevan/",
+    "time": 1702446323000,
+    "size": 104682874158,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lynkco/",
+    "time": 1734753757000,
+    "size": 1123037003870,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lynkco_retcn/",
+    "time": 1686237545000,
+    "size": 30448647845,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lyriq/",
+    "time": 1714409454000,
+    "size": 500200385166,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/manaus/",
+    "time": 1702449400000,
+    "size": 977546482073,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penang/",
+    "time": 1702000310000,
+    "size": 483542517195,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penang_retcn/",
+    "time": 1672752600000,
+    "size": 44434962622,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penangf/",
+    "time": 1702005523000,
+    "size": 395179450402,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/pnangn/",
+    "time": 1688748968000,
+    "size": 356553988572,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/",
+    "time": 1688750288000,
+    "size": 258441517712,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/",
+    "time": 1722489833000,
+    "size": 253750805729,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/Boost/",
+    "time": 1760633603000,
+    "size": 21387941759,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/CC/",
+    "time": 1750247069000,
+    "size": 21387833685,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/OPENMX/",
+    "time": 1760633690000,
+    "size": 27089758249,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAIL/",
+    "time": 1760633675000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAR/",
+    "time": 1760633836000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETCA/",
+    "time": 1758389355000,
+    "size": 21387879679,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETEU/",
+    "time": 1760633768000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETGB/",
+    "time": 1760633768000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETUS/",
+    "time": 1760633814000,
+    "size": 27171626438,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/TELEU/",
+    "time": 1760633739000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo_retcn/",
+    "time": 1677178764000,
+    "size": 43715162064,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/sabahl/",
+    "time": 1716574223000,
+    "size": 488871005096,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/zeekr/",
+    "time": 1701275980000,
+    "size": 961328196088,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/zeekr_retcn/",
+    "time": 1686236158000,
+    "size": 38543048699,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2024/",
+    "time": 1736484862000,
+    "size": 8325671744554,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2025/",
+    "time": 1765106373000,
+    "size": 5212341204628,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2026/",
+    "time": 1781035682000,
+    "size": 53335912928,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/_obsoleted_/",
+    "time": 1736670885000,
+    "size": 32679,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenowow/",
+    "time": 1781674579000,
+    "size": 1808355552927,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/nec/",
+    "time": 1739216671000,
+    "size": 173502097803,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/twrp/",
+    "time": 1625817206000,
+    "size": 542131046,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/general/",
+    "time": 1734608758000,
+    "size": 908,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/iso/",
+    "time": 1596399395000,
+    "size": 17747722961,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/software/",
+    "time": 1746333052000,
+    "size": 1093577073,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/trademark_warning/",
+    "time": 1706378347000,
+    "size": 10,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/README.html",
+    "time": 1765073948000,
+    "size": 2908
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAIL/RTWO_RETAIL_13_T1TR33.43-20-56_subsidy-DEFAULT_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1701795826000,
+    "size": 4699252165
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAIL/RTWO_RETAIL_14_U1TRS34.8-30-13-2-2-6_subsidy-DEFAULT_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1743852054000,
+    "size": 5014678188
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAIL/RTWO_RETAIL_15_V1TRS35H.60-33-5_subsidy-DEFAULT_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1748624779000,
+    "size": 5783724451
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAIL/RTWO_RETAIL_15_V1TRS35H.60-33-6_subsidy-DEFAULT_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1758389296000,
+    "size": 5783752182
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAIL/RTWO_RETAIL_15_V1TRS35H.60-33-7_subsidy-DEFAULT_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1760633675000,
+    "size": 5783742066
+   },
+   {
+    "href": "/firmware/README.html",
+    "time": 1722447118000,
+    "size": 3210
+   }
+  ]
+ },
+ "/firmware/lenomola/2023/rtwo/official/RETEU/": {
+  "items": [
+   {
+    "href": "/",
+    "time": 1734608796000,
+    "size": 24852572839007,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/ar/",
+    "time": 1608516425000,
+    "size": 41,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/donate_me/",
+    "time": 1741587121000,
+    "size": 854,
+    "managed": false,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/",
+    "time": 1757320584000,
+    "size": 24798777325435,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/docomo/",
+    "time": 1745057148000,
+    "size": 14176528123,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/fcnt/",
+    "time": 1757320604000,
+    "size": 27117758852,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/gsi/",
+    "time": 1706374808000,
+    "size": 63727906327,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/halium/",
+    "time": 1602799158000,
+    "size": 15784481595,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/hmd/",
+    "time": 1732433977000,
+    "size": 13027,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/",
+    "time": 1774108845000,
+    "size": 22695570845219,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2020/",
+    "time": 1722569793000,
+    "size": 6204,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2021/",
+    "time": 1736402589000,
+    "size": 8234,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2022/",
+    "time": 1775243658000,
+    "size": 6868,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/",
+    "time": 1765073948000,
+    "size": 9098731208537,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/aion/",
+    "time": 1702000386000,
+    "size": 82512358176,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/bangkk/",
+    "time": 1722622108000,
+    "size": 475053436082,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/bronco/",
+    "time": 1724296336000,
+    "size": 320372234298,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancun/",
+    "time": 1730754013000,
+    "size": 220657295030,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancunf/",
+    "time": 1716568252000,
+    "size": 671927211247,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancunf_retcn/",
+    "time": 1714037314000,
+    "size": 19791158613,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/devonf/",
+    "time": 1713863189000,
+    "size": 307458355469,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/devonn/",
+    "time": 1716799415000,
+    "size": 150344790813,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/fogos/",
+    "time": 1706203433000,
+    "size": 739788600241,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/fogos_retcn/",
+    "time": 1703784624000,
+    "size": 20377615978,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/genevn/",
+    "time": 1724992373000,
+    "size": 283922901116,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/gnevan/",
+    "time": 1702446323000,
+    "size": 104682874158,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lynkco/",
+    "time": 1734753757000,
+    "size": 1123037003870,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lynkco_retcn/",
+    "time": 1686237545000,
+    "size": 30448647845,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lyriq/",
+    "time": 1714409454000,
+    "size": 500200385166,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/manaus/",
+    "time": 1702449400000,
+    "size": 977546482073,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penang/",
+    "time": 1702000310000,
+    "size": 483542517195,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penang_retcn/",
+    "time": 1672752600000,
+    "size": 44434962622,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penangf/",
+    "time": 1702005523000,
+    "size": 395179450402,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/pnangn/",
+    "time": 1688748968000,
+    "size": 356553988572,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/",
+    "time": 1688750288000,
+    "size": 258441517712,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/",
+    "time": 1722489833000,
+    "size": 253750805729,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/Boost/",
+    "time": 1760633603000,
+    "size": 21387941759,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/CC/",
+    "time": 1750247069000,
+    "size": 21387833685,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/OPENMX/",
+    "time": 1760633690000,
+    "size": 27089758249,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAIL/",
+    "time": 1760633675000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAR/",
+    "time": 1760633836000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETCA/",
+    "time": 1758389355000,
+    "size": 21387879679,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETEU/",
+    "time": 1760633768000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETGB/",
+    "time": 1760633768000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETUS/",
+    "time": 1760633814000,
+    "size": 27171626438,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/TELEU/",
+    "time": 1760633739000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo_retcn/",
+    "time": 1677178764000,
+    "size": 43715162064,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/sabahl/",
+    "time": 1716574223000,
+    "size": 488871005096,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/zeekr/",
+    "time": 1701275980000,
+    "size": 961328196088,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/zeekr_retcn/",
+    "time": 1686236158000,
+    "size": 38543048699,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2024/",
+    "time": 1736484862000,
+    "size": 8325671744554,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2025/",
+    "time": 1765106373000,
+    "size": 5212341204628,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2026/",
+    "time": 1781035682000,
+    "size": 53335912928,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/_obsoleted_/",
+    "time": 1736670885000,
+    "size": 32679,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenowow/",
+    "time": 1781674579000,
+    "size": 1808355552927,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/nec/",
+    "time": 1739216671000,
+    "size": 173502097803,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/twrp/",
+    "time": 1625817206000,
+    "size": 542131046,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/general/",
+    "time": 1734608758000,
+    "size": 908,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/iso/",
+    "time": 1596399395000,
+    "size": 17747722961,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/software/",
+    "time": 1746333052000,
+    "size": 1093577073,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/trademark_warning/",
+    "time": 1706378347000,
+    "size": 10,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/README.html",
+    "time": 1765073948000,
+    "size": 2908
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETEU/XT2301-4_RTWO_RETEU_13_T1TR33.43-20-56_subsidy-DEFAULT_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1701795826000,
+    "size": 4699252165
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETEU/XT2301-4_RTWO_RETEU_14_U1TRS34.8-30-13-2-2-6_subsidy-DEFAULT_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1743852054000,
+    "size": 5014678188
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETEU/XT2301-4_RTWO_RETEU_15_V1TRS35H.60-33-5_subsidy-DEFAULT_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1748624779000,
+    "size": 5783724451
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETEU/XT2301-4_RTWO_RETEU_15_V1TRS35H.60-33-6_subsidy-DEFAULT_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1758389296000,
+    "size": 5783752182
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETEU/XT2301-4_RTWO_RETEU_15_V1TRS35H.60-33-7_subsidy-DEFAULT_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1760633675000,
+    "size": 5783742066
+   },
+   {
+    "href": "/firmware/README.html",
+    "time": 1722447118000,
+    "size": 3210
+   }
+  ]
+ },
+ "/firmware/lenomola/2023/rtwo/official/Boost/": {
+  "items": [
+   {
+    "href": "/",
+    "time": 1734608796000,
+    "size": 24852572839007,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/ar/",
+    "time": 1608516425000,
+    "size": 41,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/donate_me/",
+    "time": 1741587121000,
+    "size": 854,
+    "managed": false,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/",
+    "time": 1757320584000,
+    "size": 24798777325435,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/docomo/",
+    "time": 1745057148000,
+    "size": 14176528123,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/fcnt/",
+    "time": 1757320604000,
+    "size": 27117758852,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/gsi/",
+    "time": 1706374808000,
+    "size": 63727906327,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/halium/",
+    "time": 1602799158000,
+    "size": 15784481595,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/hmd/",
+    "time": 1732433977000,
+    "size": 13027,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/",
+    "time": 1774108845000,
+    "size": 22695570845219,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2020/",
+    "time": 1722569793000,
+    "size": 6204,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2021/",
+    "time": 1736402589000,
+    "size": 8234,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2022/",
+    "time": 1775243658000,
+    "size": 6868,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/",
+    "time": 1765073948000,
+    "size": 9098731208537,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/aion/",
+    "time": 1702000386000,
+    "size": 82512358176,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/bangkk/",
+    "time": 1722622108000,
+    "size": 475053436082,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/bronco/",
+    "time": 1724296336000,
+    "size": 320372234298,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancun/",
+    "time": 1730754013000,
+    "size": 220657295030,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancunf/",
+    "time": 1716568252000,
+    "size": 671927211247,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/cancunf_retcn/",
+    "time": 1714037314000,
+    "size": 19791158613,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/devonf/",
+    "time": 1713863189000,
+    "size": 307458355469,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/devonn/",
+    "time": 1716799415000,
+    "size": 150344790813,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/fogos/",
+    "time": 1706203433000,
+    "size": 739788600241,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/fogos_retcn/",
+    "time": 1703784624000,
+    "size": 20377615978,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/genevn/",
+    "time": 1724992373000,
+    "size": 283922901116,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/gnevan/",
+    "time": 1702446323000,
+    "size": 104682874158,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lynkco/",
+    "time": 1734753757000,
+    "size": 1123037003870,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lynkco_retcn/",
+    "time": 1686237545000,
+    "size": 30448647845,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/lyriq/",
+    "time": 1714409454000,
+    "size": 500200385166,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/manaus/",
+    "time": 1702449400000,
+    "size": 977546482073,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penang/",
+    "time": 1702000310000,
+    "size": 483542517195,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penang_retcn/",
+    "time": 1672752600000,
+    "size": 44434962622,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/penangf/",
+    "time": 1702005523000,
+    "size": 395179450402,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/pnangn/",
+    "time": 1688748968000,
+    "size": 356553988572,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/",
+    "time": 1688750288000,
+    "size": 258441517712,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/",
+    "time": 1722489833000,
+    "size": 253750805729,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/Boost/",
+    "time": 1760633603000,
+    "size": 21387941759,
+    "managed": true,
+    "fetched": true
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/CC/",
+    "time": 1750247069000,
+    "size": 21387833685,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/OPENMX/",
+    "time": 1760633690000,
+    "size": 27089758249,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAIL/",
+    "time": 1760633675000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETAR/",
+    "time": 1760633836000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETCA/",
+    "time": 1758389355000,
+    "size": 21387879679,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETEU/",
+    "time": 1760633768000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETGB/",
+    "time": 1760633768000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/RETUS/",
+    "time": 1760633814000,
+    "size": 27171626438,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/TELEU/",
+    "time": 1760633739000,
+    "size": 27065153148,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo_retcn/",
+    "time": 1677178764000,
+    "size": 43715162064,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/sabahl/",
+    "time": 1716574223000,
+    "size": 488871005096,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/zeekr/",
+    "time": 1701275980000,
+    "size": 961328196088,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/zeekr_retcn/",
+    "time": 1686236158000,
+    "size": 38543048699,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2024/",
+    "time": 1736484862000,
+    "size": 8325671744554,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2025/",
+    "time": 1765106373000,
+    "size": 5212341204628,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2026/",
+    "time": 1781035682000,
+    "size": 53335912928,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/_obsoleted_/",
+    "time": 1736670885000,
+    "size": 32679,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenowow/",
+    "time": 1781674579000,
+    "size": 1808355552927,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/nec/",
+    "time": 1739216671000,
+    "size": 173502097803,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/twrp/",
+    "time": 1625817206000,
+    "size": 542131046,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/general/",
+    "time": 1734608758000,
+    "size": 908,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/iso/",
+    "time": 1596399395000,
+    "size": 17747722961,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/software/",
+    "time": 1746333052000,
+    "size": 1093577073,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/trademark_warning/",
+    "time": 1706378347000,
+    "size": 10,
+    "managed": true,
+    "fetched": false
+   },
+   {
+    "href": "/firmware/lenomola/2023/README.html",
+    "time": 1765073948000,
+    "size": 2908
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/Boost/XT2301-1_RTWO_BOOST_13_T1TRS33.43-48-41-3_subsidy-BOOST_DISH_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1703142014000,
+    "size": 4781093486
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/Boost/XT2301-1_RTWO_BOOST_14_U1TRS34.8-30-18-9_subsidy-DISH_WILD_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1751270105000,
+    "size": 5039358997
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/Boost/XT2301-1_RTWO_BOOST_15_V1TR35H.60-33-5-2_subsidy-DISH_WILD_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1758389612000,
+    "size": 5783710211
+   },
+   {
+    "href": "/firmware/lenomola/2023/rtwo/official/Boost/XT2301-1_RTWO_BOOST_15_V1TRS35H.60-33-5-2-2_subsidy-DISH_WILD_regulatory-DEFAULT_cid50_CFC.xml.zip",
+    "time": 1760633603000,
+    "size": 5783774969
+   },
+   {
+    "href": "/firmware/README.html",
+    "time": 1722447118000,
+    "size": 3210
+   }
+  ]
+ },
+ "/firmware/lenomola/2020/rtwo/": {
+  "items": []
+ }
+}

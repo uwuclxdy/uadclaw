@@ -28,11 +28,16 @@ WORKDIR /app
 # is what collapses selective extraction to a single tool — p7zip 16.02 (the `p7zip-full`
 # transitional package) reads neither. Debian trixie ships 7-Zip 25.01.
 #
-# `lpunpack` (dynamic `super.img` partitions) is deliberately absent: no Debian package
-# provides it. Nothing on the Pixel path needs it — a Pixel factory zip carries raw ext4
-# partition images directly, measured 2026-08-11 — and `uadclaw.unpack` raises a named
-# MissingToolError naming the tool if a super image ever reaches this image. The OEMs that
-# do ship super images arrive with task 11, which is when this needs solving.
+# `lpunpack` (dynamic `super.img` partitions) is absent because no Debian package provides
+# it, and that now BLOCKS ONE DRIVER: the Motorola chain is zip -> sparsechunk set ->
+# simg2img -> super.img -> lpunpack, so `DISABLED_FIRMWARE_DRIVERS=motorola` is the correct
+# setting for this image until lpunpack is built into it. `uadclaw.unpack` raises a named
+# MissingToolError rather than failing obscurely. Pixel, Xiaomi and Nothing need none of it:
+# a Pixel factory zip carries raw ext4 images directly, a Xiaomi recovery ROM goes through
+# payload-dumper-go, and a Nothing archive is a 7z of finished partition images.
+#
+# `simg2img` comes from android-sdk-libsparse-utils below and IS present, which is what the
+# Motorola sparsechunk rebuild needs before lpunpack ever runs.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       7zip \

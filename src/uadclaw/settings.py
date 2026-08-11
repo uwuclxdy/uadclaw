@@ -81,6 +81,24 @@ class Settings(BaseSettings):
     # refuses to fetch at all until this is set rather than reporting "no builds".
     pixel_terms_ack_cookie_name: str = "devsite_wall_acks"
     pixel_terms_ack_cookie_value: str = ""
+    # Xiaomi (task 11). XiaomiFirmwareUpdater's tracker repo, whose `data/latest.yml` is the
+    # only machine-readable index of Xiaomi's own CDN that exists; Xiaomi publishes none.
+    xiaomi_index_url: str = (
+        "https://raw.githubusercontent.com/XiaomiFirmwareUpdater/"
+        "miui-updates-tracker/master/data/latest.yml"
+    )
+    # Nothing (task 11). Unauthenticated on purpose: decision 8 keeps every GitHub credential
+    # out of this stack, and that caps the driver at GitHub's 60 requests/hour/IP.
+    nothing_releases_url: str = "https://api.github.com/repos/spike0en/nothing_archive/releases"
+    # Motorola (task 11). One host: the h5ai JSON API and the firmware tree both hang off it.
+    motorola_mirror_url: str = "https://mirrors.lolinet.com"
+    # Motorola codenames to enumerate, comma-separated (`rtwo,bronco`). Required, and a plain
+    # string for the same reason `disabled_firmware_drivers` is. lolinet publishes no index
+    # document at all — it is a directory tree, 8 year directories over ~26 devices each,
+    # every device carrying 10-15 channel directories — so listing "everything on offer"
+    # would be thousands of requests per job against a mirror that asks for non-commercial
+    # use. The operator names the handful of devices worth tracking instead.
+    motorola_devices: str = ""
     # Read/connect timeout for firmware HTTP. No total deadline: a factory zip is multi-GB
     # and a slow-but-progressing transfer is not a failure.
     firmware_http_timeout_seconds: float = 60.0
@@ -171,6 +189,15 @@ class Settings(BaseSettings):
         return frozenset(
             name.strip() for name in self.disabled_firmware_drivers.split(",") if name.strip()
         )
+
+    @property
+    def motorola_device_names(self) -> tuple[str, ...]:
+        """Deduplicated, in the order the operator wrote them, so a crawl is reproducible."""
+        seen: dict[str, None] = {}
+        for name in self.motorola_devices.split(","):
+            if name.strip():
+                seen.setdefault(name.strip(), None)
+        return tuple(seen)
 
     @property
     def database_url(self) -> str:

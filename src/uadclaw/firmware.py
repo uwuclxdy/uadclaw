@@ -107,18 +107,38 @@ class FirmwareRef(BaseModel):
 
     driver: str = Field(pattern=r"^[a-z0-9_]{1,32}$")
     device: str = Field(pattern=r"^[A-Za-z0-9_]{1,64}$")
-    build: str = Field(pattern=r"^[A-Za-z0-9._]{1,64}$")
+    # `-` is in the charset because two of the six sources spell their build ids with it and
+    # neither can be transliterated without changing the identity: a Nothing release tag is
+    # `B4.1-260723-1820` and a Motorola build is `V1TRS35H.60-33-7`. It is the same charset
+    # `unpack.safe_component` already treats as a harmless path component, and it cannot
+    # spell a separator or a traversal.
+    build: str = Field(pattern=r"^[A-Za-z0-9._-]{1,64}$")
     url: str = Field(pattern=r"^https://[^\s]{1,2048}$")
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    # What Xiaomi's index publishes, and all it publishes. Kept as its own field rather than
+    # folded into `sha256` with an algorithm tag so that `sha256` always means sha256.
+    md5: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     android_version: str | None = Field(default=None, max_length=64)
     # Marketing name ("Pixel 9 Pro Fold"). Not `model_*`: pydantic protects that prefix.
     marketing_name: str | None = Field(default=None, max_length=128)
+    # The container this build arrives as. Unpacking dispatches on the bytes and never on
+    # this, but an operator staring at a scratch directory should not be told a 7z is a zip.
+    archive_suffix: str = Field(default=".zip", pattern=r"^\.[a-z0-9]{1,8}$")
 
     @property
     def archive_filename(self) -> str:
         """Built from the validated fields, never from the URL's basename: the bytes that
         identify a build are not the bytes that may spell a path."""
-        return f"{self.driver}-{self.device}-{self.build}.zip"
+        return f"{self.driver}-{self.device}-{self.build}{self.archive_suffix}"
+
+    def published_digest(self) -> tuple[str, str] | None:
+        """`(algorithm, hexdigest)` the source published for this build, or None when it
+        published nothing to check against. sha256 wins when a source publishes both."""
+        if self.sha256 is not None:
+            return ("sha256", self.sha256)
+        if self.md5 is not None:
+            return ("md5", self.md5)
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +165,10 @@ class FirmwareJobParams(BaseModel):
 
     driver: str = Field(pattern=r"^[a-z0-9_]{1,32}$")
     device: str = Field(pattern=r"^[A-Za-z0-9_]{1,64}$")
-    build: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._]{1,64}$")
+    # Same charset as `FirmwareRef.build` and for the same reason: a job that names a real
+    # Nothing or Motorola build must be creatable, and the two must not disagree about what a
+    # build id may spell — a narrower one here is a 422 on a build the driver itself offers.
+    build: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._-]{1,64}$")
     url: str | None = Field(default=None, pattern=r"^https://[^\s]{1,2048}$")
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
@@ -248,9 +271,17 @@ DriverFactory = Callable[[Settings], FirmwareDriver]
 def _driver_factories() -> dict[str, DriverFactory]:
     """Imported lazily so a driver module can import this one. One line per OEM; tasks 11's
     six drivers are six entries here and no change anywhere else."""
+    from uadclaw.drivers.motorola import MotorolaDriver
+    from uadclaw.drivers.nothing import NothingDriver
     from uadclaw.drivers.pixel import PixelDriver
+    from uadclaw.drivers.xiaomi import XiaomiDriver
 
-    return {PixelDriver.name: PixelDriver}
+    return {
+        MotorolaDriver.name: MotorolaDriver,
+        NothingDriver.name: NothingDriver,
+        PixelDriver.name: PixelDriver,
+        XiaomiDriver.name: XiaomiDriver,
+    }
 
 
 def driver_names() -> tuple[str, ...]:
@@ -281,9 +312,16 @@ def get_driver(name: str, settings: Settings) -> FirmwareDriver:
     return factory(settings)
 
 
-def _write_and_hash(fh: IO[bytes], digest: "hashlib._Hash", chunk: bytes) -> None:
+def _write_and_hash(fh: IO[bytes], digests: "list[hashlib._Hash]", chunk: bytes) -> None:
     fh.write(chunk)
-    digest.update(chunk)
+    for digest in digests:
+        digest.update(chunk)
+
+
+# What a firmware index is allowed to have published. An allowlist rather than handing the
+# name straight to `hashlib.new`, which happily accepts `md4` and every other broken or
+# unexpected digest the local OpenSSL build exposes.
+DIGEST_ALGORITHMS = frozenset({"sha256", "md5"})
 
 
 async def download_to_file(
@@ -292,11 +330,18 @@ async def download_to_file(
     dest: Path,
     *,
     headers: dict[str, str] | None = None,
-    expected_sha256: str | None = None,
+    expected_digest: str | None = None,
+    digest_algorithm: str = "sha256",
     max_bytes: int | None = None,
 ) -> DownloadedArchive:
     """Stream `url` to `dest`, verifying the checksum the index published when there is one.
     Returns the archive's sha256 alongside its path, so a caller can record what it got.
+
+    `digest_algorithm` is the algorithm the SOURCE published in, not the one this pipeline
+    keeps: Xiaomi's index publishes md5 for 3,454 of its 3,550 entries and no sha256 at all,
+    so verifying at all means verifying in md5. The returned sha256 is computed regardless
+    and in the same pass, because that digest is the pipeline's own identity for the archive
+    and every later stage records it.
 
     Downloads land on a `.part` sibling and are renamed only once the body is complete and
     the digest matches, so a truncated or corrupted transfer can never be mistaken for a
@@ -308,9 +353,16 @@ async def download_to_file(
     multi-GB body, and inline they would block the event loop this worker shares with every
     other slot and with the heartbeat task that keeps the job from being reclaimed.
     """
+    if digest_algorithm not in DIGEST_ALGORITHMS:
+        raise FirmwareInputError(
+            f"download_to_file: {digest_algorithm!r} is not a digest algorithm this pipeline "
+            f"verifies against; use one of {', '.join(sorted(DIGEST_ALGORITHMS))}"
+        )
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_name(dest.name + ".part")
-    digest = hashlib.sha256()
+    sha256 = hashlib.sha256()
+    published = sha256 if digest_algorithm == "sha256" else hashlib.new(digest_algorithm)
+    digests = [sha256] if published is sha256 else [sha256, published]
     written = 0
     try:
         async with client.stream("GET", url, headers=headers) as response:
@@ -329,7 +381,7 @@ async def download_to_file(
                             f"{written} bytes. Raise MAX_FIRMWARE_ARCHIVE_BYTES if this firmware "
                             "is genuinely that large; scratch is sized for one image at a time."
                         )
-                    await asyncio.to_thread(_write_and_hash, fh, digest, chunk)
+                    await asyncio.to_thread(_write_and_hash, fh, digests, chunk)
     except (httpx.HTTPError, OSError) as exc:
         partial.unlink(missing_ok=True)
         raise FirmwareDownloadError(
@@ -341,23 +393,24 @@ async def download_to_file(
         partial.unlink(missing_ok=True)
         raise
 
-    actual = digest.hexdigest()
-    if expected_sha256 is not None and actual != expected_sha256:
+    actual_sha256 = sha256.hexdigest()
+    if expected_digest is not None and published.hexdigest() != expected_digest:
         partial.unlink(missing_ok=True)
         raise FirmwareDownloadError(
-            f"download_to_file: {url} downloaded {written} bytes with sha256 {actual}, but the "
-            f"index published {expected_sha256}. The partial file was deleted; retry the job."
+            f"download_to_file: {url} downloaded {written} bytes with {digest_algorithm} "
+            f"{published.hexdigest()}, but the index published {expected_digest}. The partial "
+            "file was deleted; retry the job."
         )
-    if expected_sha256 is None:
+    if expected_digest is None:
         # Not fatal — some sources publish no checksum — but it must not be silent: the
         # archive is integrity-unverified and the caller records that alongside the digest.
         logger.warning(
             "%s came with no published checksum; recording it as integrity-unverified (sha256=%s)",
             dest.name,
-            actual,
+            actual_sha256,
         )
     partial.replace(dest)
-    logger.info("downloaded %s (%d bytes, sha256=%s)", dest.name, written, actual)
+    logger.info("downloaded %s (%d bytes, sha256=%s)", dest.name, written, actual_sha256)
     return DownloadedArchive(
-        path=dest, sha256=actual, integrity_verified=expected_sha256 is not None
+        path=dest, sha256=actual_sha256, integrity_verified=expected_digest is not None
     )

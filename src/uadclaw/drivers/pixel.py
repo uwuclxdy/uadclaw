@@ -182,7 +182,7 @@ class PixelDriver(FirmwareDriver):
                 client,
                 ref.url,
                 dest_dir / ref.archive_filename,
-                expected_sha256=ref.sha256,
+                expected_digest=ref.sha256,
                 max_bytes=self._max_archive_bytes,
             )
         finally:
