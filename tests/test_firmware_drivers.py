@@ -650,15 +650,27 @@ def samsung_client(
     index: dict[str, str] | None = None,
     inform: str | None = None,
     body: bytes | None = None,
+    declared_size: int | None = None,
 ) -> httpx.AsyncClient:
     """The whole chain: the public index, the three FUS posts, and the binary.
 
     Each FUS response carries its OWN `NONCE` header, so a client that keeps signing with the
     first one is visibly wrong rather than accidentally fine.
+
+    `BINARY_BYTE_SIZE` is rewritten to the length actually served, because the real fixture
+    declares the real 11.5 GB build and `fetch` compares the two. `declared_size` forces them
+    apart for the test that is about exactly that mismatch.
     """
     served_index = (
         {samsung_index_url(): samsung_fixture("version_index")} if index is None else index
     )
+    served_inform = inform if inform is not None else samsung_fixture("binary_inform")
+    if inform is None:
+        size = declared_size if declared_size is not None else len(body or b"")
+        served_inform = served_inform.replace(
+            "<BINARY_BYTE_SIZE><Data>11565187312</Data>",
+            f"<BINARY_BYTE_SIZE><Data>{size}</Data>",
+        )
     nonces = iter(["nonce-generate-01", "nonce-inform-002", "nonce-init-0003"])
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -678,7 +690,7 @@ def samsung_client(
         if url.endswith("BinaryInform.do"):
             return httpx.Response(
                 200,
-                text=inform if inform is not None else samsung_fixture("binary_inform"),
+                text=served_inform,
                 headers=headers,
             )
         return httpx.Response(
@@ -1070,6 +1082,26 @@ async def test_samsung_fetch_refuses_a_body_that_decrypts_to_something_other_tha
         await driver.fetch(samsung_ref(), tmp_path)
 
     assert "zip magic" in str(excinfo.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_samsung_fetch_refuses_a_body_shorter_than_the_size_fus_declared(tmp_path):
+    """FUS publishes no digest, so the declared byte size is the only thing the source says
+    about the bytes it serves. Truncated on a 16-byte boundary, the decrypt would blame the
+    key instead of the transfer — which sends a reader to the wrong half of the protocol."""
+    plaintext = samsung_plain_archive()
+    whole = pkcs7_encrypt(plaintext, SAMSUNG_KEY)
+    driver = SamsungDriver(
+        samsung_settings(),
+        client=samsung_client(body=whole[:-AES_BLOCK_BYTES], declared_size=len(whole)),
+    )
+
+    with pytest.raises(FirmwareDownloadError) as excinfo:
+        await driver.fetch(samsung_ref(), tmp_path)
+
+    assert "truncated" in str(excinfo.value)
+    assert str(len(whole)) in str(excinfo.value)
+    assert str(len(whole) - AES_BLOCK_BYTES) in str(excinfo.value)
     assert list(tmp_path.iterdir()) == []
 
 

@@ -720,6 +720,17 @@ class SamsungDriver(FirmwareDriver):
                     headers=session.headers(),
                     max_bytes=self._max_archive_bytes,
                 )
+                arrived = encrypted.stat().st_size
+                if arrived != binary.size:
+                    # FUS publishes no digest, so the declared byte size is the only thing the
+                    # source says about the bytes it served. A short body that happens to end
+                    # on a 16-byte boundary decrypts to valid-looking blocks and is caught two
+                    # steps later as bad padding, which names the key rather than the transfer.
+                    raise FirmwareDownloadError(
+                        f"SamsungDriver.fetch: {binary.filename} arrived as {arrived} bytes, but "
+                        f"FUS declared {binary.size}. The transfer was truncated (or the build "
+                        "was replaced mid-download); retry the job."
+                    )
                 sha256 = await asyncio.to_thread(
                     decrypt_archive,
                     encrypted,
