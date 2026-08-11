@@ -25,7 +25,7 @@ from uadclaw import jobs as jobs_module
 from uadclaw import stages as stages_module
 from uadclaw.classify import UNKNOWN
 from uadclaw.classifystore import ClassificationStoreError, select_candidates
-from uadclaw.deepseek import DeepSeekClient
+from uadclaw.deepseek import DeepSeekBalanceError, DeepSeekClient
 from uadclaw.facts import ApkFacts
 from uadclaw.factstore import record_device_scan, store_device_facts
 from uadclaw.models import JobKind, PackageAnalysis, PackageClassification
@@ -531,6 +531,25 @@ async def test_an_empty_queue_is_refused_rather_than_silently_succeeding(
         await llm_stage(context(job_id, db_session_factory))
 
     assert fake_api["requests"] == []
+
+
+async def test_an_empty_balance_aborts_the_job_rather_than_parking_every_package(
+    db_env, classification_env, fake_api, db_session_factory
+):
+    """A 402 is not about this package, so parking on it would burn every remaining
+    package's retry cap against a dead account and record 48 parks with one real cause. It
+    aborts, and the TaskGroup cancels the siblings rather than leaving them writing rows
+    through a session the stage has already closed."""
+    fake_api["responses"] = [httpx.Response(402, text="Insufficient Balance")]
+    job_id = await seed(db_session_factory)
+
+    with pytest.raises(BaseExceptionGroup) as caught:
+        await llm_stage(context(job_id, db_session_factory))
+
+    assert any(isinstance(exc, DeepSeekBalanceError) for exc in caught.value.exceptions)
+    assert await rows(db_session_factory) == {}, (
+        "no park row for a failure that is not the package's"
+    )
 
 
 async def test_a_missing_key_fails_before_any_call_is_made(

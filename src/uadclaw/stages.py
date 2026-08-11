@@ -638,9 +638,15 @@ async def llm_stage(ctx: StageContext) -> None:
         settings.deepseek_thinking,
     )
     counts = {"classified": 0, "parked": 0}
-    async with DeepSeekClient.from_settings(settings) as client:
-        await asyncio.gather(
-            *[
+    # A TaskGroup rather than `asyncio.gather`: the failures that reach here at all are the
+    # ones that abort the whole job (an empty balance, a rejected key, a budget too small for
+    # any package), and `gather` propagates the first one while leaving every sibling running
+    # — so 47 more packages would keep spending their retry cap against a dead account, and
+    # would then be writing rows through a session and an HTTP client this block has already
+    # closed. A TaskGroup cancels the siblings and waits for them before it raises.
+    async with DeepSeekClient.from_settings(settings) as client, asyncio.TaskGroup() as group:
+        for package in candidates:
+            group.create_task(
                 _classify_and_store(
                     ctx,
                     client,
@@ -650,9 +656,7 @@ async def llm_stage(ctx: StageContext) -> None:
                     max_attempts=settings.deepseek_max_attempts,
                     counts=counts,
                 )
-                for package in candidates
-            ]
-        )
+            )
     logger.info(
         "job %s llm: %d classified, %d parked out of %d candidate(s)",
         ctx.job_id,
