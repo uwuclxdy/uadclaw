@@ -27,7 +27,6 @@ from uadclaw.models import (
     PackageAnalysis,
     PackageClassification,
     PackageCorroboration,
-    PackageFact,
     PackageTriageDecision,
 )
 from uadclaw.monogram import MONOGRAM_COLOURS, monogram_for
@@ -1349,19 +1348,6 @@ async def test_a_refused_edit_is_reachable_from_the_box_it_is_about(
     field = resp.text.split('id="edit-description"', 1)[1].split(">", 1)[0]
     assert 'aria-describedby="triage-error"' in field
     assert 'aria-invalid="true"' in field
-
-
-def test_the_icon_mime_fallback_is_still_needed():
-    """`triagestore._ICON_MIME` falls back to a SQL NULL because `package_facts.icon_mime`
-    does not exist in this checkout. `getattr` with a default never fails, so a column that
-    lands under another name would leave every icon silently unrendered with the suite green.
-
-    This goes red the moment the fallback becomes wrong, which is the only moment anyone wants
-    to hear about it: delete the fallback, the `getattr`, and this test together.
-    """
-    assert not hasattr(PackageFact, "icon_mime"), (
-        "package_facts.icon_mime exists now — drop triagestore._ICON_MIME's null() fallback"
-    )
 
 
 async def test_the_tab_strip_reads_in_the_round_s_words_and_not_the_database_s(

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import null, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from uadclaw.bundle import nearest_entries
@@ -59,11 +59,6 @@ VIEWS: tuple[str, ...] = ("queue", "deferred", "decided", "parked")
 # bundle's style anchors, and the same rule, so the reviewer compares a proposal against what
 # the model was shown when it wrote it.
 ANCHOR_COUNT = 4
-
-# `package_facts.icon_mime` is the icons lane's column. Until it exists a NULL literal keeps
-# this module's select arity and its answer ("no icon") identical either way, so the screen
-# renders monograms rather than failing to import. Drop the fallback once the column lands.
-_ICON_MIME: Any = getattr(PackageFact, "icon_mime", null())
 
 
 class TriageError(ValueError):
@@ -195,7 +190,7 @@ async def load_rows(session: AsyncSession) -> tuple[QueueRow, ...]:
             PackageFact.has_conflict,
             PackageAnalysis.floor,
             PackageCorroboration.status,
-            _ICON_MIME.label("icon_mime"),
+            PackageFact.icon_mime,
         )
         .outerjoin(PackageFact, PackageFact.package == PackageClassification.package)
         .outerjoin(PackageAnalysis, PackageAnalysis.package == PackageClassification.package)

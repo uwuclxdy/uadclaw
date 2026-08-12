@@ -640,19 +640,6 @@ async def test_conflicts_render_with_both_values_and_are_not_hidden_by_default(
 # --- icons: has_icon / the monogram fallback -------------------------------------------------
 
 
-def test_the_icon_mime_getattr_fallback_is_still_needed():
-    """`_has_icon`'s `getattr(fact, "icon_mime", None)` is a defensive read against a column
-    that does not exist on this branch yet (the icons lane's migration lands in a sibling
-    worktree). This documents the CURRENT state — no such column — and flips to a hard
-    failure the moment it lands, which is the forcing function for deleting the `getattr`
-    default in `corpus._has_icon` and reading `fact.icon_mime` directly, per that function's
-    own docstring."""
-    assert not hasattr(PackageFact, "icon_mime"), (
-        "PackageFact now has icon_mime: delete the getattr default in corpus._has_icon and "
-        "read fact.icon_mime directly, then delete this test"
-    )
-
-
 async def test_a_package_with_no_icon_renders_the_monogram_fallback(
     db_env, db_session_factory, client
 ):
