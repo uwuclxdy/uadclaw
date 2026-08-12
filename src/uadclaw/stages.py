@@ -84,6 +84,7 @@ from uadclaw.deepseek import (
     DeepSeekBalanceError,
     DeepSeekBudgetError,
     DeepSeekClient,
+    DeepSeekError,
     DeepSeekMalformedError,
     DeepSeekUnavailableError,
 )
@@ -572,6 +573,7 @@ async def _classify_one(
     floor: RemovalFloor,
     derivation: ListDerivation,
     max_calls: int,
+    spent: list[int],
 ) -> tuple[Classification | None, str | None, ChatResult | None, int]:
     """One package: call, validate, re-prompt while the budget lasts, then give up.
 
@@ -595,7 +597,10 @@ async def _classify_one(
 
     A `DeepSeekBudgetError`, a bad credential and an empty balance still abort the whole job:
     none of them is about this package, and burning 48 packages' budgets against a dead
-    account is not a diagnosis.
+    account is not a diagnosis. Every OTHER failure is contained by `_classify_and_store`,
+    which reads `spent` — a one-element list rather than the return value, because the count
+    has to survive the exception that ends this call — to charge the parked row what the
+    package really cost.
     """
     user = user_prompt(bundle)
     last_result: ChatResult | None = None
@@ -609,12 +614,14 @@ async def _classify_one(
         except (DeepSeekMalformedError, DeepSeekUnavailableError) as exc:
             # Terminal, and charged for what it really spent — `exc.attempts`, not one.
             calls += exc.attempts
+            spent[0] = calls
             reason = f"after {calls} request(s): {exc}"
             logger.warning(
                 "classification gave up on the wire: package=%s %s", bundle.package, reason
             )
             break
         calls += result.attempts
+        spent[0] = calls
         last_result = result
         try:
             payload = result.json_object()
@@ -726,11 +733,74 @@ async def _classify_and_store(
     max_calls: int,
     counts: dict[str, int],
 ) -> None:
-    """One package end to end, in its own transaction.
+    """One package end to end, in its own transaction. **Raises only for a job-level abort.**
 
     Per package rather than one transaction for the batch: a database error on package 30
     must not discard 29 answers that were already paid for.
+
+    This runs inside a `TaskGroup`, so anything that escapes here cancels every sibling. It
+    used to: a 400, a 404 or a proxy's 502 is a bare `DeepSeekError`, which is neither of the
+    two classes `_classify_one` catches and which the client does not retry. Measured on a
+    four-package group with one 502 in it: four requests reached the wire, all four were paid
+    for, and `package_classification` came out EMPTY — three answers lost to a sibling and no
+    park row for the fourth, so every future run asked all four again. So every failure that
+    is ABOUT THIS PACKAGE, the wire and the write alike, becomes this package's own parked
+    row naming what happened.
+
+    Three exceptions still take the whole job down, unchanged and deliberately, exactly as
+    `_corroborate_and_store` and this stage's own docstring have it: `DeepSeekAuth`,
+    `DeepSeekBalance` and `DeepSeekBudget` are facts about the ACCOUNT or the configuration
+    rather than about this package, and burning 47 more packages' budgets against a dead
+    account is not a diagnosis. A failure of the park write itself propagates too: a database
+    nothing can be written to is job-level.
     """
+    # One element rather than a return value, because the count has to survive the exception
+    # that ends the call it is charged in.
+    spent = [0]
+    try:
+        await _classify_and_store_one(
+            ctx,
+            client,
+            bundle,
+            floor=floor,
+            identity=identity,
+            max_calls=max_calls,
+            counts=counts,
+            spent=spent,
+        )
+    except (DeepSeekAuthError, DeepSeekBalanceError, DeepSeekBudgetError):
+        raise
+    except Exception as exc:
+        logger.exception("classification failed for %s", bundle.package)
+        attempts = spent[0] + (exc.attempts if isinstance(exc, DeepSeekError) else 0)
+        async with ctx.session_factory() as session, session.begin():
+            await park_package(
+                session,
+                bundle.package,
+                bundle_sha256=bundle.sha256,
+                model=client.model,
+                thinking=client.thinking,
+                reason=f"after {attempts} request(s): {type(exc).__name__}: {exc}",
+                usage={},
+                attempts=attempts,
+                at=datetime.now(UTC),
+            )
+        counts["parked"] += 1
+
+
+async def _classify_and_store_one(
+    ctx: StageContext,
+    client: DeepSeekClient,
+    bundle: EvidenceBundle,
+    *,
+    floor: RemovalFloor,
+    identity: PackageIdentity | None,
+    max_calls: int,
+    counts: dict[str, int],
+    spent: list[int],
+) -> None:
+    """The work `_classify_and_store` wraps. Every failure it does not turn into a park
+    reason of its own is contained by that wrapper, which reads `spent` for the true cost."""
     item = bundle.payload.get("facts", {})
     derivation = derive_list(
         bundle.package,
@@ -738,7 +808,7 @@ async def _classify_and_store(
         partitions=tuple(item.get("partitions", ())),
     )
     classification, reason, result, attempts = await _classify_one(
-        client, bundle, floor=floor, derivation=derivation, max_calls=max_calls
+        client, bundle, floor=floor, derivation=derivation, max_calls=max_calls, spent=spent
     )
     at = datetime.now(UTC)
     usage = result.usage if result is not None else {}
@@ -755,18 +825,20 @@ async def _classify_and_store(
                 attempts=attempts,
                 at=at,
             )
-            counts["parked"] += 1
-            return
-        await store_classification(
-            session,
-            classification,
-            model=result.model if result is not None else client.model,
-            thinking=client.thinking,
-            usage=usage,
-            attempts=attempts,
-            at=at,
-        )
-        counts["classified"] += 1
+        else:
+            await store_classification(
+                session,
+                classification,
+                model=result.model if result is not None else client.model,
+                thinking=client.thinking,
+                usage=usage,
+                attempts=attempts,
+                at=at,
+            )
+    # Counted after the transaction commits, never inside it: a write that fails at commit
+    # would otherwise be counted as an answer here and as a park in the wrapper, and the two
+    # numbers the stage logs would add up to more packages than it had.
+    counts["parked" if classification is None else "classified"] += 1
 
 
 class _QueryBudget:

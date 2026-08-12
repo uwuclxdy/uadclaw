@@ -15,6 +15,7 @@ and silent when they are:
 
 import json
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import httpx
@@ -98,6 +99,18 @@ CORPUS = [
     make_facts("com.example.launcher", priv_app=True),
 ]
 
+# Four queued candidates rather than the default two, for the containment tests only:
+# "one package's failure must not reach the others" is thin proof with a single other, and
+# `com.example.alpha` sorts first, so a failure on it is the one the siblings are least
+# likely to survive by having already finished.
+WIDE_CORPUS = [*CORPUS, make_facts("com.example.alpha"), make_facts("com.example.zeta")]
+WIDE_CANDIDATES = [
+    "com.example.alpha",
+    "com.example.launcher",
+    "com.example.notes",
+    "com.example.zeta",
+]
+
 
 def envelope(payload, *, finish_reason="stop"):
     content = payload if isinstance(payload, str) else json.dumps(payload)
@@ -153,7 +166,7 @@ def classification_env(monkeypatch, tmp_path):
     return path
 
 
-async def seed(session_factory) -> uuid.UUID:
+async def seed(session_factory, corpus: Sequence[ApkFacts] = CORPUS) -> uuid.UUID:
     """A corpus that has been through extract_facts, corpus_graph, filter and rule_ladder."""
     async with session_factory() as session, session.begin():
         firmware = await jobs_module.create_job(
@@ -167,14 +180,14 @@ async def seed(session_factory) -> uuid.UUID:
             device_key=PIXEL,
             build=BUILD,
             scanned_at=NOW,
-            apk_total=len(CORPUS),
-            parsed_ok=len(CORPUS),
+            apk_total=len(corpus),
+            parsed_ok=len(corpus),
             failures=[],
         )
         await store_device_facts(
-            session, device_key=PIXEL, build=BUILD, facts=CORPUS, observed_at=NOW
+            session, device_key=PIXEL, build=BUILD, facts=corpus, observed_at=NOW
         )
-        for item in CORPUS:
+        for item in corpus:
             session.add(
                 PackageAnalysis(
                     package=item.package,
@@ -187,6 +200,14 @@ async def seed(session_factory) -> uuid.UUID:
     async with session_factory() as session, session.begin():
         job = await jobs_module.create_job(session, kind=JobKind.CLASSIFICATION.value)
         return job.id
+
+
+def requested_package(request: httpx.Request) -> str:
+    """The package a mocked request is asking about, parsed out of the prompt the way the
+    model reads it. A substring match on the raw body would also hit a package NAMED in
+    another one's evidence, so the branch would fire for the wrong request."""
+    content = json.loads(request.content)["messages"][1]["content"]
+    return json.loads(content.split("EVIDENCE:\n", 1)[1])["package"]
 
 
 def context(job_id, session_factory) -> StageContext:
@@ -723,6 +744,121 @@ async def test_the_two_retry_layers_do_not_multiply_and_the_row_reports_true_spe
     assert row.parked is True
     # The row's own count IS the transport's count, and both are the single named budget.
     assert row.attempts == len(fake_api["requests"]) == budget
+
+
+async def test_an_unexpected_http_status_parks_one_package_without_cancelling_its_siblings(
+    db_env, classification_env, fake_api, db_session_factory
+):
+    """A 502 out of a proxy in front of the API is an ordinary event, and it raises a bare
+    `DeepSeekError` — neither the malformed class nor the unavailable one, so `_classify_one`
+    caught nothing, `complete_json` never retried it, and it escaped into the TaskGroup. That
+    cancelled every sibling package, answers already paid for included, and left no row at
+    all: the siblings looked like they had never been asked and the failing package was
+    silently re-tried by every future run forever.
+    """
+    failing = "com.example.alpha"
+
+    def handler(request):
+        if requested_package(request) == failing:
+            return httpx.Response(502, text="<html>502 Bad Gateway</html>")
+        return httpx.Response(200, json=envelope(GOOD))
+
+    fake_api["responses"] = [handler]
+    job_id = await seed(db_session_factory, WIDE_CORPUS)
+
+    await llm_stage(context(job_id, db_session_factory))  # returns normally
+
+    stored = await rows(db_session_factory)
+    assert sorted(stored) == WIDE_CANDIDATES, "every package reached a row"
+    for package in WIDE_CANDIDATES:
+        if package == failing:
+            continue
+        assert stored[package].parked is False, f"{package} was cancelled by a sibling"
+        assert stored[package].description == GOOD["description"], package
+    parked = stored[failing]
+    assert parked.parked is True
+    assert "502" in parked.parked_reason, "the reason names the status that caused the park"
+    # One request: nothing documents this status as transient, so it is not retried, and the
+    # row reports what it really spent rather than the whole budget.
+    assert parked.attempts == 1
+
+
+async def test_a_park_from_an_unexpected_status_is_charged_the_reprompts_before_it(
+    db_env, classification_env, fake_api, db_session_factory
+):
+    """A park's `attempts` is the package's real spend on every path that can reach it. The
+    exception only knows about the request it died in, so a below-floor re-prompt followed by
+    a 404 is two requests and a row saying one would under-report the budget by half."""
+    below_floor = dict(GOOD, removal="Recommended")
+    fake_api["responses"] = [
+        httpx.Response(200, json=envelope(below_floor)),
+        httpx.Response(404, text="no such model"),
+    ]
+    await seed(db_session_factory)
+    async with db_session_factory() as session, session.begin():
+        job = await jobs_module.create_job(
+            session,
+            kind=JobKind.CLASSIFICATION.value,
+            params={"packages": ["com.example.launcher"]},
+        )
+        job_id = job.id
+
+    await llm_stage(context(job_id, db_session_factory))
+
+    row = (await rows(db_session_factory))["com.example.launcher"]
+    assert row.parked is True
+    assert "404" in row.parked_reason
+    assert row.attempts == len(fake_api["requests"]) == 2
+
+
+async def test_a_database_failure_on_one_package_never_cancels_the_others(
+    db_env, classification_env, fake_api, db_session_factory, monkeypatch
+):
+    """The same containment through the other half. Every package in the group has already
+    been paid for by the time anything is written, so a write that fails for one of them
+    costs that one row rather than all 48 — and the failure is recorded rather than lost."""
+    real_store = stages_module.store_classification
+
+    async def store(session, classification, **kwargs):
+        if classification.package == "com.example.notes":
+            raise RuntimeError("the write nobody predicted")
+        await real_store(session, classification, **kwargs)
+
+    monkeypatch.setattr(stages_module, "store_classification", store)
+    fake_api["responses"] = [httpx.Response(200, json=envelope(GOOD))]
+    job_id = await seed(db_session_factory)
+
+    await llm_stage(context(job_id, db_session_factory))
+
+    stored = await rows(db_session_factory)
+    assert stored["com.example.launcher"].parked is False, "the sibling's answer survived"
+    assert stored["com.example.notes"].parked is True
+    assert "RuntimeError" in stored["com.example.notes"].parked_reason
+
+
+async def test_an_account_level_failure_on_one_package_still_aborts_the_whole_job(
+    db_env, classification_env, fake_api, db_session_factory
+):
+    """The control for the two above. A 402 reaching ONE package is still a fact about the
+    account rather than about that package, so it is the failure that must never become a
+    parked row: a boundary that contained everything would turn a dead account into 48 quiet
+    parks carrying one real cause, each having burned its retry cap to get there."""
+    failing = "com.example.alpha"
+
+    def handler(request):
+        if requested_package(request) == failing:
+            return httpx.Response(402, text="Insufficient Balance")
+        return httpx.Response(200, json=envelope(GOOD))
+
+    fake_api["responses"] = [handler]
+    job_id = await seed(db_session_factory, WIDE_CORPUS)
+
+    with pytest.raises(BaseExceptionGroup) as caught:
+        await llm_stage(context(job_id, db_session_factory))
+
+    assert caught.group_contains(DeepSeekBalanceError)
+    stored = await rows(db_session_factory)
+    assert failing not in stored, "no park row for a failure that is not the package's"
 
 
 async def test_an_empty_balance_aborts_the_job_rather_than_parking_every_package(
