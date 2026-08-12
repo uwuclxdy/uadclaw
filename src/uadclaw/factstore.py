@@ -89,7 +89,7 @@ FIRST_WINS_FIELDS: tuple[str, ...] = (
 # Measured on the two local corpora: 134 of the 147 packages shared by a Pixel 6 and the
 # Android 16 emulator disagree on the certificate, every one of them APK signature v3 key
 # rotation or the AOSP test key facing Google's production key. The flag is therefore a
-# "show the reviewer both values" marker, not a suspicion score, and task 9 must render it
+# "show the reviewer both values" marker, not a suspicion score, and the triage screen renders it
 # rather than filter on it.
 CONFLICT_FIELDS: tuple[str, ...] = (
     "cert_issuer",

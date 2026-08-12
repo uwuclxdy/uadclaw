@@ -11,7 +11,7 @@ Two properties this module owes the rest of the pipeline:
   output. Keeping that true is a matter of never giving the model stage a column there, so
   the disjointness is structural rather than a rule somebody has to remember.
 - **A re-run replaces only `llm:`-provenance fields.** The stored `provenance` map says who
-  owns each field; a field tagged `human:` (a triage edit, task 9) survives the upsert
+  owns each field; a field tagged `human:` (a triage edit) survives the upsert
   untouched, which is what "a bad model run is re-runnable" actually requires.
 - **No `removal` reaches a row below that package's floor, whoever wrote it.** The check
   lives in `_upsert`, the one seam every writer here passes, because a check per caller is

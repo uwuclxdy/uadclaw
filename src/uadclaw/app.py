@@ -183,8 +183,9 @@ async def stats() -> StatsResponse:
 
 @router.post("/jobs", status_code=status.HTTP_201_CREATED)
 async def create_job_route(payload: CreateJobRequest) -> JobResponse:
-    """Start a job the worker will pick up. No UI here — task 9 owns that; this is the
-    substrate the dashboard is built on. Behind auth automatically, like every route."""
+    """Start a job the worker will pick up, as JSON. The jobs SCREEN posts a form to its own
+    route and calls the same `jobs.create_job` underneath, so this stayed rather than being
+    replaced: it is the scriptable half. Behind auth automatically, like every route."""
     session_factory = get_session_factory()
     async with session_factory() as session, session.begin():
         try:

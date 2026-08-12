@@ -319,7 +319,7 @@ class PackageFact(Base):
     """One row per package name, merged across every device that shipped it.
 
     `device_count` is a stored column, not a join computed at read time: it is the primary
-    triage ranking signal (design §3, task 9's queue order), and a ranking that is recomputed
+    triage ranking signal (design §3, the triage queue's order), and a ranking that is recomputed
     by whoever happens to read it is a ranking that will eventually be computed differently in
     two places.
 
