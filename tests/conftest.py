@@ -47,7 +47,13 @@ PG_PASSWORD = os.environ.get(
     "UADCLAW_TEST_PG_PASSWORD", _secrets_dir_password("postgres_password", "uadclaw")
 )
 PG_ADMIN_DB = os.environ.get("UADCLAW_TEST_PG_ADMIN_DB", "uadclaw")
-PG_TEST_DB = f"uadclaw_test_{_xdist_worker_id()}"
+# The worker id alone is NOT enough to isolate a run. Two checkouts of this repo (a git
+# worktree per agent lane is this project's normal fan-out shape) both run xdist worker
+# `gw0`, so both resolve the same database name and then truncate each other's tables
+# between tests — a red that names a test nobody touched, or a green that proved nothing.
+# Give each concurrent checkout its own prefix and the collision cannot happen.
+PG_TEST_DB_PREFIX = os.environ.get("UADCLAW_TEST_DB_PREFIX", "uadclaw_test")
+PG_TEST_DB = f"{PG_TEST_DB_PREFIX}_{_xdist_worker_id()}"
 
 _DB_TABLES_TRUNCATE_ORDER = (
     "scratch_lease_events, job_stage_runs, device_scans, jobs, scratch_lease, "
