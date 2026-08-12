@@ -63,31 +63,42 @@
       </div>
     </div>
     {% if drivers %}
-      <div class="table-wrap" style="overflow-x:auto">
-        <table>
-          <thead><tr><th>driver</th><th>terms</th><th>posture</th></tr></thead>
-          <tbody>
-            {% for driver in drivers %}
-              <tr>
-                <td><span class="table-name">{{ driver.name }}</span></td>
-                <td style="white-space:normal">
-                  <span class="tag {{ driver.risk_tag }}">{{ driver.risk }}</span>
-                  {% if not driver.acknowledged %}
-                    <span class="tag tag-warning">not acknowledged</span>
-                  {% endif %}
-                </td>
-                <td style="color:var(--text-dim);font-size:var(--text-xs)">
-                  {{ driver.summary }}
-                  <div style="margin-top:var(--space-1)">
-                    <a href="{{ driver.source_url }}" rel="noreferrer noopener"
-                       style="color:var(--accent)">{{ driver.source_url }}</a>
-                  </div>
-                </td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
+      {# Reference material a returning operator does not need every visit: collapsed by
+         default, the trigger stays visible (progressive disclosure per ux-patterns §8.3),
+         and the terms are still there for the first time a driver is picked below. An
+         unacknowledged or reverse-engineered driver is RISK state rather than reference
+         detail, so it is named in the trigger and the panel opens on its own rather than
+         waiting for a click nobody knows to make. #}
+      <details{% if terms_need_attention %} open{% endif %}>
+        <summary style="cursor:pointer;color:var(--accent);font-size:var(--text-sm)">
+          show terms for {{ drivers | length }} driver{{ "" if drivers | length == 1 else "s" }}{% if unacknowledged_driver_count %} · {{ unacknowledged_driver_count }} not acknowledged{% endif %}
+        </summary>
+        <div class="table-wrap" style="overflow-x:auto;margin-top:var(--space-3)">
+          <table>
+            <thead><tr><th>driver</th><th>terms</th><th>posture</th></tr></thead>
+            <tbody>
+              {% for driver in drivers %}
+                <tr>
+                  <td><span class="table-name">{{ driver.name }}</span></td>
+                  <td style="white-space:normal">
+                    <span class="tag {{ driver.risk_tag }}">{{ driver.risk }}</span>
+                    {% if not driver.acknowledged %}
+                      <span class="tag tag-warning">not acknowledged</span>
+                    {% endif %}
+                  </td>
+                  <td style="color:var(--text-dim);font-size:var(--text-xs)">
+                    {{ driver.summary }}
+                    <div style="margin-top:var(--space-1)">
+                      <a href="{{ driver.source_url }}" rel="noreferrer noopener"
+                         style="color:var(--accent)">{{ driver.source_url }}</a>
+                    </div>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
     {% else %}
       <div class="callout callout-warning">
         <div>
@@ -154,9 +165,8 @@
         <div>
           <div class="callout-title">this one spends money</div>
           <div class="callout-body">
-            every package costs a paid deepseek call plus a brave search. measured at $0.00014 a package,
-            about $0.055 for the full 393-package corpus. the ceiling is
-            {{ classification_ceiling }} packages a job; a limit below it lowers the spend further.
+            $0.00014 a package (about $0.055 for the full corpus). ceiling: {{ classification_ceiling }}
+            packages a job; a lower limit spends less.
           </div>
         </div>
       </div>

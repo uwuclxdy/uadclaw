@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/pkg_icon.html" import pkg_icon %}
 {% block title %}{{ package }} · corpus · uadclaw{% endblock %}
 {% block content %}
 <section hx-boost="true">
@@ -6,7 +7,15 @@
     <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">
       <a href="/corpus" style="color:inherit;text-decoration:none">corpus</a>
     </div>
-    <h2 class="num" style="font:550 var(--text-xl)/1.3 var(--font-mono);color:var(--text);word-break:break-all">{{ package }}</h2>
+    <div style="display:flex;align-items:center;gap:var(--space-3)">
+      {# `has_icon` is only set once `fact` has actually loaded — the error and not_found
+         branches below never reach that point, so it is optional here even though every
+         successful render sets it. The card size (`small=false`, 48px), never the rail's. #}
+      {% if has_icon is defined %}
+        {{ pkg_icon(package, has_icon, small=false) }}
+      {% endif %}
+      <h2 class="num" style="font:550 var(--text-xl)/1.3 var(--font-mono);color:var(--text);word-break:break-all">{{ package }}</h2>
+    </div>
   </header>
 
   {% if error is defined and error %}
@@ -114,16 +123,13 @@
 
       <div class="card" style="margin-bottom:var(--space-5)">
         <div class="card-title" style="margin-bottom:var(--space-3)">filter</div>
-        {% if analysis.queued is none %}
+        {% if analysis.filter_verdict is none %}
           <div class="callout callout-info">
             <div class="callout-body">the filter stage has not run for this package yet.</div>
           </div>
         {% else %}
-          <table class="info-table">
-            <tr><td>queued</td><td>{{ "yes" if analysis.queued else "no" }}</td></tr>
-            <tr><td>already upstream</td><td>{{ "yes" if analysis.upstream_present else "no" }}</td></tr>
-            <tr><td>verdict</td><td>{{ analysis.filter_verdict or "unknown" }}</td></tr>
-          </table>
+          <span class="tag {{ FILTER_VERDICT_TAG_CLASS.get(analysis.filter_verdict, "tag-default") }}">{{ FILTER_VERDICT_LABEL.get(analysis.filter_verdict, analysis.filter_verdict) }}</span>
+          <p style="color:var(--text-dim);font-size:var(--text-sm);margin-top:var(--space-2)">{{ FILTER_VERDICT_EXPLANATION.get(analysis.filter_verdict, "") }}</p>
         {% endif %}
       </div>
 
@@ -141,16 +147,16 @@
              callout, so an empty result here does not read as a failure. #}
           <div style="color:var(--text-dim);font-size:var(--text-sm)">no edges recorded for this package.</div>
         {% endif %}
-        {% if analysis.dependencies %}
+        {% if dependency_links %}
           <div class="label" style="margin-top:var(--space-4);margin-bottom:var(--space-2)">dependencies</div>
           <div style="display:flex;flex-wrap:wrap;gap:var(--space-2)">
-            {% for d in analysis.dependencies %}<a class="tag tag-accent" href="/corpus/{{ d | urlencode }}" style="text-decoration:none">{{ d }}</a>{% endfor %}
+            {% for link in dependency_links %}<a class="tag tag-accent" href="{{ link.href }}" style="text-decoration:none">{{ link.package }}</a>{% endfor %}
           </div>
         {% endif %}
-        {% if analysis.needed_by %}
+        {% if needed_by_links %}
           <div class="label" style="margin-top:var(--space-4);margin-bottom:var(--space-2)">needed by</div>
           <div style="display:flex;flex-wrap:wrap;gap:var(--space-2)">
-            {% for d in analysis.needed_by %}<a class="tag tag-accent" href="/corpus/{{ d | urlencode }}" style="text-decoration:none">{{ d }}</a>{% endfor %}
+            {% for link in needed_by_links %}<a class="tag tag-accent" href="{{ link.href }}" style="text-decoration:none">{{ link.package }}</a>{% endfor %}
           </div>
         {% endif %}
       </div>

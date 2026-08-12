@@ -11,17 +11,20 @@ recorded on `models.py`/`ladder.py`:
   `StrEnum` and `"Expert" < "Recommended"` lexicographically, which would invert the ladder in
   the UI exactly the way `ladder.py` warns against doing in code. `_FLOOR_RANK` maps the
   column through `ladder.danger_rank` before any `ORDER BY` touches it.
-- `queued`/`upstream_present` are nullable until the `filter` stage has run for a package, and
-  NULL is a third state ("not filtered yet") rather than a synonym for `False`. The tri-state
-  filters below reach it with `.is_(None)`, never with a falsy check, and the row renderer
-  keeps it a visually distinct badge.
+- `filter_verdict` is nullable until the `filter` stage has run for a package, and NULL is a
+  third state ("not filtered yet") rather than a synonym for any real verdict. The verdict
+  filter below reaches it with `.is_(None)`, never with a falsy check, and the row renderer
+  keeps it a visually distinct badge ("filter pending").
 
 A package name is bytes out of downloaded firmware, never bytes this pipeline chose, so every
-place one is written into an `href` goes through `urlencode` in the templates — the record's
-identity is not the record's path (see the repo's own rule on this).
+place one is written into an `href` goes through `_package_href`/`_package_links` — never the
+`|urlencode` filter, whose `safe=b"/"` default leaves a `/` in a package name unescaped and
+points the link at a different path than the record — the record's identity is not the
+record's path (see the repo's own rule on this).
 """
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from math import ceil
 from typing import Any
@@ -32,6 +35,7 @@ from sqlalchemy import Select, case, func, select
 
 from uadclaw import web
 from uadclaw.db import get_session_factory
+from uadclaw.filters import FilterVerdict
 from uadclaw.ladder import DANGER_ORDER, Removal, danger_rank
 from uadclaw.models import PackageAnalysis, PackageFact
 
@@ -58,10 +62,10 @@ SORTS: dict[str, Any] = {
 DEFAULT_SORT = "device_count"
 DEFAULT_DIR: dict[str, str] = {"device_count": "desc", "package": "asc", "floor": "desc"}
 
-# Query-string spelling for the queued/upstream tri-state filters. "null" is not a stand-in for
-# "unset" — it is the one value that reaches `.is_(None)`, so a filter can ask for "not
-# filtered yet" as its own answer instead of it being unreachable.
-TRISTATE: dict[str, bool | None] = {"true": True, "false": False, "null": None}
+# Query-string spelling for the verdict filter. "null" is not a stand-in for "unset" — it is
+# the one value that reaches `.is_(None)`, so a filter can ask for "not filtered yet" as its
+# own answer instead of it being unreachable.
+VERDICT_FILTER_VALUES: tuple[str, ...] = (*(str(v) for v in FilterVerdict), "null")
 
 FLOOR_TAG_CLASS: dict[str, str] = {
     str(Removal.RECOMMENDED): "tag-success",
@@ -69,6 +73,73 @@ FLOOR_TAG_CLASS: dict[str, str] = {
     str(Removal.EXPERT): "tag-warning",
     str(Removal.UNSAFE): "tag-danger",
 }
+
+# `filter_verdict` is `uadclaw.filters.FilterVerdict`'s own spelling, meant for `uad_lists.json`
+# and never for a screen. A blanket `.replace("_", " ")` would also prettify a value nobody
+# enumerated, so a future FilterVerdict member would render as plausible prose instead of as
+# the visibly-unhandled raw string it should. `.get(value, value)` keeps that property: an
+# unmapped value falls through unprettified rather than silently passing for handled.
+FILTER_VERDICT_LABEL: dict[str, str] = {
+    str(FilterVerdict.QUEUED): "queued",
+    str(FilterVerdict.ALREADY_UPSTREAM): "already upstream",
+    str(FilterVerdict.AUTO_GENERATED_RRO): "generated overlay",
+    str(FilterVerdict.EMULATOR_ONLY): "emulator only",
+}
+
+FILTER_VERDICT_TAG_CLASS: dict[str, str] = {
+    str(FilterVerdict.QUEUED): "tag-success",
+    str(FilterVerdict.ALREADY_UPSTREAM): "tag-info",
+    str(FilterVerdict.AUTO_GENERATED_RRO): "tag-default",
+    str(FilterVerdict.EMULATOR_ONLY): "tag-default",
+}
+
+# One line per verdict, so the badge that survives SPEC §5's cap still carries a plain
+# explanation. `generated overlay` and `emulator only` are this project's own invented
+# vocabulary (SPEC §2's target for renaming), so their label alone does not say what the
+# filter stage did — sourced from `filters.py`'s own module docstring, the one place that
+# already states what each rule means, rather than a second spelling of the same fact.
+FILTER_VERDICT_EXPLANATION: dict[str, str] = {
+    str(FilterVerdict.QUEUED): "reaches the additions queue.",
+    str(FilterVerdict.ALREADY_UPSTREAM): (
+        "already in uad_lists.json — out of the queue, still analysed for corrections."
+    ),
+    str(FilterVerdict.AUTO_GENERATED_RRO): (
+        "matches the auto_generated_rro_ marker — dropped from the queue."
+    ),
+    str(FilterVerdict.EMULATOR_ONLY): (
+        "every device that shipped it was an emulator — dropped from the queue."
+    ),
+}
+
+
+def _has_icon(fact: PackageFact) -> bool:
+    """`icon_bytes`/`icon_mime` land on `package_facts` in a sibling worktree of this same
+    round and are not on this branch's `PackageFact` yet. `getattr` with a default keeps this
+    screen's own gate green until that migration merges, and reads the real column exactly
+    the same way once it has. Delete the default and read `fact.icon_mime` directly once the
+    column lands — `test_the_icon_mime_getattr_fallback_is_still_needed` reds the moment it
+    does, which is the forcing function for that deletion."""
+    return getattr(fact, "icon_mime", None) is not None
+
+
+# The letters/colour derivation used to live here and in the triage lane, disagreeing on the
+# same package. `monogram.monogram_for` and `templates/partials/pkg_icon.html` are now the
+# one implementation both screens call; this module supplies only `has_icon`.
+
+
+def _package_href(package: str) -> str:
+    """`/corpus/{package}`, through `web.url_segment` rather than the `|urlencode` filter:
+    jinja2's `do_urlencode` calls `url_quote` with `safe=b"/"`, so a package name carrying a
+    `/` comes back unescaped and the link points at a different path than the record.
+    `web.url_segment` is the one place that encoding rule lives; a second local spelling of
+    it is exactly the kind of drift that split this round's monogram derivation in two."""
+    return f"/corpus/{web.url_segment(package)}"
+
+
+def _package_links(packages: Iterable[str]) -> list[dict[str, str]]:
+    """`(package, href)` pairs for the dependency/needed-by tag lists, for the same reason
+    `_package_href` exists: those names come off the corpus graph, not off this pipeline."""
+    return [{"package": p, "href": _package_href(p)} for p in packages]
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,12 +149,13 @@ class CorpusRow:
     both collapse to `None` here, which is the fact the UI actually needs to render."""
 
     package: str
+    href: str
     device_count: int
     floor: str | None
     floor_rule: str | None
-    queued: bool | None
-    upstream_present: bool | None
+    filter_verdict: str | None
     has_conflict: bool
+    has_icon: bool
 
 
 def _toggle_dir(column: str, sort: str, direction: str) -> str:
@@ -99,8 +171,7 @@ def _corpus_url(
     *,
     q: str,
     floor_filter: str,
-    queued_filter: str,
-    upstream_filter: str,
+    verdict_filter: str,
     sort: str,
     direction: str,
     page: int,
@@ -108,8 +179,7 @@ def _corpus_url(
     params = {
         "q": q,
         "floor": floor_filter,
-        "queued": queued_filter,
-        "upstream": upstream_filter,
+        "verdict": verdict_filter,
         "sort": sort,
         "dir": direction,
         "page": str(page),
@@ -124,16 +194,16 @@ def _corpus_url(
 
 
 def _apply_filters(
-    stmt: Select[Any], *, q: str, floor_filter: str, queued_filter: str, upstream_filter: str
+    stmt: Select[Any], *, q: str, floor_filter: str, verdict_filter: str
 ) -> Select[Any]:
     if q:
         stmt = stmt.where(PackageFact.package.ilike(f"%{q}%"))
     if floor_filter in {str(removal) for removal in Removal}:
         stmt = stmt.where(PackageAnalysis.floor == floor_filter)
-    if queued_filter in TRISTATE:
-        stmt = stmt.where(PackageAnalysis.queued.is_(TRISTATE[queued_filter]))
-    if upstream_filter in TRISTATE:
-        stmt = stmt.where(PackageAnalysis.upstream_present.is_(TRISTATE[upstream_filter]))
+    if verdict_filter == "null":
+        stmt = stmt.where(PackageAnalysis.filter_verdict.is_(None))
+    elif verdict_filter in {str(v) for v in FilterVerdict}:
+        stmt = stmt.where(PackageAnalysis.filter_verdict == verdict_filter)
     return stmt
 
 
@@ -155,8 +225,9 @@ async def corpus_screen(request: Request):
     floor_filter, floor_warning = web.valid_filter(
         params.get("floor") or "", (str(removal) for removal in Removal)
     )
-    queued_filter, queued_warning = web.valid_filter(params.get("queued") or "", TRISTATE)
-    upstream_filter, upstream_warning = web.valid_filter(params.get("upstream") or "", TRISTATE)
+    verdict_filter, verdict_warning = web.valid_filter(
+        params.get("verdict") or "", VERDICT_FILTER_VALUES
+    )
 
     sort = params.get("sort") or DEFAULT_SORT
     if sort not in SORTS:
@@ -173,22 +244,24 @@ async def corpus_screen(request: Request):
         "active_nav": "corpus",
         "q": q,
         "floor_filter": floor_filter,
-        "queued_filter": queued_filter,
-        "upstream_filter": upstream_filter,
+        "verdict_filter": verdict_filter,
         "sort": sort,
         "dir": direction,
         "floors": [str(removal) for removal in Removal],
+        "verdicts": [str(v) for v in FilterVerdict],
         "FLOOR_TAG_CLASS": FLOOR_TAG_CLASS,
-        "filter_warning": floor_warning or queued_warning or upstream_warning,
+        "FILTER_VERDICT_LABEL": FILTER_VERDICT_LABEL,
+        "FILTER_VERDICT_TAG_CLASS": FILTER_VERDICT_TAG_CLASS,
+        "FILTER_VERDICT_EXPLANATION": FILTER_VERDICT_EXPLANATION,
+        "filter_warning": floor_warning or verdict_warning,
     }
-    filters_active = bool(q or floor_filter or queued_filter or upstream_filter)
+    filters_active = bool(q or floor_filter or verdict_filter)
     context["filters_active"] = filters_active
 
     filter_kwargs = {
         "q": q,
         "floor_filter": floor_filter,
-        "queued_filter": queued_filter,
-        "upstream_filter": upstream_filter,
+        "verdict_filter": verdict_filter,
     }
 
     session_factory = get_session_factory()
@@ -225,12 +298,13 @@ async def corpus_screen(request: Request):
     rows = [
         CorpusRow(
             package=fact.package,
+            href=_package_href(fact.package),
             device_count=fact.device_count,
             floor=analysis.floor if analysis is not None else None,
             floor_rule=analysis.floor_rule if analysis is not None else None,
-            queued=analysis.queued if analysis is not None else None,
-            upstream_present=analysis.upstream_present if analysis is not None else None,
+            filter_verdict=analysis.filter_verdict if analysis is not None else None,
             has_conflict=fact.has_conflict,
+            has_icon=_has_icon(fact),
         )
         for fact, analysis in result
     ]
@@ -273,6 +347,9 @@ async def corpus_detail(request: Request, package: str):
         "active_nav": "corpus",
         "package": package,
         "FLOOR_TAG_CLASS": FLOOR_TAG_CLASS,
+        "FILTER_VERDICT_LABEL": FILTER_VERDICT_LABEL,
+        "FILTER_VERDICT_TAG_CLASS": FILTER_VERDICT_TAG_CLASS,
+        "FILTER_VERDICT_EXPLANATION": FILTER_VERDICT_EXPLANATION,
     }
     session_factory = get_session_factory()
     async with session_factory() as session:
@@ -295,4 +372,7 @@ async def corpus_detail(request: Request, package: str):
 
     context["fact"] = fact
     context["analysis"] = analysis
+    context["has_icon"] = _has_icon(fact)
+    context["dependency_links"] = _package_links(analysis.dependencies if analysis else [])
+    context["needed_by_links"] = _package_links(analysis.needed_by if analysis else [])
     return web.page(request, "corpus_detail.html", context)
