@@ -80,6 +80,13 @@ services:
     tmpfs:
       - /tmp:size=64m,mode=1777
       - /run:size=8m,mode=755
+    volumes:
+      # The same read-only mount the worker gets, and it is not a copy-paste: the triage
+      # screen shows the nearest existing `uad_lists.json` entries beside each proposal, so
+      # the WEB service reads this file too. Without it the card degrades quietly, losing one
+      # of the four things a reviewer compares against and raising nothing, which is the
+      # failure mode that survives local testing untouched.
+      - ./data:/data:ro
 
   worker:
     build: .
