@@ -23,6 +23,8 @@ from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 from sqlalchemy.exc import SQLAlchemyError
 
+from uadclaw.monogram import monogram_for
+
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -88,6 +90,11 @@ NAV_ITEMS: tuple[NavItem, ...] = (
 templates.env.globals["htmx_filename"] = HTMX_FILENAME
 templates.env.globals["nav_items"] = NAV_ITEMS
 templates.env.globals["active_nav"] = None
+# Registered as a global rather than passed per view, so `partials/pkg_icon.html` can be
+# imported by any template without every call site threading the derivation through its own
+# context. One implementation is the point: two screens deriving it separately is how one
+# package ended up with two different chips.
+templates.env.globals["monogram_for"] = monogram_for
 
 
 def is_htmx(request: Request) -> bool:
