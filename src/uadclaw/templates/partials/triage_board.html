@@ -7,6 +7,7 @@
    Three columns — the rail, what the reviewer acts on, what backs it up. The grid and its
    collapse live in `app.css` under `.triage-board`, because a `style=` attribute carries no
    media query and the collapse is the half that was never rendered. #}
+{% from "partials/pkg_icon.html" import pkg_icon %}
 <div id="triage-board" class="triage-board">
 
   <aside class="triage-rail">
@@ -34,12 +35,8 @@
              hx-get="/triage?view={{ board.view }}&package={{ row.package | urlencode }}"
              hx-target="#triage-board" hx-swap="outerHTML"
              style="display:flex;gap:var(--space-2);align-items:center;padding:var(--space-2) var(--space-3)">
-            {% if row.has_icon %}
-              <img class="pkg-icon pkg-icon-sm" src="/icons/{{ row.package | urlencode }}" alt="" loading="lazy">
-            {% else %}
-              {% set chip = monogram(row.package) %}
-              <span class="monogram monogram-sm {{ chip.tint }}" role="img" aria-label="{{ row.package }}">{{ chip.letters }}</span>
-            {% endif %}
+            {# The name is rendered as text on the next line, so the icon is decorative. #}
+            {{ pkg_icon(row.package, row.has_icon, small=true) }}
             <div style="min-width:0;flex:1">
               <div style="display:flex;justify-content:space-between;gap:var(--space-2);align-items:baseline">
                 <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ row.package }}</span>

@@ -21,7 +21,6 @@ Three properties this module owes the rest of the pipeline:
 """
 
 import logging
-import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -66,9 +65,6 @@ ANCHOR_COUNT = 4
 # renders monograms rather than failing to import. Drop the fallback once the column lands.
 _ICON_MIME: Any = getattr(PackageFact, "icon_mime", null())
 
-# How many tints a monogram chip can take. The classes are `monogram-t0` upward in `app.css`.
-MONOGRAM_TINTS = 8
-
 
 class TriageError(ValueError):
     """A triage action was refused. Bad input from the form (a rejection with no reason, a
@@ -91,32 +87,6 @@ class Decision:
     # against an older bundle is history: the package is back in the queue and the card shows
     # what was said last time.
     current: bool
-
-
-@dataclass(frozen=True, slots=True)
-class Monogram:
-    """The fallback chip for a package that ships no icon: two letters and a tint class."""
-
-    letters: str
-    tint: str
-
-
-def monogram(package: str) -> Monogram:
-    """One package's chip, the same one every time.
-
-    `crc32` rather than `hash()`: Python salts `hash()` per process unless PYTHONHASHSEED is
-    set, so the chip would change colour every time the worker restarted, on a value whose
-    whole job is being recognisable across renders.
-
-    The letters come off the last dotted component, filtered to alphanumerics — a package
-    name is bytes out of a downloaded manifest, so the component can be punctuation and the
-    chip would read as a fragment of markup rather than as a name.
-    """
-    tail = package.rsplit(".", 1)[-1]
-    letters = "".join(char for char in tail if char.isalnum())[:2].upper()
-    if not letters:
-        letters = "".join(char for char in package if char.isalnum())[:2].upper() or "?"
-    return Monogram(letters, f"monogram-t{zlib.crc32(package.encode()) % MONOGRAM_TINTS}")
 
 
 @dataclass(frozen=True, slots=True)

@@ -269,10 +269,6 @@ def _context(board: Board) -> dict[str, Any]:
         "view_labels": VIEW_LABELS,
         "badge_meanings": BADGE_MEANINGS,
         "corroboration_label": corroboration_label,
-        # Passed as a callable rather than pre-rendered onto every row: a chip is derived
-        # from the package name and nothing else, so a field on the row would be the same
-        # value written twice.
-        "monogram": triagestore.monogram,
         "unknown_value": UNKNOWN,
     }
 

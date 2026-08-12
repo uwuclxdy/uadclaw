@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select, text
 
-from uadclaw import triagestore
+from uadclaw import triagestore, web
 from uadclaw.classify import Classification, Confidence, UadList
 from uadclaw.classifystore import park_package, store_classification
 from uadclaw.facts import ApkFacts
@@ -29,6 +29,7 @@ from uadclaw.models import (
     PackageCorroboration,
     PackageTriageDecision,
 )
+from uadclaw.monogram import MONOGRAM_COLOURS, monogram_for
 from uadclaw.views import triage as triage_view
 
 NOW = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
@@ -982,6 +983,21 @@ def has_icons(monkeypatch):
     monkeypatch.setattr(triagestore, "load_candidate", candidate)
 
 
+def test_the_stylesheet_covers_every_class_the_icon_macro_can_emit():
+    """The macro picks the class names and this lane owns the stylesheet, so the two halves
+    are checked against each other here rather than by looking at a screen.
+
+    A colour index with no class renders an UNSTYLED chip instead of raising, which ships
+    invisibly: raising `MONOGRAM_COLOURS` past what `app.css` covers is the shape that does
+    it, and it fails here instead.
+    """
+    css = (web.STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    for name in (".pkg-icon", ".pkg-icon-sm", ".monogram", ".monogram-sm"):
+        assert re.search(rf"\{name}\b[^{{]*{{", css), f"{name} is not defined in app.css"
+    colours = {int(index) for index in re.findall(r"\.monogram-c(\d+)\s*{", css)}
+    assert colours == set(range(MONOGRAM_COLOURS))
+
+
 async def test_a_package_with_no_icon_gets_a_monogram_and_never_a_request(
     db_env, triage_env, triage_db, client
 ):
@@ -992,12 +1008,11 @@ async def test_a_package_with_no_icon_gets_a_monogram_and_never_a_request(
 
     body = await screen(client)
 
+    letters, colour = monogram_for("com.example.notes")
     assert "/icons/" not in body
-    chip = triagestore.monogram("com.example.notes")
-    assert (
-        f'<span class="monogram {chip.tint}" role="img" aria-label="com.example.notes">'
-        f"{chip.letters}</span>" in body
-    )
+    assert f'class="monogram monogram-c{colour} monogram-sm"' in body
+    assert f'class="monogram monogram-c{colour}"' in body
+    assert f">{letters}</span>" in body
 
 
 async def test_a_package_with_an_icon_renders_the_image_at_both_sizes(
@@ -1008,8 +1023,9 @@ async def test_a_package_with_an_icon_renders_the_image_at_both_sizes(
 
     body = await screen(client)
 
-    assert 'class="pkg-icon pkg-icon-sm" src="/icons/com.example.notes"' in body
-    assert 'class="pkg-icon" src="/icons/com.example.notes"' in body
+    assert 'class="pkg-icon pkg-icon-sm"' in body
+    assert 'class="pkg-icon"\n         src="/icons/com.example.notes"' in body
+    assert body.count('src="/icons/com.example.notes"') == 2
     assert "monogram" not in body
 
 

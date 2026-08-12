@@ -5,6 +5,7 @@
 
    Nothing here is `|safe`. Package names, labels and manifest strings come out of downloaded
    firmware and titles come off the open web. #}
+{% from "partials/pkg_icon.html" import pkg_icon %}
 {% set c = board.candidate %}
 
 <article class="card" style="margin-bottom:var(--space-4)">
@@ -12,12 +13,8 @@
      column collapsed to about a character wide, and `overflow-wrap` then broke the package
      name one letter per line. #}
   <div class="card-header" style="align-items:flex-start;gap:var(--space-3);flex-wrap:wrap">
-    {% if c.has_icon %}
-      <img class="pkg-icon" src="/icons/{{ c.package | urlencode }}" alt="">
-    {% else %}
-      {% set chip = monogram(c.package) %}
-      <span class="monogram {{ chip.tint }}" role="img" aria-label="{{ c.package }}">{{ chip.letters }}</span>
-    {% endif %}
+    {# The card title beside it is the package name, so the icon is decorative. #}
+    {{ pkg_icon(c.package, c.has_icon, small=false) }}
     <div style="min-width:180px;flex:1">
       {# `anywhere` rather than `break-all`: a package name is dotted, and breaking only when
          the line runs out puts the split at a dot instead of mid-word. #}

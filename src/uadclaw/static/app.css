@@ -239,14 +239,16 @@ a:focus-visible {
   font-size: var(--text-xs);
 }
 
-/* Eight tints off the categorical ramp, picked by hashing the package name. Status colours
-   (red, green, yellow) are left out on purpose: a chip is identity, and a green one beside a
-   danger badge reads as a verdict. */
-.monogram-t0 { --monogram-tint: var(--cat-blue); }
-.monogram-t1 { --monogram-tint: var(--cat-mauve); }
-.monogram-t2 { --monogram-tint: var(--cat-teal); }
-.monogram-t3 { --monogram-tint: var(--cat-peach); }
-.monogram-t4 { --monogram-tint: var(--cat-pink); }
-.monogram-t5 { --monogram-tint: var(--cat-lavender); }
-.monogram-t6 { --monogram-tint: var(--cat-sapphire); }
-.monogram-t7 { --monogram-tint: var(--cat-flamingo); }
+/* One class per colour `monogram.monogram_for` can return, off the categorical ramp. Status
+   colours (red, green, yellow) are left out on purpose: a chip is identity, and a green one
+   beside a danger badge reads as a verdict. A colour index with no class here renders an
+   unstyled chip rather than raising, so `test_the_stylesheet_covers_every_monogram_colour`
+   fails when `MONOGRAM_COLOURS` grows past what this block covers. */
+.monogram-c0 { --monogram-tint: var(--cat-blue); }
+.monogram-c1 { --monogram-tint: var(--cat-mauve); }
+.monogram-c2 { --monogram-tint: var(--cat-teal); }
+.monogram-c3 { --monogram-tint: var(--cat-peach); }
+.monogram-c4 { --monogram-tint: var(--cat-pink); }
+.monogram-c5 { --monogram-tint: var(--cat-lavender); }
+.monogram-c6 { --monogram-tint: var(--cat-sapphire); }
+.monogram-c7 { --monogram-tint: var(--cat-flamingo); }
