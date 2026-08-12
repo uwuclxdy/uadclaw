@@ -94,6 +94,22 @@ def test_a_slash_in_a_package_name_never_spells_a_path_segment():
     assert "/icons/../.." not in rendered
 
 
+def test_a_package_named_only_of_dots_cannot_spell_a_relative_path():
+    """`quote(v, safe="")` stops a name inventing a separator and does nothing about a name
+    that IS a path token: `.` is unreserved, so `..` survives quoting intact and the browser
+    resolves it before the request is sent. Percent-encoding and path-token neutralisation are
+    two escapes, and the first was once documented as covering the second."""
+    macro = templates.env.get_template("partials/pkg_icon.html").module.pkg_icon
+    for name in ("..", ".", "..."):
+        rendered = str(macro(name, True))
+        assert f'src="/icons/{name}"' not in rendered
+        assert "%2E" in rendered
+    # A real package name is nothing but dots and letters, and must come through untouched.
+    assert 'src="/icons/com.google.android.vending"' in str(
+        macro("com.google.android.vending", True)
+    )
+
+
 def test_neither_branch_announces_the_name_a_second_time():
     """Every call site renders the package name as text beside the icon. Announcing it here
     too makes a screen reader read every queue row twice, on the one screen that exists to be

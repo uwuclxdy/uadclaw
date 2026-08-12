@@ -101,13 +101,24 @@ templates.env.globals["monogram_for"] = monogram_for
 def url_segment(value: Any) -> str:
     """One path segment of a URL, from a string this pipeline did not write.
 
-    Jinja's own `urlencode` filter is built for query strings and keeps `/` safe, which is
-    correct there and wrong in a path: a package name carrying a slash would spell a segment
-    boundary the record never had, and the browser resolves `..` before the request is even
-    sent. Package names come out of a downloaded APK's manifest, so the identity of a record
-    is not permitted to spell its path.
+    Two separate escapes, because percent-encoding alone does not cover the second and an
+    earlier version of this function claimed it did.
+
+    Jinja's own `urlencode` is built for query strings and keeps `/` safe, which is correct
+    there and wrong in a path: a package name carrying a slash spells a segment boundary the
+    record never had. `safe=""` closes that.
+
+    It does not close `.`, which is an ordinary unreserved character that `quote` has no
+    reason to touch. A package named `..` therefore survives quoting intact and is resolved
+    by the browser before the request is sent, so the encoding that stops a name inventing a
+    boundary does nothing about a name that IS one. Only the segments made entirely of dots
+    are relative-path tokens, so only those are rewritten, and a package name with dots in it
+    (which is all of them) is untouched.
     """
-    return quote(str(value), safe="")
+    quoted = quote(str(value), safe="")
+    if quoted and set(quoted) == {"."}:
+        return quoted.replace(".", "%2E")
+    return quoted
 
 
 templates.env.filters["url_segment"] = url_segment
