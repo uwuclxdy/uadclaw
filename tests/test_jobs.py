@@ -64,10 +64,14 @@ def test_a_firmware_job_stops_at_rule_ladder_and_never_walks_into_llm():
     assert next_stage("rule_ladder", "firmware_analysis") is None
 
 
-def test_a_classification_job_walks_only_the_llm_stage():
-    assert stages_for("classification") == ("llm",)
+def test_a_classification_job_walks_llm_then_corroborate():
+    """`corroborate` appends to this walk rather than forming a kind of its own: it has no
+    input without a classification to corroborate, and upstream's review bar asks for the
+    check on every AI-written description rather than on a subset somebody queued."""
+    assert stages_for("classification") == ("llm", "corroborate")
     assert next_stage(None, "classification") == "llm"
-    assert next_stage("llm", "classification") is None
+    assert next_stage("llm", "classification") == "corroborate"
+    assert next_stage("corroborate", "classification") is None
 
 
 def test_every_kinds_stages_are_drawn_from_the_design_pipeline():

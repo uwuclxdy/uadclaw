@@ -180,15 +180,17 @@ def test_the_registry_wires_the_stages_the_worker_runs():
         "filter",
         "rule_ladder",
         "llm",
+        "corroborate",
     }
     # Every registered name is a real pipeline stage: a typo here is a handler the worker
     # silently never calls, because it no-ops any stage it has no entry for.
     assert set(handlers) <= set(PIPELINE_STAGES)
-    # And a registered handler does NOT put its stage into every kind's walk. `llm` spends
-    # money, so it belongs to the classification kind alone; the registry is the vocabulary
-    # and `JOB_KIND_STAGES` is the pipeline.
+    # And a registered handler does NOT put its stage into every kind's walk. `llm` and
+    # `corroborate` both spend money, so they belong to the classification kind alone; the
+    # registry is the vocabulary and `JOB_KIND_STAGES` is the pipeline.
     assert "llm" not in JOB_KIND_STAGES[JobKind.FIRMWARE_ANALYSIS]
-    assert JOB_KIND_STAGES[JobKind.CLASSIFICATION] == ("llm",)
+    assert "corroborate" not in JOB_KIND_STAGES[JobKind.FIRMWARE_ANALYSIS]
+    assert JOB_KIND_STAGES[JobKind.CLASSIFICATION] == ("llm", "corroborate")
 
 
 # --- the stages themselves ----------------------------------------------------------------

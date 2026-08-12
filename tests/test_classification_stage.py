@@ -760,4 +760,4 @@ async def test_the_llm_handler_is_registered_for_the_classification_kind_only():
     handlers = stages_module.pipeline_stage_handlers()
     assert handlers["llm"] is llm_stage
     assert "llm" not in jobs_module.stages_for("firmware_analysis")
-    assert jobs_module.stages_for("classification") == ("llm",)
+    assert jobs_module.stages_for("classification") == ("llm", "corroborate")

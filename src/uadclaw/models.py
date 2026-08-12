@@ -93,7 +93,12 @@ JOB_KIND_STAGES: dict[JobKind, tuple[str, ...]] = {
         "filter",
         "rule_ladder",
     ),
-    JobKind.CLASSIFICATION: ("llm",),
+    # `corroborate` APPENDS to this walk rather than forming a kind of its own: corroboration
+    # has no input without a classification to corroborate, and upstream's review bar asks for
+    # the check on every AI-written description rather than on a subset somebody remembered to
+    # queue. It stays out of the FIRMWARE_ANALYSIS walk for the reason `llm` does — it spends
+    # money, on a search quota and on the judge both.
+    JobKind.CLASSIFICATION: ("llm", "corroborate"),
 }
 
 # Bound the log tail kept on the job row; older lines fall off rather than growing the row
@@ -538,4 +543,114 @@ class PackageClassification(Base):
     __table_args__ = (
         Index("ix_package_classification_parked", "parked"),
         Index("ix_package_classification_bundle_sha256", "bundle_sha256"),
+    )
+
+
+class PackageSearchResult(Base):
+    """One web-search result for one package, with the page body that was fetched for it.
+
+    **Keyed on the package NAME, never on a bundle or description hash.** The query is the
+    package name and nothing else, so a re-classification after a prompt change asks the same
+    search question and must re-use these rows rather than spend the search quota again. That
+    is also what makes a `judge_failed` re-run free: the judge is re-asked against rows that
+    are already here.
+
+    What is kept is what makes a verdict auditable without a re-fetch: the url, the title, the
+    Brave snippet, and the extracted page TEXT truncated to `PAGE_TEXT_MAX_CHARS`. Not raw
+    HTML — nothing reads it back as markup, and a megabyte of hostile HTML per result is a
+    liability rather than evidence.
+
+    `page_text IS NULL` with a `fetch_error` beside it means the judge saw the snippet for
+    this source instead of its body. Recorded rather than collapsed, because a verdict reached
+    on snippets alone is a weaker verdict and a reviewer has to be able to see that.
+
+    `fetched_at` is the TTL clock: a package whose newest row is inside
+    `CORROBORATION_SEARCH_TTL_DAYS` is re-used with no HTTP call at all.
+    """
+
+    __tablename__ = "package_search_results"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    package: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Rank in the merged `web` + `discussions` order, 1-based. Stored because the merge order
+    # is what the judge was shown, and it cannot be recomputed from the rows alone.
+    position: Mapped[int] = mapped_column(nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    snippet: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # `web` or `discussions`. Kept because they are different source classes, and whether a
+    # corroboration came off a forum thread or a vendor page is a triage-relevant fact.
+    block: Mapped[str] = mapped_column(String(16), nullable=False)
+    page_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetch_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("package", "url", name="uq_package_search_results_url"),
+        Index("ix_package_search_results_package", "package"),
+    )
+
+
+class PackageCorroboration(Base):
+    """Whether an independent source supports the model's description for one package.
+
+    Upstream's stated review bar, per package — see `docs/domain-knowledge.md` § Upstream.
+
+    A separate table from `package_classification` for the reason that one is separate from
+    `package_analysis`: the corroboration stage writes only here, so "the classification row
+    is what the model proposed" stays true by construction and a corroboration re-run cannot
+    touch a proposal.
+
+    `status` carries FOUR values and the difference between them is the whole point.
+    `uncorroborated` (we looked, nothing supports it) and `search_failed` (we could not look)
+    and `judge_failed` (we looked but could not judge) are three different facts with three
+    different retry costs, and collapsing any two of them tells triage a package lacks support
+    when nobody actually asked. Only the first two of the four can be a model's answer; the
+    other two are set by code, and a response claiming one is refused.
+
+    `description_sha256` is the idempotence key over exactly what was judged (the package name
+    and the description, canonically serialised by `corroborate.description_digest`). A verdict
+    is a function of the claim being checked, so a re-classification that changes the
+    description re-opens the question and one that does not, does not.
+    """
+
+    __tablename__ = "package_corroboration"
+
+    package: Mapped[str] = mapped_column(String(255), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    description_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # `uadclaw.corroborate.CorroborationStatus`.
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    # NULL when no model was asked: a search that failed, or a search that returned nothing to
+    # judge. A stored model id on such a row would credit a call that never happened.
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    thinking: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    # The urls the judge cited as supporting the description, with the title taken off the
+    # SEARCH RESULT rather than out of the model: [{"url", "title"}]. Empty for every status
+    # but `corroborated`, and every entry was in the set handed to the judge — a response
+    # citing anything else is rejected whole rather than having the url dropped.
+    sources: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Why a `search_failed` or `judge_failed` row is one. Distinct from `reasoning`, which is
+    # the judge's own note: this one is the pipeline's.
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # field name -> `llm:<model>` for a judged verdict, `rule:corroborate` for one code
+    # reached, `search:brave` for the sources.
+    provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+    usage: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    attempts: Mapped[int] = mapped_column(nullable=False, default=0)
+
+    __table_args__ = (
+        Index("ix_package_corroboration_status", "status"),
+        Index("ix_package_corroboration_description_sha256", "description_sha256"),
     )

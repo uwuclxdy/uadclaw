@@ -2,9 +2,10 @@
 
 Two job kinds run through here and they share nothing but the signature. `firmware_analysis`
 walks `acquire` → `unpack` → `extract_facts` → `corpus_graph` → `filter` → `rule_ladder` and
-lives on disk; `classification` walks `llm` alone, holds no scratch lease, and is the only
-stage in this repo that spends money. Which stages a kind walks is `models.JOB_KIND_STAGES`,
-and it is per kind precisely so a firmware job cannot wander into `llm`.
+lives on disk; `classification` walks `llm` → `corroborate`, holds no scratch lease, and is
+the only kind in this repo that spends money — the model on both stages, plus a search quota
+on the second. Which stages a kind walks is `models.JOB_KIND_STAGES`, and it is per kind
+precisely so a firmware job cannot wander into `llm`.
 
 Every stage writes only inside the job's own `ctx.scratch_dir`, and none of them writes a job
 row: job state is the worker's, fenced on `(job_id, worker_id, attempt)`. The handoff between
@@ -23,11 +24,13 @@ import json
 import logging
 import os
 import shutil
-from datetime import UTC, datetime
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
+from uadclaw.brave import BraveClient, BraveError, PageFetcher, require_brave_key, source_links
 from uadclaw.bundle import EvidenceBundle, PackageIdentity, build_bundles
 from uadclaw.classify import (
     SYSTEM_PROMPT,
@@ -56,6 +59,25 @@ from uadclaw.corpusstore import (
     store_floors,
     store_graph,
 )
+from uadclaw.corroborate import SYSTEM_PROMPT as JUDGE_SYSTEM_PROMPT
+from uadclaw.corroborate import (
+    Corroboration,
+    CorroborationRejected,
+    CorroborationStatus,
+    SourceEvidence,
+    code_verdict,
+    validate_verdict,
+)
+from uadclaw.corroborate import user_prompt as judge_user_prompt
+from uadclaw.corroboratestore import (
+    cached_sources,
+    existing_verdicts,
+    record_failure,
+    require_proposals,
+    store_search_results,
+    store_verdict,
+)
+from uadclaw.corroboratestore import select_candidates as select_corroboration_candidates
 from uadclaw.deepseek import (
     ChatResult,
     DeepSeekClient,
@@ -75,7 +97,7 @@ from uadclaw.firmware import (
 )
 from uadclaw.ladder import RemovalFloor, compute_floors
 from uadclaw.models import Job
-from uadclaw.settings import get_settings
+from uadclaw.settings import Settings, get_settings
 from uadclaw.unpack import canonical_device_path, extract_artifacts, unpack_to_partitions
 from uadclaw.upstream import load_upstream_list
 from uadclaw.worker import StageContext, StageHandler
@@ -744,6 +766,300 @@ async def _classify_and_store(
         counts["classified"] += 1
 
 
+class _QueryBudget:
+    """How many Brave queries this job has left.
+
+    A plain counter rather than a semaphore: the ceiling is a SPEND, not a concurrency limit,
+    and it must be decremented once per query taken rather than released afterwards. Safe
+    across the TaskGroup below because there is no await between the check and the decrement,
+    so no other task can observe the intermediate state.
+    """
+
+    __slots__ = ("ceiling", "remaining")
+
+    def __init__(self, ceiling: int) -> None:
+        self.ceiling = ceiling
+        self.remaining = ceiling
+
+    def take(self) -> bool:
+        if self.remaining < 1:
+            return False
+        self.remaining -= 1
+        return True
+
+
+async def _judge_one(
+    client: DeepSeekClient,
+    *,
+    package: str,
+    description: str,
+    sources: Sequence[SourceEvidence],
+    max_calls: int,
+) -> tuple[Corroboration | None, str | None, ChatResult | None, int]:
+    """One package's verdict: call, validate, re-prompt while the budget lasts, then give up.
+
+    The same single-budget shape as `_classify_one`, counted in REQUESTS rather than in
+    re-prompts, because the wire retries live inside the client and giving each layer its own
+    cap turns a documented 3 into a real 9. Returns `(corroboration, reason, last_result,
+    calls)`; giving up returns a reason so the caller records `judge_failed` with it, rather
+    than raising and costing every other package its verdict.
+
+    A rejected verdict is re-prompted rather than repaired. That matters most for the
+    fabricated-citation case: the answer cited a source it was never given, so dropping the bad
+    url and keeping the rest would keep whatever reasoning produced it.
+    """
+    user = judge_user_prompt(package, description, sources)
+    last_result: ChatResult | None = None
+    reason = "no attempt was made"
+    calls = 0
+    while calls < max_calls:
+        try:
+            result = await client.complete_json(
+                system=JUDGE_SYSTEM_PROMPT, user=user, max_calls=max_calls - calls
+            )
+        except (DeepSeekMalformedError, DeepSeekUnavailableError) as exc:
+            # Terminal, and charged for what it really spent — `exc.attempts`, not one.
+            calls += exc.attempts
+            reason = f"after {calls} request(s): {exc}"
+            logger.warning("corroboration gave up on the wire: package=%s %s", package, reason)
+            break
+        calls += result.attempts
+        last_result = result
+        try:
+            payload = result.json_object()
+            corroboration = validate_verdict(
+                payload,
+                package=package,
+                description=description,
+                sources=sources,
+                model=result.model,
+            )
+        except (CorroborationRejected, DeepSeekMalformedError) as exc:
+            reason = f"after {calls} request(s): {exc}"
+            logger.warning("corroboration verdict rejected: package=%s %s", package, reason)
+            continue
+        return corroboration, None, result, calls
+    return None, reason, last_result, calls
+
+
+async def _search_sources(
+    ctx: StageContext,
+    *,
+    brave: BraveClient,
+    fetcher: PageFetcher,
+    package: str,
+    settings: Settings,
+    budget: _QueryBudget,
+) -> tuple[list[SourceEvidence] | None, str]:
+    """This package's evidence, from the cache when it is fresh and from Brave otherwise.
+
+    Returns `(sources, "")`, or `(None, why the search failed)` — a failure is a value here
+    rather than an exception, because a search error must never fail the job: the stage is
+    per-package resumable and one flaky request must not discard the run's completed work.
+
+    The search rows are committed BEFORE the judge is asked anything. That ordering is what
+    makes `judge_failed` free to retry: a re-run finds them inside the TTL and spends no
+    search quota at all.
+    """
+    fresh_after = datetime.now(UTC) - timedelta(days=settings.corroboration_search_ttl_days)
+    async with ctx.session_factory() as session:
+        cached = await cached_sources(session, package, fresh_after=fresh_after)
+    if cached:
+        logger.debug("corroboration re-used %d cached source(s) for %s", len(cached), package)
+        return cached, ""
+    if not budget.take():
+        return None, (
+            f"this job's Brave query budget of {budget.ceiling} is spent, so the search was "
+            "never made. Re-run the job to search the remaining packages, or raise "
+            "CORROBORATION_MAX_QUERIES_PER_JOB."
+        )
+    try:
+        hits = await brave.search(package, limit=settings.corroboration_sources_per_package)
+    except BraveError as exc:
+        # Full traceback before it is reduced to a row, never swallowed.
+        logger.exception("corroboration search failed for %s", package)
+        return None, f"{type(exc).__name__}: {exc}"
+    sources = await fetcher.fetch_all(hits)
+    async with ctx.session_factory() as session, session.begin():
+        await store_search_results(session, package, sources, at=datetime.now(UTC))
+    return sources, ""
+
+
+async def _corroborate_and_store(
+    ctx: StageContext,
+    *,
+    brave: BraveClient,
+    fetcher: PageFetcher,
+    judge: DeepSeekClient,
+    package: str,
+    description: str,
+    settings: Settings,
+    budget: _QueryBudget,
+    counts: dict[str, int],
+) -> None:
+    """One package end to end, in its own transactions.
+
+    Per package rather than one transaction for the batch, for `_classify_and_store`'s reason:
+    a database error on package 30 must not discard 29 verdicts that were already paid for.
+    """
+    sources, failure = await _search_sources(
+        ctx, brave=brave, fetcher=fetcher, package=package, settings=settings, budget=budget
+    )
+    at = datetime.now(UTC)
+    if sources is None:
+        async with ctx.session_factory() as session, session.begin():
+            await record_failure(
+                session,
+                package,
+                description=description,
+                status=CorroborationStatus.SEARCH_FAILED,
+                reason=failure,
+                at=at,
+            )
+        counts[str(CorroborationStatus.SEARCH_FAILED)] += 1
+        return
+
+    if not sources:
+        # Nothing to judge, so nothing is asked. Not a failure and not a model call: with zero
+        # sources, "no independent source supports this" is arithmetic rather than a
+        # judgement, and the row says so by carrying `rule:` provenance.
+        verdict = code_verdict(
+            package,
+            description,
+            status=CorroborationStatus.UNCORROBORATED,
+            reasoning="the search returned no result to judge",
+        )
+        async with ctx.session_factory() as session, session.begin():
+            await store_verdict(
+                session,
+                verdict,
+                model=None,
+                thinking=None,
+                sources=[],
+                usage={},
+                attempts=0,
+                at=at,
+            )
+        counts[str(CorroborationStatus.UNCORROBORATED)] += 1
+        return
+
+    corroboration, reason, result, calls = await _judge_one(
+        judge,
+        package=package,
+        description=description,
+        sources=sources,
+        max_calls=settings.corroboration_max_calls_per_package,
+    )
+    at = datetime.now(UTC)
+    usage = result.usage if result is not None else {}
+    async with ctx.session_factory() as session, session.begin():
+        if corroboration is None:
+            await record_failure(
+                session,
+                package,
+                description=description,
+                status=CorroborationStatus.JUDGE_FAILED,
+                reason=reason or "the judge produced nothing usable",
+                model=judge.model,
+                thinking=judge.thinking,
+                usage=usage,
+                attempts=calls,
+                at=at,
+            )
+            counts[str(CorroborationStatus.JUDGE_FAILED)] += 1
+            return
+        await store_verdict(
+            session,
+            corroboration,
+            model=result.model if result is not None else judge.model,
+            thinking=judge.thinking,
+            sources=source_links(sources, corroboration.sources),
+            usage=usage,
+            attempts=calls,
+            at=at,
+        )
+        counts[str(corroboration.status)] += 1
+
+
+async def corroborate_stage(ctx: StageContext) -> None:
+    """Check every live proposal against an independent source, one package at a time.
+
+    Upstream's stated review bar, implemented: search the package name, fetch the top results'
+    bodies, and have a judge decide whether any of them supports the description the model
+    wrote. Database and network only, like `llm` — no scratch.
+
+    Appended to the CLASSIFICATION walk rather than made its own kind: corroboration has no
+    input without a classification to corroborate. The cost of that is stated rather than
+    hidden — finishing a classification job now needs a Brave key, and a box without one fails
+    here with `require_brave_key` naming the setting instead of failing silently.
+    """
+    settings = get_settings()
+    params = await _classification_params(ctx)
+    limit = min(
+        params.limit or settings.corroboration_max_packages, settings.corroboration_max_packages
+    )
+    # Before a single query or call: the failure names the setting rather than arriving as an
+    # auth error partway through a job that has already spent the search quota.
+    require_brave_key(settings)
+
+    async with ctx.session_factory() as session:
+        proposals = await require_proposals(session)
+        existing = await existing_verdicts(session)
+    candidates = select_corroboration_candidates(
+        proposals=proposals, existing=existing, packages=params.packages, limit=limit
+    )
+    if not candidates:
+        logger.info(
+            "job %s corroborate: nothing to check — %d live proposal(s), all already judged "
+            "against their current description.",
+            ctx.job_id,
+            len(proposals),
+        )
+        return
+
+    logger.info(
+        "job %s corroborate: checking %d of %d live proposal(s) against %s",
+        ctx.job_id,
+        len(candidates),
+        len(proposals),
+        settings.brave_search_url,
+    )
+    budget = _QueryBudget(settings.corroboration_max_queries_per_job)
+    counts = {str(status): 0 for status in CorroborationStatus}
+    # A TaskGroup for `llm_stage`'s reason: the failures that reach this far are the ones that
+    # abort the whole job (an empty balance, a rejected key), and `gather` would propagate the
+    # first while leaving every sibling running against a dead account and writing rows through
+    # a session this block has already closed.
+    async with (
+        BraveClient.from_settings(settings) as brave,
+        PageFetcher.from_settings(settings) as fetcher,
+        DeepSeekClient.from_settings(settings) as judge,
+        asyncio.TaskGroup() as group,
+    ):
+        for package in candidates:
+            group.create_task(
+                _corroborate_and_store(
+                    ctx,
+                    brave=brave,
+                    fetcher=fetcher,
+                    judge=judge,
+                    package=package,
+                    description=proposals[package],
+                    settings=settings,
+                    budget=budget,
+                    counts=counts,
+                )
+            )
+    logger.info(
+        "job %s corroborate: %s over %d candidate(s), %d of %d search quer(ies) spent",
+        ctx.job_id,
+        ", ".join(f"{status} {count}" for status, count in sorted(counts.items())),
+        len(candidates),
+        budget.ceiling - budget.remaining,
+        budget.ceiling,
+    )
+
+
 def pipeline_stage_handlers() -> dict[str, StageHandler]:
     """The stages that have real implementations, across every job kind. The worker no-ops
     any stage missing from this mapping, and `models.JOB_KIND_STAGES` decides which of them
@@ -756,4 +1072,5 @@ def pipeline_stage_handlers() -> dict[str, StageHandler]:
         "filter": filter_stage,
         "rule_ladder": rule_ladder_stage,
         "llm": llm_stage,
+        "corroborate": corroborate_stage,
     }
