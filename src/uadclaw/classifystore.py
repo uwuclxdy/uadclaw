@@ -30,7 +30,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from uadclaw.bundle import PackageIdentity
-from uadclaw.classify import Classification
+
+# `_check_description` is reached across the module boundary on purpose. A human edit ships
+# into the same `uad_lists.json` a model answer does — the space-next-to-newline rule is a
+# literal upstream maintainer request on PR #1180 — so both writers meet the same description
+# rules, and a second spelling of a rule somebody else's reviewer enforces is worse than the
+# underscore. Making it public belongs to `classify.py`, which this task does not own.
+from uadclaw.classify import Classification, Confidence, UadList, _check_description
 from uadclaw.ladder import Removal, danger_rank
 from uadclaw.models import PackageAnalysis, PackageClassification, PackageFact
 
@@ -51,6 +57,21 @@ HUMAN_OWNED_CANDIDATES: tuple[tuple[str, str], ...] = (
 )
 
 HUMAN_PREFIX = "human:"
+# The dashboard is single-user by construction (`auth.py`), so the surface is the only
+# identity there is to record. A username here would be one this app never asked for.
+HUMAN_TRIAGE = f"{HUMAN_PREFIX}triage"
+
+# What a triage edit may change, keyed by the UPSTREAM field name the form and the provenance
+# map both speak, valued by the column it lands in. Deliberately not every column: `attempts`,
+# `usage` and `model` describe the CALL, `bundle_sha256` is the question that was asked, and
+# `reasoning_brief` is the model's own note — overwriting that one destroys the evidence a
+# reviewer reads the proposal against. The reviewer's own words go on the decision instead.
+EDITABLE_FIELDS: dict[str, str] = {
+    "description": "description",
+    "list": "uad_list",
+    "removal": "removal",
+    "confidence": "confidence",
+}
 
 
 class ClassificationStoreError(RuntimeError):
@@ -280,6 +301,100 @@ async def park_package(
     logger.warning(
         "classification parked: package=%s attempts=%d reason=%s", package, attempts, reason
     )
+
+
+def _validated_edit(field: str, value: str) -> str:
+    """One edited field's value, or a `ValueError` naming what is wrong with it.
+
+    Every field here is an enum upstream already defines except `description`, which goes
+    through the same checks a model answer does — see the import comment at the top.
+    """
+    if field == "description":
+        _check_description(value, unknown_fields=())
+        return value
+    if field == "list":
+        return str(UadList(value))
+    if field == "removal":
+        return str(Removal(value))
+    if field == "confidence":
+        return str(Confidence(value))
+    raise ClassificationStoreError(f"store_human_edit: {field!r} is not an editable field")
+
+
+async def store_human_edit(
+    session: AsyncSession,
+    package: str,
+    *,
+    edits: Mapping[str, str],
+    at: datetime,
+) -> dict[str, dict[str, Any]]:
+    """Apply a reviewer's edits to an existing proposal, and say what actually changed.
+
+    The third writer of `package_classification`, and the one with no `validate_response`
+    anywhere in its path — which is why the floor gate lives in `_upsert` rather than in the
+    classification stage. Everything here passes that seam.
+
+    Returns `{field: {"from": old, "to": new}}` for the fields whose value actually moved, so
+    the caller can log what was replaced. An edit that changes nothing writes nothing: a
+    submitted-unchanged form is not a revision, and a log full of empty edits is a log nobody
+    reads.
+
+    Provenance is rewritten to `human:` for each changed field and left alone for the rest,
+    because `_preserved` reads exactly that map on the next model run. A value written here
+    without its provenance is an edit the next re-classification silently erases.
+    """
+    existing = await session.get(PackageClassification, package)
+    if existing is None:
+        raise ClassificationStoreError(
+            f"store_human_edit: {package} has no classification row to edit. Only a package "
+            "the model has already proposed something for can be edited; queue a "
+            "classification job for it first."
+        )
+
+    changed: dict[str, dict[str, Any]] = {}
+    values: dict[str, Any] = {}
+    for field, raw in edits.items():
+        if field not in EDITABLE_FIELDS:
+            raise ClassificationStoreError(
+                f"store_human_edit: {field!r} is not an editable field. Editable: "
+                f"{', '.join(sorted(EDITABLE_FIELDS))}. `dependencies` and `neededBy` come "
+                "from the corpus graph and are not any writer's to set here."
+            )
+        column = EDITABLE_FIELDS[field]
+        value = _validated_edit(field, raw)
+        current = getattr(existing, column)
+        if value == current:
+            continue
+        changed[field] = {"from": current, "to": value}
+        values[column] = value
+
+    if not changed:
+        return {}
+
+    provenance = {**(existing.provenance or {})}
+    for field in changed:
+        provenance[field] = HUMAN_TRIAGE
+    values["provenance"] = provenance
+    if "description" in changed:
+        # A row carrying a written description while still declaring it unknown asserts two
+        # contradictory things, and the `unknown` one is the model's, not the reviewer's.
+        values["unknown_fields"] = [
+            field for field in (existing.unknown_fields or []) if field != "description"
+        ]
+    # The NOT NULL columns the INSERT half of the upsert needs. The row exists — this function
+    # refuses above when it does not — so the UPDATE half is what runs and these write back
+    # what is already there.
+    values.update(
+        package=package,
+        created_at=existing.created_at,
+        updated_at=at,
+        bundle_sha256=existing.bundle_sha256,
+        model=existing.model,
+        thinking=existing.thinking,
+    )
+    await _upsert(session, values)
+    logger.info("triage edit: package=%s fields=%s", package, ", ".join(sorted(changed)))
+    return changed
 
 
 async def _refuse_below_floor(session: AsyncSession, values: dict[str, Any]) -> None:

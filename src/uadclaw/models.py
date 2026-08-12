@@ -546,6 +546,54 @@ class PackageClassification(Base):
     )
 
 
+class PackageTriageDecision(Base):
+    """One human verdict on one proposal. **Append-only: nothing here is ever updated.**
+
+    A status column on `package_classification` would answer "what is the state of this
+    package" and destroy the only measurement this pipeline has of whether its own funnel is
+    improving. Rejections in particular are the raw material for prompt work: what the model
+    proposed, what a human said about it, and how often that changed, is a series rather than
+    a current value, and a series cannot be recovered from a field that was overwritten.
+
+    `bundle_sha256` is what makes the log self-expiring without anything deleting from it. A
+    decision is about ONE proposal, so it is recorded against the evidence hash that proposal
+    answered; re-classifying changes that hash, the old decisions stop matching the current
+    one on their own, and the package returns to the queue carrying its whole history. That
+    is also why there is no unique constraint on `(package, bundle_sha256)`: deciding twice on
+    one proposal is a real thing a reviewer does (defer, come back, approve), and the second
+    decision supersedes the first by being later rather than by replacing it.
+
+    `action` is one of `triagestore.ACTIONS`. `reason` is required for `reject` and the
+    requirement is a CHECK constraint rather than only a code path, because "a rejection
+    without a reason" is exactly the row that looks fine until somebody tries to learn
+    something from the log a month later.
+    """
+
+    __tablename__ = "package_triage_decision"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    package: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Which proposal was being decided on, not which package. See the class docstring.
+    bundle_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What an `edit` changed: {field: {"from": ..., "to": ...}}. Kept beside the decision
+    # rather than only on the classification row, because the row carries the value that won
+    # and this carries the value it replaced.
+    edited_fields: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_package_triage_decision_package_decided_at", "package", "decided_at"),
+        CheckConstraint(
+            "action <> 'reject' OR (reason IS NOT NULL AND btrim(reason) <> '')",
+            name="ck_package_triage_decision_reject_reason",
+        ),
+    )
+
+
 class PackageSearchResult(Base):
     """One web-search result for one package, with the page body that was fetched for it.
 
