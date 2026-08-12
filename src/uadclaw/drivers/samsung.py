@@ -630,7 +630,7 @@ class SamsungDriver(FirmwareDriver):
                 "Samsung's own servers, in two halves. The version index is public and "
                 "unauthenticated. The binary comes from FUS, a private endpoint Samsung "
                 "publishes no terms for and no documentation of, reached by reproducing its "
-                "client's handshake. No credential is presented and nothing is circumvented, "
+                "client's handshake. Nothing is circumvented and no credential is presented, "
                 "but this is a protocol nobody was invited to speak, which is a materially "
                 "different posture from a public CDN and will break without warning."
             ),
