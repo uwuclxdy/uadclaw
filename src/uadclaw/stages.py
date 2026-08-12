@@ -140,6 +140,19 @@ class StageInputError(RuntimeError):
     broken, the job simply cannot run from here."""
 
 
+class StageRecordError(RuntimeError):
+    """A per-package stage could not record what happened to one of its packages, its own
+    recovery write included.
+
+    Job-level, and raised once at the END of the stage rather than out of the failing task.
+    A database nothing can be written to is a fact about the job, but the per-item boundary
+    inside a `TaskGroup` is not where that gets decided: an exception raised there cancels
+    every sibling, so the group loses answers already paid for in order to report a failure
+    the last package could have reported on its own. Every sibling records itself first and
+    the stage then fails, naming what went unrecorded.
+    """
+
+
 def _require_scratch(ctx: StageContext) -> Path:
     if ctx.scratch_dir is None:
         raise StageInputError(
@@ -695,6 +708,9 @@ async def llm_stage(ctx: StageContext) -> None:
         settings.deepseek_thinking,
     )
     counts = {"classified": 0, "parked": 0}
+    # Packages whose own recovery write failed. Collected rather than raised where it happens:
+    # see `_classify_and_store` and `StageRecordError`.
+    unrecorded: list[str] = []
     # A TaskGroup rather than `asyncio.gather`: the failures that reach here at all are the
     # ones that abort the whole job (an empty balance, a rejected key, a budget too small for
     # any package), and `gather` propagates the first one while leaving every sibling running
@@ -712,15 +728,24 @@ async def llm_stage(ctx: StageContext) -> None:
                     identity=identities.get(package),
                     max_calls=settings.classification_max_calls_per_package,
                     counts=counts,
+                    unrecorded=unrecorded,
                 )
             )
     logger.info(
-        "job %s llm: %d classified, %d parked out of %d candidate(s)",
+        "job %s llm: %d classified, %d parked, %d unrecorded out of %d candidate(s)",
         ctx.job_id,
         counts["classified"],
         counts["parked"],
+        len(unrecorded),
         len(candidates),
     )
+    if unrecorded:
+        raise StageRecordError(
+            f"job {ctx.job_id} llm: {len(unrecorded)} of {len(candidates)} package(s) were "
+            f"paid for and could not be written, their own recovery row included: "
+            f"{', '.join(sorted(unrecorded))}. The other packages in this run were written "
+            "and are not re-asked. Check the database is reachable and writable, then re-run."
+        )
 
 
 async def _classify_and_store(
@@ -732,6 +757,7 @@ async def _classify_and_store(
     identity: PackageIdentity | None,
     max_calls: int,
     counts: dict[str, int],
+    unrecorded: list[str],
 ) -> None:
     """One package end to end, in its own transaction. **Raises only for a job-level abort.**
 
@@ -751,8 +777,13 @@ async def _classify_and_store(
     `_corroborate_and_store` and this stage's own docstring have it: `DeepSeekAuth`,
     `DeepSeekBalance` and `DeepSeekBudget` are facts about the ACCOUNT or the configuration
     rather than about this package, and burning 47 more packages' budgets against a dead
-    account is not a diagnosis. A failure of the park write itself propagates too: a database
-    nothing can be written to is job-level.
+    account is not a diagnosis.
+
+    **A failure of the park write itself is still job-level, and still does not raise here.**
+    It used to, and that was the same defect one level down: a stale triage edit made
+    `park_package` refuse, so the recovery call written to contain a per-package failure
+    became the thing that cancelled every sibling. It is counted instead, and `llm_stage`
+    raises `StageRecordError` once the group has finished and every other package has its row.
     """
     # One element rather than a return value, because the count has to survive the exception
     # that ends the call it is charged in.
@@ -773,18 +804,23 @@ async def _classify_and_store(
     except Exception as exc:
         logger.exception("classification failed for %s", bundle.package)
         attempts = spent[0] + (exc.attempts if isinstance(exc, DeepSeekError) else 0)
-        async with ctx.session_factory() as session, session.begin():
-            await park_package(
-                session,
-                bundle.package,
-                bundle_sha256=bundle.sha256,
-                model=client.model,
-                thinking=client.thinking,
-                reason=f"after {attempts} request(s): {type(exc).__name__}: {exc}",
-                usage={},
-                attempts=attempts,
-                at=datetime.now(UTC),
-            )
+        try:
+            async with ctx.session_factory() as session, session.begin():
+                await park_package(
+                    session,
+                    bundle.package,
+                    bundle_sha256=bundle.sha256,
+                    model=client.model,
+                    thinking=client.thinking,
+                    reason=f"after {attempts} request(s): {type(exc).__name__}: {exc}",
+                    usage={},
+                    attempts=attempts,
+                    at=datetime.now(UTC),
+                )
+        except Exception:
+            logger.exception("recording the failure of %s failed too", bundle.package)
+            unrecorded.append(bundle.package)
+            return
         counts["parked"] += 1
 
 
@@ -983,6 +1019,7 @@ async def _corroborate_and_store(
     settings: Settings,
     budget: _QueryBudget,
     counts: dict[str, int],
+    unrecorded: list[str],
 ) -> None:
     """One package end to end, in its own transactions. **Raises only for a job-level abort.**
 
@@ -999,8 +1036,12 @@ async def _corroborate_and_store(
     Three exceptions still take the whole job down, unchanged and deliberately: `DeepSeekAuth`,
     `DeepSeekBalance` and `DeepSeekBudget` are facts about the ACCOUNT rather than about this
     package, exactly as `llm_stage` documents, and letting 499 more packages burn their budgets
-    against a dead account is not a diagnosis. A failure of the recovery write itself also
-    propagates: a database nothing can be written to is job-level too.
+    against a dead account is not a diagnosis.
+
+    **A failure of the recovery write itself is still job-level and still does not raise here**,
+    for `_classify_and_store`'s reason: the one call written to contain a per-package failure
+    must not be the one that cancels the group. It is collected and `corroborate_stage` raises
+    `StageRecordError` after every other package has recorded itself.
     """
     # One element rather than a return value, because the phase has to survive the exception
     # that ends the call.
@@ -1022,15 +1063,20 @@ async def _corroborate_and_store(
         raise
     except Exception as exc:
         logger.exception("corroboration failed for %s", package)
-        async with ctx.session_factory() as session, session.begin():
-            await record_failure(
-                session,
-                package,
-                description=description,
-                status=phase[0],
-                reason=f"{type(exc).__name__}: {exc}",
-                at=datetime.now(UTC),
-            )
+        try:
+            async with ctx.session_factory() as session, session.begin():
+                await record_failure(
+                    session,
+                    package,
+                    description=description,
+                    status=phase[0],
+                    reason=f"{type(exc).__name__}: {exc}",
+                    at=datetime.now(UTC),
+                )
+        except Exception:
+            logger.exception("recording the failure of %s failed too", package)
+            unrecorded.append(package)
+            return
         counts[str(phase[0])] += 1
 
 
@@ -1177,6 +1223,9 @@ async def corroborate_stage(ctx: StageContext) -> None:
     )
     budget = _QueryBudget(settings.corroboration_max_queries_per_job)
     counts = {str(status): 0 for status in CorroborationStatus}
+    # See `_corroborate_and_store` and `StageRecordError`: a recovery write that fails is the
+    # job's problem, not the group's.
+    unrecorded: list[str] = []
     # A TaskGroup for `llm_stage`'s reason: the failures that reach this far are the ones that
     # abort the whole job (an empty balance, a rejected key), and `gather` would propagate the
     # first while leaving every sibling running against a dead account and writing rows through
@@ -1199,16 +1248,26 @@ async def corroborate_stage(ctx: StageContext) -> None:
                     settings=settings,
                     budget=budget,
                     counts=counts,
+                    unrecorded=unrecorded,
                 )
             )
     logger.info(
-        "job %s corroborate: %s over %d candidate(s), %d of %d search quer(ies) spent",
+        "job %s corroborate: %s over %d candidate(s), %d unrecorded, %d of %d search "
+        "quer(ies) spent",
         ctx.job_id,
         ", ".join(f"{status} {count}" for status, count in sorted(counts.items())),
         len(candidates),
+        len(unrecorded),
         budget.ceiling - budget.remaining,
         budget.ceiling,
     )
+    if unrecorded:
+        raise StageRecordError(
+            f"job {ctx.job_id} corroborate: {len(unrecorded)} of {len(candidates)} package(s) "
+            f"were searched or judged and could not be written, their own failure row "
+            f"included: {', '.join(sorted(unrecorded))}. Check the database is reachable and "
+            "writable, then re-run — the cached search rows mean the retry spends no quota."
+        )
 
 
 def pipeline_stage_handlers() -> dict[str, StageHandler]:

@@ -836,6 +836,100 @@ async def test_a_database_failure_on_one_package_never_cancels_the_others(
     assert "RuntimeError" in stored["com.example.notes"].parked_reason
 
 
+async def test_a_failed_recovery_write_costs_its_own_package_and_not_its_siblings(
+    db_env, classification_env, fake_api, db_session_factory, monkeypatch
+):
+    """The last hole in the boundary. The wrapper's fallback park is what turns any
+    per-package failure into that package's own row, and it ran with nothing around it: a
+    park that raised escaped `_classify_and_store` and cancelled every sibling — the exact
+    shape this repo has now shipped three times, reached through the one call written to
+    prevent it.
+
+    It stays job-level, because a database nothing can be written to is. What changes is the
+    blast radius: every sibling records its own answer first, and the stage raises once at the
+    end naming what it could not record.
+    """
+    failing = "com.example.alpha"
+    real_store = stages_module.store_classification
+    real_park = stages_module.park_package
+
+    async def store(session, classification, **kwargs):
+        if classification.package == failing:
+            raise RuntimeError("the write nobody predicted")
+        await real_store(session, classification, **kwargs)
+
+    async def park(session, package, **kwargs):
+        if package == failing:
+            raise RuntimeError("and the recovery write failed too")
+        await real_park(session, package, **kwargs)
+
+    monkeypatch.setattr(stages_module, "store_classification", store)
+    monkeypatch.setattr(stages_module, "park_package", park)
+    fake_api["responses"] = [httpx.Response(200, json=envelope(GOOD))]
+    job_id = await seed(db_session_factory, WIDE_CORPUS)
+
+    with pytest.raises(stages_module.StageRecordError, match=failing):
+        await llm_stage(context(job_id, db_session_factory))
+
+    stored = await rows(db_session_factory)
+    assert failing not in stored, "nothing could be written for it, which is why the job fails"
+    for package in WIDE_CANDIDATES:
+        if package == failing:
+            continue
+        assert stored[package].parked is False, f"{package} was cancelled by a sibling"
+        assert stored[package].description == GOOD["description"], package
+
+
+async def test_a_floor_that_rose_past_a_triage_edit_costs_neither_the_package_nor_the_group(
+    db_env, classification_env, fake_api, db_session_factory
+):
+    """The blocker end to end, through the two writers that produced it.
+
+    A reviewer rates a package `Recommended`. A second device then observes it
+    `coreApp="true"`, so the floor becomes `Unsafe` and the bundle changes — which is also
+    what makes the package a candidate again, so the two preconditions arrive together rather
+    than independently. The model answers at the new floor. That write used to be refused for
+    carrying the stale human rating, the fallback park refused for the same reason, and the
+    raise took every sibling in the group down with it.
+    """
+    fake_api["responses"] = [httpx.Response(200, json=envelope(GOOD))]
+    job_id = await seed(db_session_factory, WIDE_CORPUS)
+    await llm_stage(context(job_id, db_session_factory))
+
+    edited = "com.example.notes"
+    async with db_session_factory() as session, session.begin():
+        row = await session.get(PackageClassification, edited)
+        row.removal = "Recommended"
+        row.provenance = {**row.provenance, "removal": "human:triage"}
+    async with db_session_factory() as session, session.begin():
+        analysis = await session.get(PackageAnalysis, edited)
+        analysis.floor = "Unsafe"
+        await store_device_facts(
+            session,
+            device_key="google:emulator-a16",
+            build="android-36.1",
+            facts=[make_facts(edited, core_app=True)],
+            observed_at=NOW,
+        )
+
+    fake_api["responses"] = [httpx.Response(200, json=envelope(dict(GOOD, removal="Unsafe")))]
+    async with db_session_factory() as session, session.begin():
+        job = await jobs_module.create_job(
+            session, kind=JobKind.CLASSIFICATION.value, params={"reclassify": True}
+        )
+        rerun_id = job.id
+
+    await llm_stage(context(rerun_id, db_session_factory))  # returns normally
+
+    stored = await rows(db_session_factory)
+    assert sorted(stored) == WIDE_CANDIDATES, "every sibling still reached a row"
+    row = stored[edited]
+    assert row.parked is False
+    assert row.removal == "Unsafe", "the answer at the new floor is the one that stands"
+    assert row.provenance["removal"].startswith("llm:")
+    assert row.provenance["removal_superseded"].startswith("rule:floor superseded human:triage")
+
+
 async def test_an_account_level_failure_on_one_package_still_aborts_the_whole_job(
     db_env, classification_env, fake_api, db_session_factory
 ):

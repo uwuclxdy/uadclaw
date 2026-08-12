@@ -505,6 +505,50 @@ async def test_an_account_level_deepseek_failure_still_aborts_the_whole_job(
     assert await rows(db_session_factory) == {}, "no package was recorded as its own failure"
 
 
+async def test_a_failed_recovery_write_costs_its_own_package_and_not_its_siblings(
+    db_env, corroboration_env, fake_apis, db_session_factory, monkeypatch
+):
+    """The same hole as `llm_stage`'s, in the same shape, closed the same way.
+
+    `record_failure` is the call that turns any per-package failure into that package's own
+    row, and it ran with nothing around it inside a `TaskGroup`: a recovery write that raised
+    cancelled every sibling, judge calls already paid for included, to report a failure that
+    belonged to one package. It stays job-level and it stops being group-level.
+    """
+    packages = {
+        f"com.example.p{index}": f"Package {index} does a thing worth describing."
+        for index in range(1, 5)
+    }
+    poisoned = "com.example.p2"
+    real_record = stages_module.record_failure
+
+    async def judge_one(client, *, package, **kwargs):
+        if package == poisoned:
+            raise RuntimeError("the judge phase blew up in a way nobody predicted")
+        return await real_judge(client, package=package, **kwargs)
+
+    async def record(session, package, **kwargs):
+        if package == poisoned:
+            raise RuntimeError("and the recovery write failed too")
+        await real_record(session, package, **kwargs)
+
+    real_judge = stages_module._judge_one
+    monkeypatch.setattr(stages_module, "_judge_one", judge_one)
+    monkeypatch.setattr(stages_module, "record_failure", record)
+    fake_apis["judge"] = verdict_response("corroborated")
+    job_id = await seed(db_session_factory, packages)
+
+    with pytest.raises(stages_module.StageRecordError, match=poisoned):
+        await corroborate_stage(context(job_id, db_session_factory))
+
+    stored = await rows(db_session_factory)
+    assert poisoned not in stored, "nothing could be written for it, which is why the job fails"
+    for package in packages:
+        if package == poisoned:
+            continue
+        assert stored[package].status == str(CorroborationStatus.CORROBORATED), package
+
+
 async def test_a_paid_search_reaches_the_database_whatever_the_fetch_phase_does(
     db_env, corroboration_env, fake_apis, db_session_factory, monkeypatch
 ):

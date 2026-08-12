@@ -213,11 +213,19 @@ async def test_a_floor_this_code_cannot_read_is_refused(db_env, db_session_facto
 # --- the park path ----------------------------------------------------------------------------
 
 
-async def test_a_park_that_carries_a_human_rating_below_the_floor_is_refused(
+async def test_a_park_never_carries_a_human_rating_the_floor_has_overtaken(
     db_env, db_session_factory
 ):
     """`park_package` preserves a human-owned field across a park against new evidence, so
-    it is a writer of `removal` too and passes the same seam."""
+    it is a writer of `removal` too and passes the same seam.
+
+    It used to REFUSE here, and that reading was the defect: the rating is unstorable, so
+    refusing the park meant refusing every write of this row forever — including the fallback
+    park `_classify_and_store` reaches for when the proposal write fails, whose raise then
+    escaped its `TaskGroup` and cancelled every sibling package. The floor still holds. What
+    changed is that the stale human value is dropped rather than carried into a write that
+    cannot land.
+    """
     await seed_floor(db_session_factory, "Recommended")
     await store(
         db_session_factory,
@@ -231,24 +239,109 @@ async def test_a_park_that_carries_a_human_rating_below_the_floor_is_refused(
         assert analysis is not None
         analysis.floor = "Unsafe"
 
-    with pytest.raises(BelowFloorError):
-        async with db_session_factory() as session, session.begin():
-            await park_package(
-                session,
-                PACKAGE,
-                bundle_sha256="c" * 64,
-                model=MODEL,
-                thinking=True,
-                reason="removal: answered below the floor three times",
-                usage={},
-                attempts=3,
-                at=NOW,
-            )
+    async with db_session_factory() as session, session.begin():
+        await park_package(
+            session,
+            PACKAGE,
+            bundle_sha256="c" * 64,
+            model=MODEL,
+            thinking=True,
+            reason="removal: answered below the floor three times",
+            usage={},
+            attempts=3,
+            at=NOW,
+        )
 
     row = await stored_row(db_session_factory)
     assert row is not None
-    assert row.parked is False
-    assert row.bundle_sha256 == BUNDLE
+    assert row.parked is True
+    assert row.bundle_sha256 == "c" * 64
+    assert row.removal is None, "the rating the floor overtook is gone, never stored below it"
+    assert row.provenance["removal_superseded"] == "rule:floor superseded human:triage Recommended"
+
+
+async def test_a_floor_that_rises_past_a_human_rating_still_takes_a_valid_model_answer(
+    db_env, db_session_factory
+):
+    """The blocker, at the seam that produced it.
+
+    A `human:` removal is preserved into the values dict of every later write and carries its
+    provenance with it, so the gate read a MODEL write as the human's and ranked the preserved
+    value rather than the answer offered. Once the floor rose past the stored human rating,
+    a correct answer AT the new floor was refused and the error named the old human value.
+    """
+    await seed_floor(db_session_factory, "Recommended")
+    await store(
+        db_session_factory,
+        proposal(removal=Removal.RECOMMENDED, owner="human:triage", bundle_sha256="a" * 64),
+    )
+
+    async with db_session_factory() as session, session.begin():
+        analysis = await session.get(PackageAnalysis, PACKAGE)
+        assert analysis is not None
+        analysis.floor = "Unsafe"
+
+    await store(
+        db_session_factory,
+        proposal(removal=Removal.UNSAFE, bundle_sha256="c" * 64),
+    )
+
+    row = await stored_row(db_session_factory)
+    assert row is not None
+    assert row.removal == "Unsafe"
+    assert row.provenance["removal"] == f"llm:{MODEL}", "the value written owns its provenance"
+
+
+async def test_a_superseded_human_rating_is_recorded_rather_than_dropped_quietly(
+    db_env, db_session_factory, caplog
+):
+    """Dropping it is the only reading that keeps the row writable, so what the reviewer is
+    owed is being told. A warning is what an operator greps; the provenance entry is what the
+    next reviewer reads off the card, and they are the person whose edit went."""
+    await seed_floor(db_session_factory, "Recommended")
+    await store(
+        db_session_factory,
+        proposal(removal=Removal.RECOMMENDED, owner="human:triage", bundle_sha256="a" * 64),
+    )
+    async with db_session_factory() as session, session.begin():
+        analysis = await session.get(PackageAnalysis, PACKAGE)
+        assert analysis is not None
+        analysis.floor = "Expert"
+
+    with caplog.at_level("WARNING", logger="uadclaw.classifystore"):
+        await store(db_session_factory, proposal(removal=Removal.EXPERT, bundle_sha256="c" * 64))
+
+    row = await stored_row(db_session_factory)
+    assert row is not None
+    assert row.provenance["removal_superseded"] == "rule:floor superseded human:triage Recommended"
+    assert any(
+        PACKAGE in record.getMessage() and "superseded" in record.getMessage()
+        for record in caplog.records
+    ), "the drop reaches the log as well as the row"
+
+
+async def test_a_human_rating_the_floor_has_not_overtaken_is_still_preserved(
+    db_env, db_session_factory
+):
+    """The positive leg, and the control for the three above: without it they are all
+    satisfied by a `_preserved` that carries nothing at all, which is the other way to make
+    a stale value stop refusing writes and it erases every triage edit ever made."""
+    await seed_floor(db_session_factory, "Recommended")
+    await store(
+        db_session_factory,
+        proposal(removal=Removal.EXPERT, owner="human:triage", bundle_sha256="a" * 64),
+    )
+
+    await store(
+        db_session_factory,
+        proposal(removal=Removal.ADVANCED, bundle_sha256="c" * 64),
+    )
+
+    row = await stored_row(db_session_factory)
+    assert row is not None
+    assert row.removal == "Expert", "the model's Advanced must not walk over the human's Expert"
+    assert row.provenance["removal"] == "human:triage"
+    assert "removal_superseded" not in row.provenance
 
 
 async def test_a_park_with_nothing_to_preserve_still_lands(db_env, db_session_factory):

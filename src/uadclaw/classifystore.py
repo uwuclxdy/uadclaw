@@ -18,6 +18,11 @@ Two properties this module owes the rest of the pipeline:
   one the next caller forgets — and triage is that next caller: it writes `human:` ratings
   into these columns with no `classify.validate_response` anywhere in its path. It refuses
   rather than clamps, for the reason `classify.py`'s docstring gives at length.
+- **Where those two collide, the floor wins and the loss is recorded.** The floor only rises,
+  so a `human:` rating can go stale with nobody editing anything. Preserving it then makes
+  every later write of that row refuse — the model's next answer, and the fallback park for
+  the same package — so the package can never be classified again. `_preserved` drops a human
+  `removal` the gate would refuse and `_apply_superseded` writes down that it did.
 """
 
 import logging
@@ -60,6 +65,18 @@ HUMAN_PREFIX = "human:"
 # The dashboard is single-user by construction (`auth.py`), so the surface is the only
 # identity there is to record. A username here would be one this app never asked for.
 HUMAN_TRIAGE = f"{HUMAN_PREFIX}triage"
+
+# How a human value the floor has overtaken is recorded on the row it left. A provenance key
+# rather than a column: the map is already what says who owns each field, the card already
+# renders it, and no migration buys a fact that is true of one row for one re-run. The value
+# is `rule:`-owned on purpose — `_preserved` keeps only `human:` entries, so the mark expires
+# with the supersession instead of outliving it and describing a row it no longer fits.
+SUPERSEDED_SUFFIX = "_superseded"
+SUPERSEDED_BY = "rule:floor superseded"
+
+# Every spelling of a removal tier a stored floor may legally read. Compared as strings, never
+# ranked as strings: `danger_rank` is what orders them (see `_floor_refusal`).
+FLOOR_TIERS: frozenset[str] = frozenset(str(removal) for removal in Removal)
 
 # What a triage edit may change, keyed by the UPSTREAM field name the form and the provenance
 # map both speak, valued by the column it lands in. Deliberately not every column: `attempts`,
@@ -176,31 +193,82 @@ def select_candidates(
     return wanted
 
 
-def _preserved(existing: PackageClassification | None) -> dict[str, Any]:
-    """Field values on an existing row that a re-run must not overwrite.
+async def _preserved(
+    session: AsyncSession, existing: PackageClassification | None
+) -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
+    """Field values on an existing row that a re-run must not overwrite, and the human-owned
+    ones it could not carry.
 
     A field whose recorded provenance starts with `human:` was set in triage, and the whole
     point of tagging provenance is that a bad model run can be re-run without walking over
     it. Everything else is the model's and is replaced.
+
+    **A preserved value the floor gate would refuse is not preserved.** The floor only rises,
+    so a `human:` removal stored under a lower floor goes stale with nobody touching it — and
+    carrying it into the next write is what made `_refuse_below_floor` read that write as the
+    human's and rank the preserved value rather than the answer offered. A correct model
+    answer AT the new floor was then refused, naming the old human value; the fallback park
+    for the same package restored the same rating and refused too, and that raise escaped its
+    `TaskGroup` and cancelled every sibling package in the job.
+
+    The two rules this module owes collide on exactly that row, and the floor is the one that
+    holds: it is the safety invariant, and "a human field survives a re-run" cannot be honoured
+    by storing a value this same module refuses. What is given up is the human's `removal` on
+    that one row — never their description, list or confidence, none of which the floor
+    constrains — and it is recorded rather than dropped quietly, by `_apply_superseded`.
+
+    Returns `(keep, superseded)`, the second keyed by the provenance field with
+    `(what to write on the row, why it could not be carried)` beside it.
     """
     if existing is None:
-        return {}
+        return {}, {}
     provenance = existing.provenance or {}
     keep: dict[str, Any] = {}
+    superseded: dict[str, tuple[str, str]] = {}
     for column, field in HUMAN_OWNED_CANDIDATES:
         owner = provenance.get(field)
-        if isinstance(owner, str) and owner.startswith(HUMAN_PREFIX):
-            keep[column] = getattr(existing, column)
-            keep.setdefault("provenance", dict(provenance))
-    if "provenance" in keep:
+        if not (isinstance(owner, str) and owner.startswith(HUMAN_PREFIX)):
+            continue
+        value = getattr(existing, column)
+        if column == "removal" and value is not None:
+            refusal = await _floor_refusal(session, existing.package, str(value), owner)
+            if refusal is not None:
+                superseded[field] = (f"{SUPERSEDED_BY} {owner} {value}", refusal)
+                continue
+        keep[column] = value
+    if keep:
         # Only the human-owned entries survive in the map; the rest is rewritten by the
-        # caller's fresh provenance, or a stale model id would outlive the model.
+        # caller's fresh provenance, or a stale model id would outlive the model. A superseded
+        # field loses its entry along with its value: a `human:` provenance sitting over a
+        # value the human never wrote is worse than either half of it alone, and the next
+        # re-run would read it and preserve the model's answer as if a reviewer had set it.
         keep["provenance"] = {
             field: owner
             for field, owner in provenance.items()
-            if isinstance(owner, str) and owner.startswith(HUMAN_PREFIX)
+            if isinstance(owner, str) and owner.startswith(HUMAN_PREFIX) and field not in superseded
         }
-    return keep
+    return keep, superseded
+
+
+def _apply_superseded(package: str, superseded: Mapping[str, tuple[str, str]]) -> dict[str, str]:
+    """Record every human value a write could not carry: a warning for the log and a
+    `<field>_superseded` provenance entry for the card.
+
+    Called only by a writer that is actually replacing the field. A park against the SAME
+    bundle writes no proposal at all, so nothing there was superseded and nothing claims to
+    have been — the human's rating is still on the row it was always on.
+    """
+    marks: dict[str, str] = {}
+    for field, (mark, refusal) in superseded.items():
+        marks[f"{field}{SUPERSEDED_SUFFIX}"] = mark
+        logger.warning(
+            "%s: a human %s was superseded by the removal floor and is not carried into this "
+            "write. %s",
+            package,
+            field,
+            refusal,
+        )
+    return marks
 
 
 async def store_classification(
@@ -215,7 +283,7 @@ async def store_classification(
 ) -> None:
     """Write one accepted proposal, keeping any field a human owns."""
     existing = await session.get(PackageClassification, classification.package)
-    preserved = _preserved(existing)
+    preserved, superseded = await _preserved(session, existing)
     values: dict[str, Any] = {
         "package": classification.package,
         "created_at": at,
@@ -229,7 +297,11 @@ async def store_classification(
         "confidence": str(classification.confidence),
         "unknown_fields": list(classification.unknown_fields),
         "reasoning_brief": classification.reasoning_brief,
-        "provenance": {**dict(classification.provenance), **preserved.pop("provenance", {})},
+        "provenance": {
+            **dict(classification.provenance),
+            **preserved.pop("provenance", {}),
+            **_apply_superseded(classification.package, superseded),
+        },
         "usage": dict(usage),
         "attempts": attempts,
         "parked": False,
@@ -275,7 +347,7 @@ async def park_package(
     never the model's to discard.
     """
     existing = await session.get(PackageClassification, package)
-    preserved = _preserved(existing)
+    preserved, superseded = await _preserved(session, existing)
     values: dict[str, Any] = {
         "package": package,
         "created_at": at,
@@ -294,7 +366,10 @@ async def park_package(
         values["removal"] = None
         values["confidence"] = None
         values["reasoning_brief"] = None
-        values["provenance"] = preserved.pop("provenance", {})
+        values["provenance"] = {
+            **preserved.pop("provenance", {}),
+            **_apply_superseded(package, superseded),
+        }
         values["unknown_fields"] = []
         values.update(preserved)
     await _upsert(session, values)
@@ -397,8 +472,16 @@ async def store_human_edit(
     return changed
 
 
-async def _refuse_below_floor(session: AsyncSession, values: dict[str, Any]) -> None:
-    """Refuse a write whose `removal` ranks below the package's stored floor.
+async def _floor_refusal(
+    session: AsyncSession, package: str, proposed: str, owner: object
+) -> str | None:
+    """Why storing a `removal` of `proposed` under `owner` for `package` is refused, or None.
+
+    One spelling for the two callers that must agree. `_refuse_below_floor` raises whatever
+    this returns, and `_preserved` drops a value it refuses rather than carrying that value
+    into a write it would then make impossible — a preserved rating the gate refuses is not a
+    safety win, it is a row nothing can ever be written to again. Two spellings of the same
+    decision is how the two drifted apart in the first place.
 
     Ranked with `ladder.danger_rank`, never with `<` on the values: `Removal` is a `StrEnum`
     and `"Expert" < "Recommended"` is True lexicographically, which inverts the whole ladder
@@ -411,23 +494,19 @@ async def _refuse_below_floor(session: AsyncSession, values: dict[str, Any]) -> 
       corpus, and `llm_stage` recomputes rather than reading this column precisely because a
       stored floor can lag the corpus. Refusing here would reject a validated answer over a
       missing denormalised copy — a pipeline-order check wearing a safety check's clothes. It
-      is logged instead, naming the package: a gate that could not run did not pass.
+      is logged instead, naming the package: a gate that could not run did not pass. Only
+      `_refuse_below_floor` reaches this leg, because `_preserved` asks about `human:` values
+      alone, so the warning fires once per write rather than twice.
     - a `human:` rating has no upstream validator anywhere in its path, so a floor it cannot
       be checked against is the entire guarantee absent rather than a duplicate of one. That
       is refused.
     """
-    proposed = values.get("removal")
-    if proposed is None:
-        return
-    package = values["package"]
-    owner = (values.get("provenance") or {}).get("removal")
     human = isinstance(owner, str) and owner.startswith(HUMAN_PREFIX)
-
     analysis = await session.get(PackageAnalysis, package)
     stored = analysis.floor if analysis is not None else None
     if stored is None:
         if human:
-            raise BelowFloorError(
+            return (
                 f"{package}: refusing a {owner} removal of {proposed} because the package has "
                 "no computed floor. `package_analysis.floor` is NULL, which means the "
                 "rule_ladder stage has not run for this package — not that its floor is "
@@ -441,25 +520,37 @@ async def _refuse_below_floor(session: AsyncSession, values: dict[str, Any]) -> 
             package,
             proposed,
         )
-        return
+        return None
 
-    try:
-        floor = Removal(stored)
-    except ValueError as exc:
-        raise BelowFloorError(
+    if stored not in FLOOR_TIERS:
+        return (
             f"{package}: package_analysis.floor reads {stored!r}, which is not a removal "
             f"tier. A floor nothing can rank against clears nothing, so the write of "
             f"{proposed} is refused rather than allowed past an unreadable bound."
-        ) from exc
+        )
 
-    if danger_rank(Removal(proposed)) < danger_rank(floor):
-        raise BelowFloorError(
+    if danger_rank(Removal(proposed)) < danger_rank(Removal(stored)):
+        return (
             f"{package}: refusing to store removal {proposed} under a computed floor of "
-            f"{floor} (set by {analysis.floor_rule}). The floor is a lower bound that may be "
+            f"{stored} (set by {analysis.floor_rule}). The floor is a lower bound that may be "
             "raised and never lowered, and this is REFUSED rather than raised to the floor: "
             "an answer below it came from misreading the same evidence the description was "
             "written from, so correcting the number would keep the misreading and hide it."
         )
+    return None
+
+
+async def _refuse_below_floor(session: AsyncSession, values: dict[str, Any]) -> None:
+    """Refuse a write whose `removal` ranks below the package's stored floor. The one seam
+    every writer of that column passes; the decision itself is `_floor_refusal`."""
+    proposed = values.get("removal")
+    if proposed is None:
+        return
+    reason = await _floor_refusal(
+        session, values["package"], proposed, (values.get("provenance") or {}).get("removal")
+    )
+    if reason is not None:
+        raise BelowFloorError(reason)
 
 
 async def _upsert(session: AsyncSession, values: dict[str, Any]) -> None:
