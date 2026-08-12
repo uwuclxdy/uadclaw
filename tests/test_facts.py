@@ -141,6 +141,42 @@ def test_a_declared_label_beats_an_undeclared_one_whichever_device_carries_it():
     assert merge_observations(rows)["label"] == "Calculator"
 
 
+def test_the_icon_of_the_lowest_ordered_observation_wins():
+    """Two devices shipping different artwork for one package is a tie the merge has to break
+    the same way every time, or a re-scan changes the dashboard for no reason."""
+    rows = rows_for(
+        (make_facts("com.a", icon_bytes=b"zzz-icon", icon_mime="image/png"), "pixel:zzz", "B.2"),
+        (make_facts("com.a", icon_bytes=b"aaa-icon", icon_mime="image/webp"), "pixel:aaa", "A.1"),
+    )
+
+    merged = merge_observations(rows)
+
+    assert (merged["icon_bytes"], merged["icon_mime"]) == (b"aaa-icon", "image/webp")
+    assert merge_observations(list(reversed(rows))) == merged
+
+
+def test_a_device_that_shipped_no_icon_does_not_blank_one_that_did():
+    """Strict first-wins would let the alphabetically-first device decide there is no icon —
+    the same trap `label` names, and the reason both rules skip the silent observations."""
+    rows = rows_for(
+        (make_facts("com.a"), "pixel:aaa", "A.1"),
+        (make_facts("com.a", icon_bytes=b"icon", icon_mime="image/png"), "pixel:zzz", "B.2"),
+    )
+
+    merged = merge_observations(rows)
+
+    assert (merged["icon_bytes"], merged["icon_mime"]) == (b"icon", "image/png")
+
+
+def test_a_package_no_device_shipped_an_icon_for_merges_to_nothing():
+    """The majority case: 223 of the 312 APKs on the Pixel corpus declare no resolvable icon,
+    so the dashboard's monogram fallback is the designed path and not an error state."""
+    merged = merge_observations(rows_for((make_facts("com.a"), "pixel:aaa", "A.1")))
+
+    assert merged["icon_bytes"] is None
+    assert merged["icon_mime"] is None
+
+
 def test_first_seen_and_last_seen_span_the_observations():
     later = NOW + timedelta(days=30)
     rows = [
@@ -220,6 +256,40 @@ async def test_the_same_build_parsed_twice_yields_identical_facts(db_env, db_ses
     assert snapshots[0] == snapshots[1]
     assert snapshots[0][1] == 2, "a re-scan upserts its observations rather than adding more"
     assert [row["device_count"] for row in snapshots[0][0]] == [1, 1]
+
+
+async def test_an_icon_survives_the_round_trip_through_postgres(db_env, db_session_factory):
+    """The bytes cross a BYTEA column and a recompute, and the recompute is what would drop
+    them: it rebuilds the merged row from the observations rather than leaving the old one."""
+    await store(
+        db_session_factory,
+        "pixel:oriole",
+        "cp2a.260705.006.a1",
+        make_facts("com.example.app", icon_bytes=b"\x89PNG\r\n\x1a\nbody", icon_mime="image/png"),
+    )
+
+    fact = await merged_row(db_session_factory, "com.example.app")
+
+    assert fact.icon_bytes == b"\x89PNG\r\n\x1a\nbody"
+    assert fact.icon_mime == "image/png"
+
+
+async def test_a_rescan_replaces_the_icon_the_first_scan_stored(db_env, db_session_factory):
+    """A re-scan exists so a parser fix can land, and the icon renderer is the newest thing
+    that can learn to read a drawable it used to refuse. Same device, same build, same path:
+    the upsert's update set is the only thing deciding whether the new artwork arrives, and a
+    re-scan carrying identical values cannot tell that set from an empty one."""
+    await store(db_session_factory, "pixel:oriole", "A.1", make_facts("com.a"))
+    await store(
+        db_session_factory,
+        "pixel:oriole",
+        "A.1",
+        make_facts("com.a", icon_bytes=b"<svg/>", icon_mime="image/svg+xml"),
+    )
+
+    fact = await merged_row(db_session_factory, "com.a")
+
+    assert (fact.icon_bytes, fact.icon_mime) == (b"<svg/>", "image/svg+xml")
 
 
 async def test_a_second_signing_certificate_is_flagged_and_both_values_are_kept(

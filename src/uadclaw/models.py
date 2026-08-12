@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -307,6 +308,13 @@ class PackageObservation(Base):
     )
     intent_filters: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
 
+    # The launcher icon this device's copy of the package shipped, capped at 64 KB by
+    # `icons.MAX_ICON_BYTES`. It lives on the observation and not only on the merged row
+    # because the merge is RECOMPUTED from every observation: an icon written straight onto
+    # `package_facts` would be erased by the next re-scan of any device that ships the package.
+    icon_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    icon_mime: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     __table_args__ = (
         UniqueConstraint(
             "device_key", "build", "device_path", name="uq_package_observations_device_path"
@@ -385,6 +393,12 @@ class PackageFact(Base):
     conflicts: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
+
+    # What `GET /icons/{package}` serves. Merged with the same first-wins ordering the identity
+    # scalars use, except that an observation carrying no icon never hides one that does — the
+    # rule `label` already follows, for the same reason.
+    icon_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    icon_mime: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         Index("ix_package_facts_device_count", "device_count"),
