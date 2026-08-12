@@ -83,6 +83,17 @@ def test_the_icon_branch_encodes_a_package_name_that_would_otherwise_split_the_q
     assert "%26" in rendered
 
 
+def test_a_slash_in_a_package_name_never_spells_a_path_segment():
+    """A package name comes out of a downloaded APK's manifest, so it is not permitted to
+    spell its own path. Jinja's `urlencode` keeps `/` safe, which is right for a query string
+    and wrong here: the browser resolves `..` before the request is sent, so the link points
+    at something other than the record it sits on."""
+    macro = templates.env.get_template("partials/pkg_icon.html").module.pkg_icon
+    rendered = str(macro("../../secret", True))
+    assert "/icons/..%2F..%2Fsecret" in rendered
+    assert "/icons/../.." not in rendered
+
+
 def test_neither_branch_announces_the_name_a_second_time():
     """Every call site renders the package name as text beside the icon. Announcing it here
     too makes a screen reader read every queue row twice, on the one screen that exists to be
