@@ -147,9 +147,16 @@ def _joined(stmt: Select[Any]) -> Select[Any]:
 async def corpus_screen(request: Request):
     params = request.query_params
     q = (params.get("q") or "").strip()
-    floor_filter = params.get("floor") or ""
-    queued_filter = params.get("queued") or ""
-    upstream_filter = params.get("upstream") or ""
+    # Validated at the boundary rather than ignored inside `_apply_filters`. An unrecognised
+    # value used to fall through with no filter applied while the context still carried it, so
+    # the operator got the whole corpus, an active "clear filters" button and a select showing
+    # nothing selected — three parts of one screen disagreeing about whether a filter is on.
+    # Same helper the jobs screen uses, so the two answer this in one voice.
+    floor_filter, floor_warning = web.valid_filter(
+        params.get("floor") or "", (str(removal) for removal in Removal)
+    )
+    queued_filter, queued_warning = web.valid_filter(params.get("queued") or "", TRISTATE)
+    upstream_filter, upstream_warning = web.valid_filter(params.get("upstream") or "", TRISTATE)
 
     sort = params.get("sort") or DEFAULT_SORT
     if sort not in SORTS:
@@ -172,6 +179,7 @@ async def corpus_screen(request: Request):
         "dir": direction,
         "floors": [str(removal) for removal in Removal],
         "FLOOR_TAG_CLASS": FLOOR_TAG_CLASS,
+        "filter_warning": floor_warning or queued_warning or upstream_warning,
     }
     filters_active = bool(q or floor_filter or queued_filter or upstream_filter)
     context["filters_active"] = filters_active
@@ -203,14 +211,13 @@ async def corpus_screen(request: Request):
                 .limit(PAGE_SIZE)
             )
             result = (await session.execute(rows_stmt)).all()
-        except Exception:
-            # Broad on purpose, same reasoning as `app.py`'s health check: a DNS failure or a
-            # refused connection surfaces as a raw `OSError`/`socket.gaierror` out of asyncpg's
-            # own `connect()`, never wrapped into `sqlalchemy.exc.SQLAlchemyError` — that
-            # wrapping only happens once a connection already exists. Not re-raised: a query
-            # failure here must read as "could not load", never as an empty corpus, so it
-            # renders its own distinct state rather than a 500 the router decorates blank.
-            # Logged in full first — the traceback still exists somewhere.
+        except web.DB_UNREACHABLE:
+            # The shared tuple rather than a bare `Exception`, which is what this used to be:
+            # a bug inside `_apply_filters` would have reached the operator as "the database
+            # is not answering", which is a lie a screen tells and a health probe does not.
+            # Not re-raised: a reachability failure here must read as "could not load", never
+            # as an empty corpus, so it renders its own distinct state rather than a 500 the
+            # router decorates blank. Logged in full first.
             logger.exception("corpus list query failed")
             context["error"] = True
             return web.page(request, "corpus.html", context)
@@ -272,8 +279,8 @@ async def corpus_detail(request: Request, package: str):
         try:
             fact = await session.get(PackageFact, package)
             analysis = await session.get(PackageAnalysis, package)
-        except Exception:
-            # Same broad catch as the list view above, for the same reason.
+        except web.DB_UNREACHABLE:
+            # Same catch as the list view above, for the same reason.
             logger.exception("corpus detail query failed for %s", package)
             context["error"] = True
             return web.page(request, "corpus_detail.html", context)

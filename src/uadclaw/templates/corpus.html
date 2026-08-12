@@ -15,6 +15,13 @@
       <div class="callout-body">could not load the corpus. the database query failed; check the worker logs and try again.</div>
     </div>
   {% else %}
+    {% if filter_warning %}
+      {# A filter the URL made up. Said out loud, because the alternative is the whole corpus
+         behind a control claiming to narrow it. #}
+      <div class="callout callout-warning" role="status" style="margin-bottom:var(--space-4)">
+        <div class="callout-body">{{ filter_warning }}</div>
+      </div>
+    {% endif %}
     <div hx-boost="true">
       <form method="get" action="/corpus" style="display:flex;flex-wrap:wrap;gap:var(--space-3);align-items:flex-end;margin-bottom:var(--space-6)">
         <input type="hidden" name="sort" value="{{ sort }}">

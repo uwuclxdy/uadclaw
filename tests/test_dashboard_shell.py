@@ -8,6 +8,7 @@ allowed case passes is a test that would stay green if the rule allowed everythi
 """
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from uadclaw import web
 from uadclaw.auth import PUBLIC_PATHS, PUBLIC_PREFIXES, is_public, login_url, safe_next
@@ -238,6 +239,61 @@ async def test_every_screen_degrades_when_the_database_is_unreachable(client, it
     resp = await client.get(item.href, headers={"accept": "text/html"})
     assert resp.status_code == 200, f"{item.key} 500ed instead of degrading"
     assert "callout-danger" in resp.text, f"{item.key} hid the failure instead of showing it"
+
+
+@pytest.fixture
+async def wrong_password_client(db_env, monkeypatch):
+    """Host, port and database all real and routable, and only the credential wrong.
+
+    That is a mis-mounted secret, which is a real deployment shape and NOT the shape the DNS
+    test above reaches: `asyncpg.InvalidPasswordError` is a `PostgresError` and not an
+    `OSError`, so every screen catching only `(SQLAlchemyError, OSError)` raised here while
+    the DNS case had them all passing.
+    """
+    monkeypatch.setenv("POSTGRES_PASSWORD", "not-the-password")
+    from uadclaw.app import create_app
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        await ac.post("/login", json={"password": PASSWORD})
+        yield ac
+
+
+@pytest.mark.parametrize("item", web.NAV_ITEMS)
+async def test_every_screen_degrades_on_a_wrong_password_too(wrong_password_client, item):
+    resp = await wrong_password_client.get(item.href, headers={"accept": "text/html"})
+    assert resp.status_code == 200, f"{item.key} raised instead of degrading"
+    assert "callout-danger" in resp.text, f"{item.key} hid the failure"
+
+
+@pytest.mark.parametrize(
+    "path", ["/jobs/list/rows", "/jobs/00000000-0000-0000-0000-000000000000/detail"]
+)
+async def test_the_polled_fragments_degrade_on_a_wrong_password(wrong_password_client, path):
+    """The fragments matter more than the pages: htmx swaps neither a 4xx nor a 5xx, so a
+    raising fragment leaves the region it owns showing stale content and no error at all."""
+    resp = await wrong_password_client.get(path, headers={"accept": "text/html"})
+    assert resp.status_code == 200, f"{path} raised instead of degrading"
+
+
+@pytest.mark.parametrize(
+    ("path", "data"),
+    [
+        ("/triage/decide", {"package": "com.x", "action": "approve", "view": "queue"}),
+        ("/triage/edit", {"package": "com.x", "removal": "Expert", "view": "queue"}),
+        ("/jobs/launch/firmware", {"driver": "pixel", "device": "comet"}),
+        ("/jobs/launch/classification", {"limit": "1"}),
+    ],
+)
+async def test_every_write_endpoint_answers_something_the_operator_can_see(
+    wrong_password_client, path, data
+):
+    """Every write path 500'd under a dead database, and for the two htmx posts that is worse
+    than an error page: htmx 2.0.10 does not swap a 5xx, so the approve button disabled
+    itself, got nothing back, and the reviewer's verdict vanished with no message at all."""
+    resp = await wrong_password_client.post(path, data=data, headers={"HX-Request": "true"})
+    assert resp.status_code < 500, f"{path} 500ed; htmx will not swap it, so the button is a no-op"
+    assert "callout-danger" in resp.text, f"{path} answered without saying anything went wrong"
 
 
 async def test_the_shell_marks_the_screen_you_are_on(client):

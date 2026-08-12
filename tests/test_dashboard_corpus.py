@@ -6,6 +6,8 @@ danger-rank ordering, and ILIKE substring search all need real query behavior, n
 corpus that test sees; nothing here depends on what the app's own `uadclaw` database holds.
 """
 
+import pytest
+
 from conftest import utcnow
 from uadclaw.models import PackageAnalysis, PackageFact
 from uadclaw.views import corpus as corpus_view
@@ -114,6 +116,57 @@ async def test_filtering_to_nothing_offers_a_way_back_rather_than_a_bare_no_resu
     assert resp.status_code == 200
     assert "no packages match these filters" in resp.text
     assert "clear filters" in resp.text
+
+
+@pytest.mark.parametrize(
+    ("query", "value"),
+    [
+        ("floor", "Extremely Unsafe"),
+        ("queued", "maybe"),
+        ("upstream", "sometimes"),
+    ],
+)
+async def test_a_filter_value_nobody_defined_says_so_instead_of_going_quiet(
+    db_env, db_session_factory, client, query, value
+):
+    """An unrecognised value fell through with no filter applied while the context still
+    carried it, so the operator got the WHOLE corpus, a "clear filters" button, and a select
+    showing nothing selected — three things that disagree about whether a filter is on.
+
+    The jobs screen already answers this shape with a warning; this is the same answer, out
+    of the same helper. The value is dropped as well as reported, so `filters_active` and the
+    select agree with the rows.
+    """
+    await _seed(db_session_factory, _fact("com.example.only"), _analysis("com.example.only"))
+    await _login(client)
+
+    resp = await client.get(f"/corpus?{query}={value}")
+
+    assert resp.status_code == 200
+    assert "ignored the unknown filter value" in resp.text
+    assert "com.example.only" in resp.text, "the whole corpus is what an ignored filter shows"
+    assert ">clear<" not in resp.text, "…so nothing claims a filter is active"
+
+
+async def test_a_filter_value_that_is_defined_still_narrows_and_warns_about_nothing(
+    db_env, db_session_factory, client
+):
+    """The positive leg. Without it the test above passes for a screen that ignores every
+    filter it is given."""
+    await _seed(
+        db_session_factory,
+        _fact("com.example.queued"),
+        _analysis("com.example.queued", queued=True),
+        _fact("com.example.dropped"),
+        _analysis("com.example.dropped", queued=False),
+    )
+    await _login(client)
+
+    resp = await client.get("/corpus?queued=true")
+
+    assert "ignored the unknown filter value" not in resp.text
+    assert "com.example.queued" in resp.text
+    assert "com.example.dropped" not in resp.text
 
 
 # --- error state, distinct from empty --------------------------------------------------------

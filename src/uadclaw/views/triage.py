@@ -26,10 +26,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-import asyncpg
 from fastapi import APIRouter, Form, Request, Response, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy.exc import SQLAlchemyError
 
 from uadclaw import triagestore, web
 from uadclaw.classifystore import BelowFloorError
@@ -152,18 +150,13 @@ async def _board(
                 if selected
                 else None
             )
-    except (SQLAlchemyError, OSError, asyncpg.PostgresError):
+    except web.DB_UNREACHABLE:
         # The read failed rather than settling empty, and those are different screens: an
         # empty state rendered from a failed read tells the reviewer their queue is done. The
-        # traceback goes to the log; what reaches the screen is what to do about it.
-        #
-        # Three classes rather than one, and the third was measured rather than guessed: a
-        # wrong password raises `asyncpg.InvalidPasswordError`, which is a `PostgresError` and
-        # NOT a `SQLAlchemyError`, so it escaped this handler and 500'd the screen — the exact
-        # shape a wrongly-mounted secret produces in production. `OSError` is the refused
-        # connection and the DNS failure. Deliberately not a bare `Exception`: a bug in the
-        # store would then reach the reviewer as "the database is not answering", which is a
-        # lie a screen tells and a health probe does not.
+        # traceback goes to the log; what reaches the screen is what to do about it. Which
+        # exception classes count as "not answering", and why each was measured, is
+        # `web.DB_UNREACHABLE`'s — this screen's answer was the one the other three drifted
+        # away from, so it is the one that moved to the shared seam.
         logger.exception("triage: the queue could not be read")
         return Board(
             view=view,
@@ -171,7 +164,7 @@ async def _board(
             counts=dict.fromkeys(VIEWS, 0),
             candidate=None,
             state="error",
-            error="the queue could not be read. the database is not answering; check it is up.",
+            error=f"the queue could not be read. {web.DB_UNREACHABLE_MESSAGE}",
             upstream_error=upstream_error,
         )
 
@@ -292,6 +285,20 @@ async def decide(
         )
     except TriageError as exc:
         return _render(request, await _board(view=view, package=package, error=str(exc)))
+    except web.DB_UNREACHABLE:
+        # A verdict is the one thing this screen exists to record, so a failure to record it
+        # has to be visible. htmx swaps neither a 4xx nor a 5xx, so a 500 here disabled the
+        # button, swapped nothing, and the reviewer's verdict vanished with no message at all
+        # — the silent failure, wearing a correct status code.
+        logger.exception("triage: recording a %s for %s failed", action, package)
+        return _render(
+            request,
+            await _board(
+                view=view,
+                package=package,
+                error=f"nothing was recorded. {web.DB_UNREACHABLE_MESSAGE}",
+            ),
+        )
 
     stay = action in triagestore.OPEN_ACTIONS
     undo = None if stay else package
@@ -341,6 +348,20 @@ async def edit(
         return _render(
             request,
             await _board(view=view, package=package, error=str(exc), edit_open=True),
+        )
+    except web.DB_UNREACHABLE:
+        # Same reason as `decide` above, plus one of its own: the form is still open and the
+        # reviewer's typing is still in it, so the edit is retryable the moment the database
+        # answers. A 500 would have thrown the text away along with the message.
+        logger.exception("triage: applying an edit to %s failed", package)
+        return _render(
+            request,
+            await _board(
+                view=view,
+                package=package,
+                error=f"the edit was not saved. {web.DB_UNREACHABLE_MESSAGE}",
+                edit_open=True,
+            ),
         )
 
     if web.is_htmx(request):

@@ -12,16 +12,42 @@ text come off the open web. `select_autoescape` is on for `.html` in this module
 else, so a future template directory cannot quietly opt out of it.
 """
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import asyncpg
 from fastapi import Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
+from sqlalchemy.exc import SQLAlchemyError
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
+
+# Every way "the database is not answering" reaches a view, in one tuple because four screens
+# each spelling their own is what let them drift into three different answers to one question.
+#
+# All three were measured, not guessed. A wrong password raises
+# `asyncpg.exceptions.InvalidPasswordError`, which is a `PostgresError` and NOT a
+# `SQLAlchemyError` — SQLAlchemy only wraps what happens once a connection exists — so it
+# escaped the two-class handlers and 500'd, which is exactly the shape a wrongly-mounted
+# secret produces in production. An unresolvable host raises a bare `socket.gaierror` and a
+# refused or timed-out connection an `OSError`; `TimeoutError` is an `OSError` too, which is
+# what `db.py`'s connect timeout surfaces as.
+#
+# Deliberately not a bare `Exception`: a bug inside a store or a stats aggregate would then
+# reach the operator as "the database is not answering", which is a lie a screen tells and a
+# health probe does not.
+DB_UNREACHABLE: tuple[type[BaseException], ...] = (SQLAlchemyError, OSError, asyncpg.PostgresError)
+
+# What the screen says when one of those is caught. One sentence for every screen: they were
+# all answering the same question and none of them was answering it differently on purpose.
+DB_UNREACHABLE_MESSAGE = (
+    "the database is not answering, so this could not be read. nothing was lost; /health "
+    "reports whether it is up."
+)
 
 # The vendored htmx build, pinned by filename so a cached page can never be served a
 # different library than the one it was tested against. Verified 2026-08-12 against the npm
@@ -73,6 +99,20 @@ def is_htmx(request: Request) -> bool:
     ignore it and stay correct either way.
     """
     return request.headers.get("HX-Request", "").lower() == "true"
+
+
+def valid_filter(raw: str, allowed: Iterable[str]) -> tuple[str, str]:
+    """A filter value off the query string and a warning for one the URL made up.
+
+    An unknown value falls back to "everything" rather than to an empty table, which would
+    read as "no rows like that exist", and rather than to a silently unapplied filter, which
+    shows the whole set behind a control claiming to narrow it. Shared because both list
+    screens have the shape and only one of them was answering it.
+    """
+    value = raw.strip()
+    if not value or value in set(allowed):
+        return value, ""
+    return "", f"ignored the unknown filter value {value!r} and listed everything instead."
 
 
 def page(

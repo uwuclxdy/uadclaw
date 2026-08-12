@@ -47,13 +47,13 @@ async def telemetry_screen(request: Request):
     async with session_factory() as session:
         try:
             stats = await compute_stats(session, lookback_seconds=settings.stats_lookback_seconds)
-        except Exception:
-            # Broad on purpose, same reasoning as `app.py`'s health check: a DNS failure or a
-            # refused connection surfaces as a raw `OSError`/`socket.gaierror` out of asyncpg's
-            # own `connect()`, never wrapped into `sqlalchemy.exc.SQLAlchemyError` — that
-            # wrapping only happens once a connection already exists. Not re-raised: on the
-            # auto-refreshing fragment this has to render as its own state, not vanish into an
-            # unhandled 500 the poll loop cannot recover from. Logged in full first.
+        except web.DB_UNREACHABLE:
+            # The shared tuple rather than a bare `Exception`, which is what this used to be:
+            # a bug inside `compute_stats` would have reached the operator as "the database is
+            # not answering", and the whole point of an error state is that it says what to do
+            # next. Not re-raised: on the auto-refreshing fragment a failure has to render as
+            # its own state rather than vanish into a 500 the poll loop cannot recover from.
+            # Logged in full first.
             logger.exception("telemetry stats query failed")
             context["error"] = True
 

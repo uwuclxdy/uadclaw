@@ -39,7 +39,6 @@ from typing import Any
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from uadclaw import firmware, web
@@ -294,15 +293,6 @@ async def load_device_index(driver_name: str, settings: Settings) -> tuple[dict[
 # --- context ------------------------------------------------------------------------------
 
 
-def _valid_filter(raw: str, allowed: Iterable[str]) -> tuple[str, str]:
-    """The filter value and a warning for one the URL made up. An unknown value falls back to
-    "everything" rather than an empty table, which would read as "no jobs like that exist"."""
-    value = raw.strip()
-    if not value or value in set(allowed):
-        return value, ""
-    return "", f"ignored the unknown filter value {value!r} and listed every job instead."
-
-
 async def _lease_view(session: AsyncSession) -> dict[str, Any] | None:
     """The single-occupant scratch lease, or None while nothing holds it. `scratch_lease` is
     a singleton table (its own CHECK constraint pins the id), so the one row is the lease."""
@@ -395,12 +385,11 @@ async def _screen_context(
             )
             context["lease"] = await _lease_view(session)
             context["db_error"] = False
-    except (SQLAlchemyError, OSError):
-        # Both, because SQLAlchemy does not wrap every reachability failure: measured here, an
-        # unresolvable POSTGRES_HOST escapes as a bare `socket.gaierror`. The launch controls
-        # and the driver postures do not need the database, so one dead query must not take
-        # the whole screen down with it. Logged with its traceback, never swallowed. `/health`
-        # already answers "is the database reachable" and this screen points at it.
+    except web.DB_UNREACHABLE:
+        # `web.DB_UNREACHABLE` carries which classes and why they were measured. What is
+        # local to this screen: the launch controls and the driver postures need no database,
+        # so one dead query must not take the whole screen down with it. Logged with its
+        # traceback, never swallowed, and `/health` answers "is it up" for the operator.
         logger.exception("reading the run list failed")
         context = _unreadable_list(state_filter, kind_filter)
     values = _blank_form_values() | (form_values or {})
@@ -448,8 +437,8 @@ def _device_context(
 async def jobs_screen(request: Request, state: str = "", kind: str = "") -> Response:
     """The screen. Renders from the database only: no driver is contacted here, whatever is
     selected."""
-    state_filter, state_warning = _valid_filter(state, (str(s) for s in JobState))
-    kind_filter, kind_warning = _valid_filter(kind, (str(k) for k in JobKind))
+    state_filter, state_warning = web.valid_filter(state, (str(s) for s in JobState))
+    kind_filter, kind_warning = web.valid_filter(kind, (str(k) for k in JobKind))
     context = await _screen_context(
         state_filter=state_filter,
         kind_filter=kind_filter,
@@ -461,15 +450,15 @@ async def jobs_screen(request: Request, state: str = "", kind: str = "") -> Resp
 @router.get("/jobs/list/rows")
 async def jobs_rows(request: Request, state: str = "", kind: str = "") -> Response:
     """The list fragment the page polls while anything in it is still live."""
-    state_filter, _ = _valid_filter(state, (str(s) for s in JobState))
-    kind_filter, _ = _valid_filter(kind, (str(k) for k in JobKind))
+    state_filter, _ = web.valid_filter(state, (str(s) for s in JobState))
+    kind_filter, _ = web.valid_filter(kind, (str(k) for k in JobKind))
     session_factory = get_session_factory()
     try:
         async with session_factory() as session:
             context = await _list_context(
                 session, state_filter=state_filter, kind_filter=kind_filter
             )
-    except (SQLAlchemyError, OSError):
+    except web.DB_UNREACHABLE:
         logger.exception("reading the run list failed")
         return web.partial(
             request,
@@ -527,6 +516,28 @@ def _packages(raw: str) -> list[str]:
     return [name for name in raw.replace(",", " ").split() if name]
 
 
+async def _unqueued(
+    request: Request, kind: str, values: dict[str, str], *, selected_driver: str = ""
+) -> Response:
+    """The screen again, saying the run was not queued, at 200.
+
+    200 rather than 422 or 503, and rendered rather than raised: the operator's input was
+    fine, the database was not, and a 5xx would leave them looking at an unstyled error page
+    having lost everything they typed. `_screen_context` renders its own unreadable-list
+    state underneath, so the page is honest about both halves at once.
+    """
+    logger.exception("queueing a %s job failed", kind)
+    context = await _screen_context(
+        selected_driver=selected_driver,
+        form_error={
+            "title": f"the {kind} run was not queued",
+            "detail": web.DB_UNREACHABLE_MESSAGE,
+        },
+        form_values=values,
+    )
+    return web.page(request, "jobs.html", context)
+
+
 async def _create(kind: JobKind, params: dict[str, Any]) -> uuid.UUID:
     session_factory = get_session_factory()
     async with session_factory() as session, session.begin():
@@ -565,6 +576,8 @@ async def launch_firmware(request: Request) -> Response:
         return web.page(
             request, "jobs.html", context, status_code=status.HTTP_422_UNPROCESSABLE_CONTENT
         )
+    except web.DB_UNREACHABLE:
+        return await _unqueued(request, "firmware", values, selected_driver=values["driver"])
     return RedirectResponse(f"/jobs/{job_id}/detail", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -595,6 +608,8 @@ async def launch_classification(request: Request) -> Response:
         return web.page(
             request, "jobs.html", context, status_code=status.HTTP_422_UNPROCESSABLE_CONTENT
         )
+    except web.DB_UNREACHABLE:
+        return await _unqueued(request, "classification", values)
     return RedirectResponse(f"/jobs/{job_id}/detail", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -653,7 +668,7 @@ def _detail_shell(job_id: uuid.UUID) -> dict[str, Any]:
 async def job_detail(request: Request, job_id: uuid.UUID) -> Response:
     try:
         context = await _detail_context(job_id)
-    except (SQLAlchemyError, OSError):
+    except web.DB_UNREACHABLE:
         logger.exception("reading run %s failed", job_id)
         return web.page(request, "jobs_detail.html", _detail_shell(job_id) | {"panel_ok": False})
     if context is None:
@@ -673,7 +688,7 @@ async def job_detail_panel(request: Request, job_id: uuid.UUID) -> Response:
     """The detail fragment the page polls, and stops polling the moment the job is terminal."""
     try:
         context = await _detail_context(job_id)
-    except (SQLAlchemyError, OSError):
+    except web.DB_UNREACHABLE:
         logger.exception("reading run %s failed", job_id)
         return web.partial(
             request,
