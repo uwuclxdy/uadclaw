@@ -113,13 +113,13 @@ FILTER_VERDICT_EXPLANATION: dict[str, str] = {
 
 
 def _has_icon(fact: PackageFact) -> bool:
-    """`icon_bytes`/`icon_mime` land on `package_facts` in a sibling worktree of this same
-    round and are not on this branch's `PackageFact` yet. `getattr` with a default keeps this
-    screen's own gate green until that migration merges, and reads the real column exactly
-    the same way once it has. Delete the default and read `fact.icon_mime` directly once the
-    column lands — `test_the_icon_mime_getattr_fallback_is_still_needed` reds the moment it
-    does, which is the forcing function for that deletion."""
-    return getattr(fact, "icon_mime", None) is not None
+    """Whether this package has artwork to show, rather than the chip that stands in for it.
+
+    Keyed on the mime and not on the bytes because that is the predicate all three screens
+    chose independently, and `models.py` now carries a CHECK making the pair inseparable, so
+    the two spellings cannot disagree about a row.
+    """
+    return fact.icon_mime is not None
 
 
 # The letters/colour derivation used to live here and in the triage lane, disagreeing on the
