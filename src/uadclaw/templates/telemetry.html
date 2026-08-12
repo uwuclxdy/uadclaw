@@ -5,7 +5,19 @@
   <header style="margin-bottom:var(--space-8);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
     <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">uadclaw</div>
     <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em">telemetry</h2>
+    <p style="font-size:var(--text-base);color:var(--text-dim);max-width:540px;margin-top:var(--space-2)">
+      what the worker pool has been doing, so worker_pool_size can be tuned against real numbers instead of a guess.
+    </p>
   </header>
-  <div class="callout callout-info">not built yet.</div>
+  {# The refresh cadence is `telemetry.TELEMETRY_REFRESH_INTERVAL_SECONDS`, passed in as
+     `refresh_interval_seconds` — never hardcoded here, so one constant governs both the
+     interval and this attribute. `hx-get` (not boosted) targets this same route; the view's
+     `_wants_fragment` recognizes it and returns just this div's contents. #}
+  <div id="telemetry-content"
+       hx-get="/telemetry"
+       hx-trigger="every {{ refresh_interval_seconds }}s"
+       hx-swap="innerHTML">
+    {% include "partials/telemetry_content.html" %}
+  </div>
 </section>
 {% endblock %}

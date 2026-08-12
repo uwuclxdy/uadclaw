@@ -1,0 +1,88 @@
+{# The auto-refreshing body of the telemetry screen. Deliberately not extending base.html —
+   this is the fragment `telemetry.py` swaps in on the periodic poll, and it is included
+   directly by telemetry.html for the first render so the two never drift apart. #}
+{% if error is defined and error %}
+  <div class="callout callout-danger">
+    <div class="callout-body">could not load telemetry. the database query failed; check the worker logs and try again.</div>
+  </div>
+{% elif empty %}
+  <div class="callout callout-info">
+    <div class="callout-body">no job runs yet in the lookback window. queue a firmware or classification job to see utilization data here.</div>
+  </div>
+{% else %}
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:var(--space-4);margin-bottom:var(--space-8)">
+    <div class="stat-card">
+      <div class="stat-label">queue depth</div>
+      <div class="stat-value">{{ stats.queue_depth_now }}</div>
+      <div class="stat-delta">jobs waiting to claim, right now</div>
+    </div>
+    <div class="stat-card stat-highlight">
+      <div class="stat-label">scratch lease occupancy</div>
+      <div class="stat-value">{{ "%.1f"|format(stats.lease.occupancy_pct) }}%</div>
+      <div class="stat-delta">
+        {% if stats.lease.occupancy_pct > 80 %}
+          near-saturated — another firmware-analysis worker would mostly queue behind the same lease
+        {% else %}
+          share of the window a job held scratch
+        {% endif %}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">avg lease wait</div>
+      <div class="stat-value">{% if stats.lease.avg_wait_seconds is not none %}{{ "%.1f"|format(stats.lease.avg_wait_seconds) }}s{% else %}—{% endif %}</div>
+      <div class="stat-delta">{% if stats.lease.max_wait_seconds is not none %}max {{ "%.1f"|format(stats.lease.max_wait_seconds) }}s{% else %}no waits recorded{% endif %}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">active workers</div>
+      <div class="stat-value">{{ active_worker_count }}</div>
+      <div class="stat-delta">{% if stats.lease.current_holder_job_id %}holding lease: <code>{{ stats.lease.current_holder_job_id }}</code>{% else %}lease free{% endif %}</div>
+    </div>
+  </div>
+
+  <div class="label" style="margin-bottom:var(--space-3)">stage durations, last {{ "%.1f"|format(stats.window_seconds / 3600) }}h</div>
+  {% if stats.stage_durations %}
+  <div class="table-wrap" style="margin-bottom:var(--space-8)">
+    <table>
+      <thead>
+        <tr><th>stage</th><th class="num-col">completed</th><th class="num-col">avg</th><th class="num-col">max</th></tr>
+      </thead>
+      <tbody>
+        {% for s in stats.stage_durations %}
+        <tr>
+          <td class="table-name">{{ s.stage }}</td>
+          <td class="num-col">{{ s.completed_count }}</td>
+          <td class="num-col">{{ "%.1f"|format(s.avg_seconds) }}s</td>
+          <td class="num-col">{{ "%.1f"|format(s.max_seconds) }}s</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div style="color:var(--text-dim);font-size:var(--text-sm);margin-bottom:var(--space-8)">no stage completed in this window yet.</div>
+  {% endif %}
+
+  <div class="label" style="margin-bottom:var(--space-3)">worker utilization</div>
+  {% if stats.worker_utilization %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>worker</th><th class="num-col">succeeded</th><th class="num-col">failed</th><th class="num-col">busy</th><th class="num-col">utilization</th></tr>
+      </thead>
+      <tbody>
+        {% for w in stats.worker_utilization %}
+        <tr>
+          <td class="table-name">{{ w.worker_id }}</td>
+          <td class="num-col">{{ w.jobs_succeeded }}</td>
+          <td class="num-col">{{ w.jobs_failed }}</td>
+          <td class="num-col">{{ "%.1f"|format(w.busy_seconds) }}s</td>
+          <td class="num-col">{{ "%.1f"|format(worker_utilization_pct.get(w.worker_id, 0.0)) }}%</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div style="color:var(--text-dim);font-size:var(--text-sm)">no worker has run a job in this window yet.</div>
+  {% endif %}
+{% endif %}
