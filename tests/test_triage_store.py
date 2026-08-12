@@ -20,7 +20,7 @@ import pytest
 from sqlalchemy import select, text
 
 from uadclaw import triagestore
-from uadclaw.classify import Classification, Confidence, UadList
+from uadclaw.classify import UNKNOWN, Classification, Confidence, UadList
 from uadclaw.classifystore import BelowFloorError, store_classification
 from uadclaw.facts import ApkFacts
 from uadclaw.factstore import store_device_facts
@@ -525,6 +525,99 @@ async def test_an_edit_refuses_a_value_the_pipeline_could_not_have_emitted(
             await triagestore.apply_edit(
                 session, package="com.example.one", edits={field: value}, at=NOW
             )
+
+
+def unknown_proposal(package: str):
+    """What the model writes when it will not guess: the `unknown` sentinel and a declaration
+    beside it. A normal, expected outcome rather than a failure — `classify.py` says so at
+    length — so it is the shape the edit form meets most often on a weak candidate."""
+    return Classification(
+        package=package,
+        bundle_sha256=BUNDLE,
+        description=UNKNOWN,
+        list=UadList.MISC,
+        removal=Removal.ADVANCED,
+        confidence=Confidence.LOW,
+        unknown_fields=("description",),
+        reasoning_brief="Nothing in the evidence says what this does.",
+        provenance={"description": f"llm:{MODEL}", "removal": f"llm:{MODEL}"},
+    )
+
+
+async def test_an_unchanged_unknown_description_does_not_block_the_rest_of_the_edit(
+    db_env, triage_db
+):
+    """`triage_card.html` prefills the description box with the stored value, so a reviewer
+    who only touches the removal select still posts the `unknown` sentinel back. Seven
+    characters against a twenty-character floor: validating before asking whether the field
+    MOVED refused the whole submission, dropping the removal change they actually made, and
+    told them to declare it in `unknown_fields` — a field the form has no control for.
+
+    That is the ordinary submission for such a row rather than an edge case: the card renders
+    `model answer (description)` as missing for exactly these.
+    """
+    await seed(triage_db, {"com.example.one": 1})
+    async with triage_db() as session, session.begin():
+        await store_classification(
+            session,
+            unknown_proposal("com.example.one"),
+            model=MODEL,
+            thinking=True,
+            usage={},
+            attempts=1,
+            at=NOW,
+        )
+
+    async with triage_db() as session, session.begin():
+        changed = await triagestore.apply_edit(
+            session,
+            package="com.example.one",
+            edits={"description": UNKNOWN, "removal": "Expert"},
+            at=NOW,
+        )
+
+    assert set(changed) == {"removal"}
+    async with triage_db() as session:
+        row = await session.get(PackageClassification, "com.example.one")
+    assert row is not None
+    assert row.removal == "Expert"
+    assert row.description == UNKNOWN, "an unchanged field is not an edit and is not rewritten"
+    assert row.unknown_fields == ["description"], "so the model's own declaration still stands"
+
+
+async def test_a_description_the_reviewer_actually_rewrites_is_still_validated(db_env, triage_db):
+    """The other leg, and without it the test above is satisfied by a store that validates
+    nothing: a value that MOVED meets every rule a model answer does, and a written
+    description clears the `unknown` declaration the model made."""
+    await seed(triage_db, {"com.example.one": 1})
+    async with triage_db() as session, session.begin():
+        await store_classification(
+            session,
+            unknown_proposal("com.example.one"),
+            model=MODEL,
+            thinking=True,
+            usage={},
+            attempts=1,
+            at=NOW,
+        )
+
+    with pytest.raises(ValueError):
+        async with triage_db() as session, session.begin():
+            await triagestore.apply_edit(
+                session, package="com.example.one", edits={"description": "too short"}, at=NOW
+            )
+
+    written = "Notes application. Removing it loses locally stored notes."
+    async with triage_db() as session, session.begin():
+        await triagestore.apply_edit(
+            session, package="com.example.one", edits={"description": written}, at=NOW
+        )
+
+    async with triage_db() as session:
+        row = await session.get(PackageClassification, "com.example.one")
+    assert row is not None
+    assert row.description == written
+    assert row.unknown_fields == []
 
 
 async def test_an_edit_to_a_package_with_no_proposal_is_refused(db_env, triage_db):

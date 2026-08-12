@@ -436,8 +436,18 @@ async def store_human_edit(
                 "from the corpus graph and are not any writer's to set here."
             )
         column = EDITABLE_FIELDS[field]
-        value = _validated_edit(field, raw)
         current = getattr(existing, column)
+        # The unchanged check runs BEFORE validation, because a field the form handed back
+        # untouched is not an edit and validating it rejects the row rather than the input.
+        # The card prefills the description box with the stored value, and on a row the model
+        # declared unknown that value is the `unknown` sentinel — seven characters against a
+        # twenty-character floor — so a reviewer who only moved the removal select had their
+        # whole submission refused, and the message named `unknown_fields`, which the form has
+        # no control for. The second check below stands for a `_validated_edit` that ever
+        # normalises: a value that lands back on what is already stored is still not an edit.
+        if raw == current:
+            continue
+        value = _validated_edit(field, raw)
         if value == current:
             continue
         changed[field] = {"from": current, "to": value}
