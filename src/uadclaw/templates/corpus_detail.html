@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/pkg_icon.html" import pkg_icon %}
 {% block title %}{{ package }} · corpus · uadclaw{% endblock %}
 {% block content %}
 <section hx-boost="true">
@@ -7,13 +8,11 @@
       <a href="/corpus" style="color:inherit;text-decoration:none">corpus</a>
     </div>
     <div style="display:flex;align-items:center;gap:var(--space-3)">
-      {# `has_icon`/`monogram` are only set once `fact` has actually loaded — the error and
-         not_found branches below never reach that point, so both are optional here even
-         though every successful render sets one of them. #}
-      {% if has_icon is defined and has_icon %}
-        <img class="pkg-icon-sm" src="/icons/{{ package | urlencode }}" alt="">
-      {% elif monogram is defined %}
-        <span class="monogram-sm" aria-label="{{ package }}">{{ monogram }}</span>
+      {# `has_icon` is only set once `fact` has actually loaded — the error and not_found
+         branches below never reach that point, so it is optional here even though every
+         successful render sets it. The card size (`small=false`, 48px), never the rail's. #}
+      {% if has_icon is defined %}
+        {{ pkg_icon(package, has_icon, small=false) }}
       {% endif %}
       <h2 class="num" style="font:550 var(--text-xl)/1.3 var(--font-mono);color:var(--text);word-break:break-all">{{ package }}</h2>
     </div>
@@ -130,6 +129,7 @@
           </div>
         {% else %}
           <span class="tag {{ FILTER_VERDICT_TAG_CLASS.get(analysis.filter_verdict, "tag-default") }}">{{ FILTER_VERDICT_LABEL.get(analysis.filter_verdict, analysis.filter_verdict) }}</span>
+          <p style="color:var(--text-dim);font-size:var(--text-sm);margin-top:var(--space-2)">{{ FILTER_VERDICT_EXPLANATION.get(analysis.filter_verdict, "") }}</p>
         {% endif %}
       </div>
 
@@ -147,16 +147,16 @@
              callout, so an empty result here does not read as a failure. #}
           <div style="color:var(--text-dim);font-size:var(--text-sm)">no edges recorded for this package.</div>
         {% endif %}
-        {% if analysis.dependencies %}
+        {% if dependency_links %}
           <div class="label" style="margin-top:var(--space-4);margin-bottom:var(--space-2)">dependencies</div>
           <div style="display:flex;flex-wrap:wrap;gap:var(--space-2)">
-            {% for d in analysis.dependencies %}<a class="tag tag-accent" href="/corpus/{{ d | urlencode }}" style="text-decoration:none">{{ d }}</a>{% endfor %}
+            {% for link in dependency_links %}<a class="tag tag-accent" href="{{ link.href }}" style="text-decoration:none">{{ link.package }}</a>{% endfor %}
           </div>
         {% endif %}
-        {% if analysis.needed_by %}
+        {% if needed_by_links %}
           <div class="label" style="margin-top:var(--space-4);margin-bottom:var(--space-2)">needed by</div>
           <div style="display:flex;flex-wrap:wrap;gap:var(--space-2)">
-            {% for d in analysis.needed_by %}<a class="tag tag-accent" href="/corpus/{{ d | urlencode }}" style="text-decoration:none">{{ d }}</a>{% endfor %}
+            {% for link in needed_by_links %}<a class="tag tag-accent" href="{{ link.href }}" style="text-decoration:none">{{ link.package }}</a>{% endfor %}
           </div>
         {% endif %}
       </div>

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/pkg_icon.html" import pkg_icon %}
 {% block title %}corpus · uadclaw{% endblock %}
 {% block content %}
 <section>
@@ -6,7 +7,7 @@
     <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">uadclaw</div>
     <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em">corpus</h2>
     <p style="font-size:var(--text-base);color:var(--text-dim);max-width:540px;margin-top:var(--space-2)">
-      every package the deterministic core has seen, with its floor, its queue state and whether it disagrees across devices.
+      every package the deterministic core has seen, with its floor, its verdict and whether it disagrees across devices.
     </p>
   </header>
 
@@ -40,21 +41,13 @@
           </select>
         </div>
         <div class="field">
-          <label class="field-label" for="corpus-queued">queued</label>
-          <select class="input" id="corpus-queued" name="queued">
+          <label class="field-label" for="corpus-verdict">verdict</label>
+          <select class="input" id="corpus-verdict" name="verdict">
             <option value="">all</option>
-            <option value="true"{% if queued_filter == "true" %} selected{% endif %}>queued</option>
-            <option value="false"{% if queued_filter == "false" %} selected{% endif %}>not queued</option>
-            <option value="null"{% if queued_filter == "null" %} selected{% endif %}>filter pending</option>
-          </select>
-        </div>
-        <div class="field">
-          <label class="field-label" for="corpus-upstream">upstream</label>
-          <select class="input" id="corpus-upstream" name="upstream">
-            <option value="">all</option>
-            <option value="true"{% if upstream_filter == "true" %} selected{% endif %}>already upstream</option>
-            <option value="false"{% if upstream_filter == "false" %} selected{% endif %}>not upstream</option>
-            <option value="null"{% if upstream_filter == "null" %} selected{% endif %}>filter pending</option>
+            {% for v in verdicts %}
+              <option value="{{ v }}"{% if verdict_filter == v %} selected{% endif %}>{{ FILTER_VERDICT_LABEL.get(v, v) }}</option>
+            {% endfor %}
+            <option value="null"{% if verdict_filter == "null" %} selected{% endif %}>filter pending</option>
           </select>
         </div>
         <button class="btn btn-primary" type="submit">filter</button>
@@ -62,6 +55,29 @@
           <a class="btn btn-ghost" href="/corpus">clear</a>
         {% endif %}
       </form>
+
+      {# One shared legend rather than a per-row explanation: a per-row `title`/`aria-label`
+         would add up to 100 tab stops to a 50-row table meant to be scanned, and `<summary>`
+         is natively focusable, so this is reachable without a pointer (SPEC §5). #}
+      <details style="margin-bottom:var(--space-5)">
+        <summary style="cursor:pointer;color:var(--accent);font-size:var(--text-sm)">what the badges mean</summary>
+        <table class="info-table" style="margin-top:var(--space-2)">
+          {% for v in verdicts %}
+            <tr>
+              <td><span class="tag {{ FILTER_VERDICT_TAG_CLASS.get(v, "tag-default") }}">{{ FILTER_VERDICT_LABEL.get(v, v) }}</span></td>
+              <td>{{ FILTER_VERDICT_EXPLANATION.get(v, "") }}</td>
+            </tr>
+          {% endfor %}
+          <tr>
+            <td><span class="tag tag-default">filter pending</span></td>
+            <td>the filter stage has not run for this package yet.</td>
+          </tr>
+          <tr>
+            <td><span class="tag tag-warning">conflict</span></td>
+            <td>devices disagree on a field — a review signal, not a verdict.</td>
+          </tr>
+        </table>
+      </details>
 
       {% if total == 0 and not filters_active %}
         <div class="callout callout-info">
@@ -87,12 +103,8 @@
               {% for row in rows %}
               <tr>
                 <td>
-                  <a class="table-name" href="/corpus/{{ row.package | urlencode }}" style="text-decoration:none;display:flex;align-items:center;gap:var(--space-2)">
-                    {% if row.has_icon %}
-                      <img class="pkg-icon-sm" src="/icons/{{ row.package | urlencode }}" alt="">
-                    {% else %}
-                      <span class="monogram-sm" aria-label="{{ row.package }}">{{ row.monogram }}</span>
-                    {% endif %}
+                  <a class="table-name" href="{{ row.href }}" style="text-decoration:none;display:flex;align-items:center;gap:var(--space-2)">
+                    {{ pkg_icon(row.package, row.has_icon, small=true) }}
                     {{ row.package }}
                   </a>
                 </td>

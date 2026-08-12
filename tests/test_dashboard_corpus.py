@@ -6,6 +6,8 @@ danger-rank ordering, and ILIKE substring search all need real query behavior, n
 corpus that test sees; nothing here depends on what the app's own `uadclaw` database holds.
 """
 
+import re
+
 import pytest
 
 from conftest import utcnow
@@ -13,6 +15,23 @@ from uadclaw.models import PackageAnalysis, PackageFact
 from uadclaw.views import corpus as corpus_view
 
 PASSWORD = "test-only-admin-password"
+
+
+def _verdict_badge(text: str, package: str) -> str:
+    """The list row's verdict-cell tag text for `package`, walked from the row's own `<td>`
+    cells rather than by proximity to the package name — the floor column's badge sits
+    closer, and `<option value="true"...>already upstream</option>` in the filter select
+    would satisfy a bare `resp.text` substring check regardless of what the row's badge says.
+    Column order is package, devices, floor, verdict, conflict, so index 3."""
+    idx = text.index(package)
+    row_start = text.rindex("<tr>", 0, idx)
+    row_end = text.index("</tr>", idx)
+    row = text[row_start:row_end]
+    cells = row.split("<td")[1:]
+    verdict_cell = cells[3]
+    match = re.search(r">([^<]*)</span>", verdict_cell)
+    assert match, f"no tag span in the verdict cell for {package}: {verdict_cell!r}"
+    return match.group(1).strip()
 
 
 async def _login(client) -> None:
@@ -122,8 +141,7 @@ async def test_filtering_to_nothing_offers_a_way_back_rather_than_a_bare_no_resu
     ("query", "value"),
     [
         ("floor", "Extremely Unsafe"),
-        ("queued", "maybe"),
-        ("upstream", "sometimes"),
+        ("verdict", "maybe"),
     ],
 )
 async def test_a_filter_value_nobody_defined_says_so_instead_of_going_quiet(
@@ -156,13 +174,13 @@ async def test_a_filter_value_that_is_defined_still_narrows_and_warns_about_noth
     await _seed(
         db_session_factory,
         _fact("com.example.queued"),
-        _analysis("com.example.queued", queued=True),
+        _analysis("com.example.queued", queued=True, filter_verdict="queued"),
         _fact("com.example.dropped"),
-        _analysis("com.example.dropped", queued=False),
+        _analysis("com.example.dropped", queued=False, filter_verdict="already_upstream"),
     )
     await _login(client)
 
-    resp = await client.get("/corpus?queued=true")
+    resp = await client.get("/corpus?verdict=queued")
 
     assert "ignored the unknown filter value" not in resp.text
     assert "com.example.queued" in resp.text
@@ -289,25 +307,9 @@ async def test_the_verdict_badge_distinguishes_pending_not_queued_and_queued(
     resp = await client.get("/corpus")
     text = resp.text
 
-    # Column order is package, devices, floor, verdict, conflict — the verdict badge is
-    # column index 3, found by walking the row's own `<td>` cells rather than by proximity
-    # to the package name, which the floor column's badge sits closer to.
-    import re
-
-    def verdict_badge(package: str) -> str:
-        idx = text.index(package)
-        row_start = text.rindex("<tr>", 0, idx)
-        row_end = text.index("</tr>", idx)
-        row = text[row_start:row_end]
-        cells = row.split("<td")[1:]
-        verdict_cell = cells[3]
-        match = re.search(r">([^<]*)</span>", verdict_cell)
-        assert match, f"no tag span in the verdict cell for {package}: {verdict_cell!r}"
-        return match.group(1).strip()
-
-    assert verdict_badge("com.example.pending") == "filter pending"
-    assert verdict_badge("com.example.rejected") == "already upstream"
-    assert verdict_badge("com.example.queued") == "queued"
+    assert _verdict_badge(text, "com.example.pending") == "filter pending"
+    assert _verdict_badge(text, "com.example.rejected") == "already upstream"
+    assert _verdict_badge(text, "com.example.queued") == "queued"
 
 
 async def test_a_row_never_shows_more_than_three_badges_at_once(db_env, db_session_factory, client):
@@ -373,9 +375,17 @@ async def test_filter_verdict_never_renders_its_raw_enum_spelling(
     listing = await client.get("/corpus")
     detail = await client.get("/corpus/com.example.mapped")
 
-    assert "already_upstream" not in listing.text
+    # `>already_upstream<`, not a bare substring: the verdict filter's own
+    # `<option value="already_upstream">already upstream</option>` legitimately carries the
+    # raw spelling as a wire VALUE (SPEC §4 — form values don't change), so a blanket
+    # `"already_upstream" not in listing.text` is a false positive against that option now
+    # that M4's filter exists. What must never appear is the raw spelling as visible text.
+    assert ">already_upstream<" not in listing.text
     assert "already_upstream" not in detail.text
-    assert "already upstream" in listing.text
+    # Row-scoped, not a bare `resp.text` membership check: `<option value="true"...>already
+    # upstream</option>` in the upstream-style filter vocabulary would satisfy a substring
+    # assertion whether or not the row's own badge is mapped at all.
+    assert _verdict_badge(listing.text, "com.example.mapped") == "already upstream"
     assert "already upstream" in detail.text
 
 
@@ -398,38 +408,43 @@ async def test_an_unmapped_filter_verdict_falls_through_raw_rather_than_prettifi
     assert "some future verdict" not in resp.text
 
 
-async def test_queued_filter_null_returns_only_the_unfiltered_packages(
+async def test_verdict_filter_null_returns_only_the_unfiltered_packages(
     db_env, db_session_factory, client
 ):
     await _seed(
         db_session_factory,
         _fact("com.example.pending"),
         _fact("com.example.rejected"),
-        _analysis("com.example.rejected", queued=False),
+        _analysis("com.example.rejected", filter_verdict="already_upstream"),
         _fact("com.example.queued"),
-        _analysis("com.example.queued", queued=True),
+        _analysis("com.example.queued", filter_verdict="queued"),
     )
     await _login(client)
-    resp = await client.get("/corpus?queued=null")
+    resp = await client.get("/corpus?verdict=null")
     assert "com.example.pending" in resp.text
     assert "com.example.rejected" not in resp.text
     assert "com.example.queued" not in resp.text
 
 
-async def test_queued_filter_false_excludes_both_null_and_true(db_env, db_session_factory, client):
+async def test_verdict_filter_reaches_a_value_the_old_queued_upstream_controls_could_not(
+    db_env, db_session_factory, client
+):
+    """The reach gap a reviewer named: `queued`/`upstream_present` are two booleans derived
+    from `filter_verdict`, so the old two-select filter could narrow to "queued" or "already
+    upstream" but never to `generated overlay` or `emulator only` specifically — both read as
+    "not queued and not upstream" and were bucketed together. One select over the verdict
+    column itself reaches all four exactly."""
     await _seed(
         db_session_factory,
-        _fact("com.example.pending"),
-        _fact("com.example.rejected"),
-        _analysis("com.example.rejected", queued=False),
-        _fact("com.example.queued"),
-        _analysis("com.example.queued", queued=True),
+        _fact("com.example.overlay"),
+        _analysis("com.example.overlay", filter_verdict="auto_generated_rro"),
+        _fact("com.example.emu"),
+        _analysis("com.example.emu", filter_verdict="emulator_only"),
     )
     await _login(client)
-    resp = await client.get("/corpus?queued=false")
-    assert "com.example.rejected" in resp.text
-    assert "com.example.pending" not in resp.text
-    assert "com.example.queued" not in resp.text
+    resp = await client.get("/corpus?verdict=auto_generated_rro")
+    assert "com.example.overlay" in resp.text
+    assert "com.example.emu" not in resp.text
 
 
 # --- floor sort must use danger_rank, never string comparison --------------------------------
@@ -603,25 +618,47 @@ async def test_conflicts_render_with_both_values_and_are_not_hidden_by_default(
 # --- icons: has_icon / the monogram fallback -------------------------------------------------
 
 
+def test_the_icon_mime_getattr_fallback_is_still_needed():
+    """`_has_icon`'s `getattr(fact, "icon_mime", None)` is a defensive read against a column
+    that does not exist on this branch yet (the icons lane's migration lands in a sibling
+    worktree). This documents the CURRENT state — no such column — and flips to a hard
+    failure the moment it lands, which is the forcing function for deleting the `getattr`
+    default in `corpus._has_icon` and reading `fact.icon_mime` directly, per that function's
+    own docstring."""
+    assert not hasattr(PackageFact, "icon_mime"), (
+        "PackageFact now has icon_mime: delete the getattr default in corpus._has_icon and "
+        "read fact.icon_mime directly, then delete this test"
+    )
+
+
 async def test_a_package_with_no_icon_renders_the_monogram_fallback(
     db_env, db_session_factory, client
 ):
     """`icon_bytes`/`icon_mime` land on `package_facts` in a sibling worktree of this same
     round and are not on this branch's `PackageFact` yet, so `_has_icon`'s `getattr` default
     always reads False here — this pins the fallback path (the only one this worktree can
-    exercise) rather than the `<img>` path, which needs that migration to render for real."""
+    exercise) rather than the `<img>` path, which needs that migration to render for real.
+
+    Letters and colour come from the shared `monogram_for`/`pkg_icon` macro
+    (`src/uadclaw/monogram.py`, `templates/partials/pkg_icon.html`), not from this screen: the
+    chip is `aria-hidden="true"` because every call site here renders the package name as
+    text right beside it, and the letters are lowercase (`monogram_for`'s own derivation)."""
     await _seed(db_session_factory, _fact("com.example.noicon"), _analysis("com.example.noicon"))
     await _login(client)
 
     listing = await client.get("/corpus")
     detail = await client.get("/corpus/com.example.noicon")
 
-    assert 'class="monogram-sm"' in listing.text
-    assert 'aria-label="com.example.noicon"' in listing.text
-    assert ">NO<" in listing.text  # last dotted component "noicon" -> "NO"
+    # The list is the 32px rail variant, the detail the 48px card variant (icon contract,
+    # SPEC §6) — pinned here so a later edit cannot silently put the rail size on the card.
+    assert 'class="monogram monogram-c' in listing.text
+    assert ' monogram-sm"' in listing.text
+    assert 'aria-hidden="true"' in listing.text
+    assert ">no<" in listing.text  # last dotted component "noicon" -> "no"
     assert "/icons/com.example.noicon" not in listing.text
-    assert 'class="monogram-sm"' in detail.text
-    assert ">NO<" in detail.text
+    assert 'class="monogram monogram-c' in detail.text
+    assert ' monogram-sm"' not in detail.text
+    assert ">no<" in detail.text
 
 
 # --- untrusted bytes: package names are firmware data, never |safe -----------------------------
@@ -634,3 +671,31 @@ async def test_a_hostile_package_name_is_escaped_not_executed(db_env, db_session
     resp = await client.get("/corpus")
     assert "<script>alert(1)</script>" not in resp.text
     assert "&lt;script&gt;" in resp.text
+
+
+async def test_a_slash_in_a_package_name_is_encoded_in_every_link(
+    db_env, db_session_factory, client
+):
+    """`_package_href`/`_package_links` go through `web.url_segment`, never the `|urlencode`
+    filter: jinja2's `do_urlencode` calls `url_quote` with `safe=b"/"`, so a package name
+    carrying a `/` comes back unescaped and the link points at a different path than the
+    record. A package name is bytes out of a downloaded manifest, so nothing validates it as
+    a Java identifier — this covers both `CorpusRow.href` (the list row) and
+    `_package_links` (the detail page's dependency/needed-by tags)."""
+    hostile = "com.example/evil"
+    target = "com.example.target"
+    await _seed(
+        db_session_factory,
+        _fact(hostile),
+        _analysis(hostile, filter_verdict="queued", dependencies=[target]),
+        _fact(target),
+        _analysis(target, filter_verdict="queued", needed_by=[hostile]),
+    )
+    await _login(client)
+
+    listing = await client.get("/corpus")
+    assert 'href="/corpus/com.example%2Fevil"' in listing.text
+    assert 'href="/corpus/com.example/evil"' not in listing.text
+
+    target_detail = await client.get("/corpus/com.example.target")
+    assert 'href="/corpus/com.example%2Fevil"' in target_detail.text
