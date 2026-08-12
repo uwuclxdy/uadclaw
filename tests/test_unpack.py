@@ -802,9 +802,9 @@ def sparse_bomb(*, total_blocks: int, block_size: int = 4096) -> bytes:
 
     One `CHUNK_TYPE_FILL` chunk covers every declared block in four bytes of payload, which is
     what makes a sparse header's declared size unbounded by the file's own. Measured
-    2026-08-12: a 44-byte image declaring 1 GiB made `simg2img` write 104,857,600 bytes of
-    fully allocated blocks (`st_blocks * 512` equal to the apparent size — not one sparse hole)
-    before a `ulimit -f` cap killed it with SIGXFSZ.
+    2026-08-12: 44 bytes declaring 1,073,741,824 made `simg2img` write fully allocated blocks
+    (`st_blocks * 512` at the apparent size — not one sparse hole) until a `ulimit -f` cap
+    killed it with SIGXFSZ, which is the only thing that stopped it.
     """
     header = struct.pack("<IHHHHIIII", 0xED26FF3A, 1, 0, 28, 12, block_size, total_blocks, 1, 0)
     return header + struct.pack("<HHII", 0xCAC2, 0, total_blocks, 16) + b"\xff\xff\xff\xff"

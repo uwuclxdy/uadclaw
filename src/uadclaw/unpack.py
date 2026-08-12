@@ -598,10 +598,10 @@ def sparse_declared_bytes(image: Path) -> int:
     takes no size flag at all (its whole usage is `simg2img <sparse_image_files>
     <raw_image_file>`), and a sparse header's `total_blks * blk_sz` is bounded by nothing that
     the file's own size implies. One `CHUNK_TYPE_FILL` chunk covers every declared block in
-    four bytes of payload: measured 2026-08-12, a 44-byte image declaring 1 GiB made simg2img
-    write 104,857,600 bytes of FULLY ALLOCATED blocks (`st_blocks * 512` equal to the apparent
-    size, so not even a sparse hole) before a `ulimit -f` cap killed it — a declared ratio of
-    24,403,223 to 1.
+    four bytes of payload: measured 2026-08-12, a 44-byte image declaring 1,073,741,824 bytes
+    — a ratio of 24,403,223 to 1 — made simg2img write FULLY ALLOCATED blocks (`st_blocks *
+    512` at the apparent size, not one sparse hole) until a `ulimit -f` cap killed it with
+    SIGXFSZ. The cap is the only thing that ever stopped it.
     """
     with image.open("rb") as fh:
         header = fh.read(_SPARSE_HEADER.size)
