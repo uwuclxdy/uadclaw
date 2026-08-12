@@ -2,10 +2,12 @@
 
 No network. Five real documents out of `tests/fixtures/`:
 
-- `oppo_catalogue.json` — 7 rows copied byte for byte out of the catalogue's 179, carrying every
+- `oppo_catalogue.json` — 10 rows copied byte for byte out of the catalogue's 179, carrying every
   shape the parser has to survive: all four OPlus gate hosts, a Xiaomi row and an OnePlus-NA row
-  that belong to other drivers, and a model whose two rows are in the WRONG chronological order,
-  because that is what `select_ref` gets wrong when the driver does not sort.
+  that belong to other drivers, a model whose two rows are in the WRONG chronological order,
+  because that is what `select_ref` gets wrong when the driver does not sort, and `CPH2449`'s two
+  rows, which publish ONE `ota_version` twice with different md5 and different size from the same
+  gate host — the collision only the row's own region separates.
 - `oppo_update_request.json` — the plaintext body and headers of the request `RMX3706` answered
   `200` to on 2026-08-12, `protectedKey` dropped because it is random per call. The request this
   module builds is compared against it field by field rather than against itself.
@@ -69,8 +71,10 @@ from uadclaw.settings import Settings
 FIXTURES = Path(__file__).parent / "fixtures"
 
 CN_GATE_HOST = "component-ota-cn.allawntech.com"
-# The catalogue row this suite's fetch tests are written against.
-PLK110_BUILD = "PLK110_11.A.72_0720_202607301131"
+# The catalogue row this suite's fetch tests are written against. The ref's build carries the
+# row's region, because a bare `ota_version` names two different archives on 12 of the 95 pairs.
+PLK110_OTA = "PLK110_11.A.72_0720_202607301131"
+PLK110_BUILD = f"{PLK110_OTA}_CN"
 PLK110_GATE = f"https://{CN_GATE_HOST}/downloadCheck?c=deadbeef&id=6a212ab99e207b01827c4fee"
 # Deliberately not the request's IV: a driver that decrypted the response under the IV it sent
 # would pass every round-trip test that reused one.
@@ -179,6 +183,7 @@ def endpoint_handler(
     model: str = "PLK110",
     payload: bytes = b"",
     seen: list[httpx.Request] | None = None,
+    asked: list[dict] | None = None,
 ):
     private_key, _public = _test_keypair()
 
@@ -189,7 +194,10 @@ def endpoint_handler(
             key = unwrap_session_key(request.headers["protectedKey"], private_key)
             assert len(key) == 32
             # The server reads the model out of the encrypted body, not out of the header.
-            assert decrypt_request(request.content, key)["model"] == model
+            body = decrypt_request(request.content, key)
+            assert body["model"] == model
+            if asked is not None:
+                asked.append(body)
             return httpx.Response(
                 200, text=seal_response(document or {}, key, response_code=response_code)
             )
@@ -222,8 +230,23 @@ def test_the_device_id_is_the_sha256_of_a_null_imei_and_nothing_else():
 
 def test_the_synthesized_ota_version_carries_the_tail_the_endpoint_resolves_on():
     # `_0000_000000000000` answered 2100 on a device that answered 200 to this one.
-    assert synthesize_ota_version("RMX3706", "A") == "RMX3706_11.A.00_0001_100000000000"
-    assert synthesize_ota_version("PKC110", "C") == "PKC110_11.C.00_0001_100000000000"
+    assert synthesize_ota_version("RMX3706", "A", major="11") == "RMX3706_11.A.00_0001_100000000000"
+    assert synthesize_ota_version("PKC110", "C", major="11") == "PKC110_11.C.00_0001_100000000000"
+
+
+def test_a_ref_build_comes_apart_into_the_pieces_one_query_is_synthesized_from():
+    parsed = oppo.parse_ref_build("PLK110_12.A.72_0720_202607301131_CN", model="PLK110")
+
+    assert parsed is not None
+    assert (parsed.ota_version, parsed.region, parsed.major, parsed.branch) == (
+        "PLK110_12.A.72_0720_202607301131",
+        "CN",
+        "12",
+        "A",
+    )
+    # A bare `ota_version` is not a build this driver minted, and neither is another model's.
+    assert oppo.parse_ref_build("PLK110_12.A.72_0720_202607301131", model="PLK110") is None
+    assert oppo.parse_ref_build("PLK110_12.A.72_0720_202607301131_CN", model="PKC110") is None
 
 
 def test_the_branch_is_read_off_a_real_build_rather_than_guessed_over_four_letters():
@@ -416,7 +439,55 @@ def test_a_resolved_build_belonging_to_another_model_is_refused():
 
 def test_a_200_carrying_no_component_is_refused_rather_than_read_as_nothing_to_download():
     with pytest.raises(OppoProtocolError):
-        resolved_package({"otaVersion": PLK110_BUILD, "components": []}, model="PLK110")
+        resolved_package({"otaVersion": PLK110_OTA, "components": []}, model="PLK110")
+
+
+def test_a_200_carrying_more_than_one_component_is_refused_rather_than_partly_downloaded():
+    # 8 of 8 captured 200s carry exactly one, so refusing costs nothing today. Taking
+    # `components[0]` of a split package downloads a fragment and only notices at the digest,
+    # after the whole multi-GB transfer.
+    document = captured_response("plk110")
+    document["components"] = document["components"] * 2
+
+    with pytest.raises(OppoProtocolError) as excinfo:
+        resolved_package(document, model="PLK110")
+
+    assert "2 component(s)" in str(excinfo.value)
+
+
+def test_a_component_that_is_not_an_object_is_refused_rather_than_read_as_an_empty_one():
+    document = captured_response("plk110")
+    document["components"] = ["not an object"]
+
+    with pytest.raises(OppoProtocolError) as excinfo:
+        resolved_package(document, model="PLK110")
+
+    assert "not an object" in str(excinfo.value)
+
+
+def test_an_uppercase_digest_is_normalized_rather_than_dropped():
+    # Every measured row is lowercase, which cannot separate "this source is lowercase-only"
+    # from "this source was lowercase the day it was measured". Refusing an uppercase digest
+    # sets `md5=None` for the WHOLE catalogue at once, and every download then runs
+    # integrity-unverified with a published digest sitting in hand.
+    document = captured_response("plk110")
+    packets = document["components"][0]["componentPackets"]
+    packets["md5"] = str(packets["md5"]).upper()
+
+    package = resolved_package(document, model="PLK110")
+
+    assert package.md5 == str(packets["md5"]).lower()
+
+
+def test_an_uppercase_catalogue_digest_is_normalized_rather_than_dropped():
+    payload = catalogue()
+    for row in payload["releases"]:
+        if row.get("md5"):
+            row["md5"] = row["md5"].upper()
+
+    refs = parse_catalogue(payload, source_url="https://example.invalid/ota")
+
+    assert all(ref.md5 is not None and ref.md5.islower() for ref in refs)
 
 
 # --- the catalogue ------------------------------------------------------------------------
@@ -425,11 +496,67 @@ def test_a_200_carrying_no_component_is_refused_rather_than_read_as_nothing_to_d
 def test_only_the_oplus_rows_of_a_multi_oem_catalogue_become_refs():
     refs = parse_catalogue(catalogue(), source_url="https://example.invalid/ota")
 
-    # 7 fixture rows, of which the Xiaomi (`ZORN`, sgp-api.buy.mi.com) and the OnePlus-NA row
+    # 10 fixture rows, of which the Xiaomi (`ZORN`, sgp-api.buy.mi.com) and the OnePlus-NA row
     # (`CPH2655`, android.googleapis.com) are another driver's.
-    assert len(refs) == 5
-    assert {ref.device for ref in refs} == {"CPH2653", "PLK110", "OPD2504", "CPH2659"}
+    assert len(refs) == 8
+    assert {ref.device for ref in refs} == {
+        "CPH2449",
+        "CPH2487",
+        "CPH2653",
+        "CPH2659",
+        "OPD2504",
+        "PLK110",
+    }
     assert all(ref.driver == "oppo" for ref in refs)
+
+
+def test_two_regional_images_of_one_build_are_two_refs_and_not_one():
+    # `CPH2449_11.H.15_3150_202607172114` is published twice with different md5 AND different
+    # size (7,751,474,897 EU against 7,749,485,507 GLO), from the SAME gate host — so the host
+    # cannot separate them and only the row's own region can. Two refs sharing a build id share
+    # a `package_observations` key, and the second scan overwrites the first's per-path rows
+    # while the paths only one image ships survive as stale ones.
+    refs = parse_catalogue(catalogue(), source_url="https://example.invalid/ota")
+    cph2449 = [ref for ref in refs if ref.device == "CPH2449"]
+
+    assert len(cph2449) == 2
+    assert {ref.build for ref in cph2449} == {
+        "CPH2449_11.H.15_3150_202607172114_EU",
+        "CPH2449_11.H.15_3150_202607172114_GLO",
+    }
+    assert {ref.md5 for ref in cph2449} == {
+        "15e2d68a9e5324ee838a38b97052a105",
+        "2989f602832ec78246156589950fdf2d",
+    }
+    assert len({oppo._host_of(ref.url) for ref in cph2449}) == 1
+    # The whole index, not just the pair: a build id is what `package_observations` is keyed on.
+    assert len({(ref.device, ref.build) for ref in refs}) == len(refs)
+
+
+def test_both_entry_points_resolve_one_build_id_to_the_same_archive():
+    # The bug this pins had `select_ref(device=...)` hand back the row the sort put last while
+    # `select_ref(device=..., build=...)` handed back the region tiebreak's — so a job pinning
+    # the build the dashboard had just listed downloaded different bytes than the listing showed.
+    refs = parse_catalogue(catalogue(), source_url="https://example.invalid/ota")
+
+    newest = select_ref(refs, device="CPH2449")
+    named = select_ref(refs, device="CPH2449", build=newest.build)
+
+    assert named == newest
+
+
+def test_a_row_publishing_no_region_is_skipped_rather_than_given_a_claimable_id(caplog):
+    payload = catalogue()
+    for row in payload["releases"]:
+        if row["model"] == "CPH2449":
+            row["region"] = ""
+
+    with caplog.at_level(logging.WARNING, logger="uadclaw.drivers.oppo"):
+        refs = parse_catalogue(payload, source_url="https://example.invalid/ota")
+
+    assert not [ref for ref in refs if ref.device == "CPH2449"]
+    assert "CPH2449" in caplog.text
+    assert "region" in caplog.text
 
 
 def test_every_ref_carries_the_durable_gate_and_the_published_digest():
@@ -443,13 +570,78 @@ def test_every_ref_carries_the_durable_gate_and_the_published_digest():
         assert ref.archive_suffix == ".zip"
 
 
+def test_a_row_is_filtered_on_its_hosts_exact_name_and_not_on_the_urls_text():
+    # A substring test over the raw `source_url` passes every test in this file and admits
+    # this. Nothing else on the catalogue path checks the host: `FirmwareRef` validates only
+    # https plus a charset, so the filter IS the check.
+    payload = catalogue()
+    payload["releases"] = [
+        row
+        | {
+            "source_url": (
+                "https://evil.example/downloadCheck?x=component-ota-eu.allawnos.com"
+                "&y=component-ota-cn.allawntech.com&z=component-ota-sg.allawnos.com"
+                "&w=component-ota-in.allawnos.com"
+            )
+        }
+        for row in payload["releases"]
+    ]
+
+    with pytest.raises(EmptyFirmwareIndexError) as excinfo:
+        parse_catalogue(payload, source_url="https://example.invalid/ota")
+
+    # The SPECIFIC arm, not just "something raised": a substring filter also ends in an
+    # `EmptyFirmwareIndexError`, through the per-gate-host arm and after admitting all ten rows.
+    assert "not one of them is an OPlus release" in str(excinfo.value)
+    assert "10 belong to another OEM" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "component-ota-eu.allawnos.com",
+        "component-ota-cn.allawntech.com",
+        "component-ota-sg.allawnos.com",
+        "component-ota-in.allawnos.com",
+    ],
+)
+def test_one_gate_host_going_quiet_is_an_error_and_not_a_shorter_list(host):
+    # A renamed host does not fail: its rows stop matching the filter and get counted as
+    # another OEM's, which on the live catalogue drops 12-40 models (37 of 82 for the CN host)
+    # behind a list that still looks like a list. Four populated hosts and one silently empty
+    # one is the same bug wearing a smaller number.
+    payload = catalogue()
+    payload["releases"] = [
+        row for row in payload["releases"] if oppo._host_of(row["source_url"]) != host
+    ]
+
+    with pytest.raises(EmptyFirmwareIndexError) as excinfo:
+        parse_catalogue(payload, source_url="https://example.invalid/ota")
+
+    assert host in str(excinfo.value)
+
+
+def test_a_row_with_no_readable_source_url_is_not_reported_as_another_oems():
+    # `_host_of("")` is `""`, so folding the two counters attributes a broken OPlus row to an
+    # OEM nobody can name from the message.
+    payload = catalogue()
+    # A row that is not an object at all is the same class and counts the same way.
+    payload["releases"] = [row | {"source_url": ""} for row in payload["releases"]] + ["nonsense"]
+
+    with pytest.raises(EmptyFirmwareIndexError) as excinfo:
+        parse_catalogue(payload, source_url="https://example.invalid/ota")
+
+    assert "0 belong to another OEM" in str(excinfo.value)
+    assert "11 publish no readable source_url" in str(excinfo.value)
+
+
 def test_the_newest_build_for_a_model_is_the_catalogues_clock_not_its_row_order():
     refs = parse_catalogue(catalogue(), source_url="https://example.invalid/ota")
 
     # OPD2504 is published twice and the catalogue lists the OLDER row last (GLO 2026-05-21
     # after EU 2026-06-05). `select_ref` reads "newest" as the last row for a device whenever
     # the build id carries no date, and no OPlus build id does.
-    assert select_ref(refs, device="OPD2504").build == "OPD2504_11.A.32_0320_202606052024"
+    assert select_ref(refs, device="OPD2504").build == "OPD2504_11.A.32_0320_202606052024_EU"
     raw = [row["ota_version"] for row in catalogue()["releases"] if row["model"] == "OPD2504"]
     assert raw[-1] == "OPD2504_11.A.31_0310_202605211741"
 
@@ -492,13 +684,17 @@ def test_a_catalogue_carrying_only_other_oems_is_an_error_naming_that():
 def test_a_row_that_cannot_become_a_ref_is_skipped_with_a_warning_not_a_dead_index(caplog):
     payload = catalogue()
     # 65 characters, one past what `FirmwareRef.build` accepts, on an otherwise valid OPlus row.
-    payload["releases"][2]["ota_version"] = "PLK110_11.A.72_0720_202607301131" + "0" * 33
+    # Not the PLK110 one: it is the fixture's only CN row, and dropping it would trip the
+    # per-gate-host emptiness check instead of testing what this is named for.
+    for row in payload["releases"]:
+        if row["model"] == "CPH2449":
+            row["ota_version"] = "CPH2449_11.H.15_3150_202607172114" + "0" * 32
 
     with caplog.at_level(logging.WARNING, logger="uadclaw.drivers.oppo"):
         refs = parse_catalogue(payload, source_url="https://example.invalid/ota")
 
-    assert {ref.device for ref in refs} == {"CPH2653", "OPD2504", "CPH2659"}
-    assert "PLK110" in caplog.text
+    assert {ref.device for ref in refs} == {"CPH2653", "CPH2487", "PLK110", "OPD2504", "CPH2659"}
+    assert "CPH2449" in caplog.text
 
 
 # --- the driver ---------------------------------------------------------------------------
@@ -549,8 +745,8 @@ async def test_fetch_downloads_the_endpoints_url_when_it_offers_exactly_this_bui
     # the endpoint trailed the catalogue on every model measured, so agreement is the case a
     # capture cannot supply.
     document = captured_response("plk110")
-    document["otaVersion"] = document["realOtaVersion"] = PLK110_BUILD
-    document["components"][0]["componentVersion"] = f"{PLK110_BUILD}.97.3d82867d"
+    document["otaVersion"] = document["realOtaVersion"] = PLK110_OTA
+    document["components"][0]["componentVersion"] = f"{PLK110_OTA}.97.3d82867d"
     document["components"][0]["componentPackets"] = {
         "url": "https://gauss-compotacostauto-cn.allawnfs.com/component-ota/a.zip",
         "md5": hashlib.md5(payload).hexdigest(),
@@ -575,6 +771,36 @@ async def test_fetch_downloads_the_endpoints_url_when_it_offers_exactly_this_bui
         == "https://gauss-compotacostauto-cn.allawnfs.com/component-ota/a.zip"
     )
     assert downloads[-1].headers["userId"] == GATE_USER_ID
+
+
+async def test_the_query_is_synthesized_at_the_rows_own_major_not_at_the_one_every_row_carries(
+    cn_region, tmp_path
+):
+    # All 107 measured rows are major 11, which is exactly why hardcoding it reads as correct
+    # and why only the CALL SITE can pin it: a pure-function assertion passes either way. A
+    # request built at the wrong major asks about a build id no phone has and gets a `2004`
+    # indistinguishable from the export-model hole this driver already lives with.
+    payload = b"PK\x03\x04" + b"catalogue-served" * 64
+    asked: list[dict] = []
+    ref = FirmwareRef(
+        driver="oppo",
+        device="PLK110",
+        build="PLK110_12.A.72_0720_202607301131_CN",
+        url=PLK110_GATE,
+        md5=hashlib.md5(payload).hexdigest(),
+        android_version="16",
+    )
+    driver = OppoDriver(
+        make_settings(),
+        client=mock_client(
+            endpoint_handler(cn_region, response_code=2004, payload=payload, asked=asked)
+        ),
+    )
+
+    await driver.fetch(ref, tmp_path)
+
+    assert [body["otaVersion"] for body in asked] == ["PLK110_12.A.00_0001_100000000000"]
+    assert [body["romVersion"] for body in asked] == ["PLK110_12.A.00"]
 
 
 async def test_fetch_falls_back_to_the_stored_gate_when_the_endpoint_answers_2004(
@@ -633,20 +859,170 @@ async def test_an_oversized_catalogue_is_refused_before_it_is_parsed():
     assert str(oppo.MAX_CATALOGUE_BYTES) in str(excinfo.value)
 
 
-async def test_an_oversized_update_response_is_refused_before_anything_decrypts_it(
-    cn_region, tmp_path
+async def test_an_oversized_update_response_stops_at_the_ceiling_and_falls_back(
+    cn_region, tmp_path, caplog
 ):
     # The measured bodies are 3.4-13.3 KB. A response past the ceiling is a wedged or hostile
-    # endpoint, and it has to stop here rather than at whatever tries to parse it.
+    # endpoint, and it has to stop being read there rather than at whatever tries to parse it —
+    # but the ceiling has already done its whole job by then, so the fetch still finishes off
+    # the gate rather than dying with nothing downloaded.
+    payload = b"PK\x03\x04" + b"catalogue-served" * 64
+    seen: list[httpx.Request] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"x" * (oppo.MAX_RESPONSE_BYTES + 1))
+        seen.append(request)
+        if request.method == "POST":
+            return httpx.Response(200, content=b"x" * (oppo.MAX_RESPONSE_BYTES + 1))
+        return httpx.Response(200, content=payload)
 
     driver = OppoDriver(make_settings(), client=mock_client(handler))
 
-    with pytest.raises(OppoProtocolError) as excinfo:
-        await driver.fetch(plk110_ref("0" * 32), tmp_path)
+    with caplog.at_level(logging.WARNING, logger="uadclaw.drivers.oppo"):
+        archive = await driver.fetch(plk110_ref(hashlib.md5(payload).hexdigest()), tmp_path)
 
-    assert str(oppo.MAX_RESPONSE_BYTES) in str(excinfo.value)
+    assert archive.path.read_bytes() == payload
+    assert str([r for r in seen if r.method == "GET"][-1].url) == PLK110_GATE
+    assert str(oppo.MAX_RESPONSE_BYTES) in caplog.text
+
+
+@pytest.mark.parametrize("status", [403, 500, 503])
+async def test_an_endpoint_that_refuses_falls_back_to_the_gate_it_never_reached(
+    cn_region, tmp_path, caplog, status
+):
+    # The endpoint is the OPTIONAL half: it trails the catalogue on every model measured and
+    # five modern export models refuse it outright, so the gate is the path actually taken.
+    # Killing the fetch on its status would fail every Oppo job at `acquire` while `ref.url`
+    # was live and serving.
+    payload = b"PK\x03\x04" + b"catalogue-served" * 64
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "POST":
+            return httpx.Response(status, text="nope")
+        return httpx.Response(200, content=payload)
+
+    driver = OppoDriver(make_settings(), client=mock_client(handler))
+
+    with caplog.at_level(logging.WARNING, logger="uadclaw.drivers.oppo"):
+        archive = await driver.fetch(plk110_ref(hashlib.md5(payload).hexdigest()), tmp_path)
+
+    assert archive.path.read_bytes() == payload
+    assert str([r for r in seen if r.method == "GET"][-1].url) == PLK110_GATE
+    assert str(status) in caplog.text
+    assert "PLK110" in caplog.text
+    # The traceback survives the fallback: this is a swallowed failure, and WHICH shape the
+    # endpoint failed in is the only sign the protocol moved.
+    assert any(record.exc_info is not None for record in caplog.records)
+
+
+async def test_an_unreachable_endpoint_falls_back_to_the_gate(cn_region, tmp_path, caplog):
+    payload = b"PK\x03\x04" + b"catalogue-served" * 64
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "POST":
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(200, content=payload)
+
+    driver = OppoDriver(make_settings(), client=mock_client(handler))
+
+    with caplog.at_level(logging.WARNING, logger="uadclaw.drivers.oppo"):
+        archive = await driver.fetch(plk110_ref(hashlib.md5(payload).hexdigest()), tmp_path)
+
+    assert archive.path.read_bytes() == payload
+    assert str([r for r in seen if r.method == "GET"][-1].url) == PLK110_GATE
+    assert "unreachable" in caplog.text
+
+
+async def test_a_protocol_change_in_the_endpoints_answer_falls_back_to_the_gate(
+    cn_region, tmp_path, caplog
+):
+    # A 200 offering a URL off the download allowlist. The other two "endpoint answer unusable"
+    # shapes — a different build and an md5 disagreement — already fell back; this one raised
+    # out of `fetch` with nothing downloaded.
+    payload = b"PK\x03\x04" + b"catalogue-served" * 64
+    document = captured_response("plk110")
+    document["otaVersion"] = document["realOtaVersion"] = PLK110_OTA
+    document["components"][0]["componentVersion"] = f"{PLK110_OTA}.97.3d82867d"
+    document["components"][0]["componentPackets"]["url"] = "https://evil.example/a.zip"
+    seen: list[httpx.Request] = []
+    driver = OppoDriver(
+        make_settings(),
+        client=mock_client(
+            endpoint_handler(cn_region, document=document, payload=payload, seen=seen)
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="uadclaw.drivers.oppo"):
+        archive = await driver.fetch(plk110_ref(hashlib.md5(payload).hexdigest()), tmp_path)
+
+    assert archive.path.read_bytes() == payload
+    assert str([r for r in seen if r.method == "GET"][-1].url) == PLK110_GATE
+    assert "evil.example" in caplog.text
+
+
+async def test_a_200_with_no_sealed_body_is_a_protocol_error_not_a_routine_fallback(
+    cn_region, tmp_path, caplog
+):
+    # `(200, None)` used to come back here and get logged as "answered responseCode 200 …
+    # downloading the catalogue's gate instead", which reads as the routine `2004` path. The
+    # gate is still what downloads; what changed is that the log says the envelope moved.
+    payload = b"PK\x03\x04" + b"catalogue-served" * 64
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "POST":
+            return httpx.Response(200, text=json.dumps({"responseCode": 200, "body": None}))
+        return httpx.Response(200, content=payload)
+
+    driver = OppoDriver(make_settings(), client=mock_client(handler))
+
+    with caplog.at_level(logging.WARNING, logger="uadclaw.drivers.oppo"):
+        archive = await driver.fetch(plk110_ref(hashlib.md5(payload).hexdigest()), tmp_path)
+
+    assert archive.path.read_bytes() == payload
+    assert str([r for r in seen if r.method == "GET"][-1].url) == PLK110_GATE
+    assert "envelope shape changed" in caplog.text
+    with pytest.raises(OppoProtocolError):
+        decrypt_update_response(json.dumps({"responseCode": 200, "body": None}), b"k" * 32)
+
+
+async def test_a_ref_carrying_no_digest_verifies_against_the_endpoints_own(cn_region, tmp_path):
+    # A job pinned through `FirmwareJobParams` (build + url, no md5) whose build the endpoint
+    # resolves exactly. Discarding the digest in hand downloads integrity-unverified, and the
+    # gate's 21-byte `{"responseCode":2306}` refusal body then lands as an archive.
+    payload = b"PK\x03\x04" + b"oppo-firmware" * 64
+    document = captured_response("plk110")
+    document["otaVersion"] = document["realOtaVersion"] = PLK110_OTA
+    document["components"][0]["componentVersion"] = f"{PLK110_OTA}.97.3d82867d"
+    document["components"][0]["componentPackets"] = {
+        "url": "https://gauss-compotacostauto-cn.allawnfs.com/component-ota/a.zip",
+        "md5": hashlib.md5(payload).hexdigest(),
+        "size": str(len(payload)),
+    }
+    ref = FirmwareRef(driver="oppo", device="PLK110", build=PLK110_BUILD, url=PLK110_GATE)
+
+    driver = OppoDriver(
+        make_settings(),
+        client=mock_client(endpoint_handler(cn_region, document=document, payload=payload)),
+    )
+    archive = await driver.fetch(ref, tmp_path)
+
+    assert archive.integrity_verified is True
+
+    # And the same ref against an endpoint serving something else under that digest fails
+    # rather than saving it.
+    driver = OppoDriver(
+        make_settings(),
+        client=mock_client(
+            endpoint_handler(cn_region, document=document, payload=b'{"responseCode":2306}')
+        ),
+    )
+    with pytest.raises(FirmwareDownloadError):
+        await driver.fetch(ref, tmp_path)
 
 
 async def test_a_ref_whose_url_is_not_an_oplus_gate_never_reaches_the_update_endpoint(tmp_path):

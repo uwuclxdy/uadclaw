@@ -40,14 +40,26 @@ are Xiaomi (`sgp-api.buy.mi.com`, HyperOS build ids under codenames like `ZORN`)
 OnePlus NA packages hosted on `android.googleapis.com` with no digest published. `REGIONS` is
 therefore both the region table and the row filter: a row whose gate host is not one of the four
 is not this driver's, and admitting the Xiaomi rows here would file a Xiaomi build under
-`driver="oppo"` and double-count that phone in `package_facts.device_count`.
+`driver="oppo"` and double-count that phone in `package_facts.device_count`. All four hosts are
+checked for emptiness separately, because losing one to a rename reclassifies its rows as another
+OEM's and drops 12-40 models behind a list that still looks like a list.
+
+**One `ota_version` is not one archive: the row's REGION is half the identity.** Of the 95
+distinct `(model, ota_version)` pairs among those 107 rows, 12 appear twice with a different md5
+AND a different size — `CPH2449_11.H.15_3150_202607172114` is EU md5 `15e2d68a…`/7,751,474,897 B
+and GLO md5 `2989f602…`/7,749,485,507 B. The gate HOST cannot separate them: both of those rows
+are on `component-ota-eu.allawnos.com`, as are both of `CPH2645`'s on the sg host. So a ref's
+build is `{ota_version}_{REGION}`, the same call `samsung.parse_version_index` makes about a CSC,
+and for the same downstream reason — `package_observations` is keyed on `(device_key, build,
+device_path)`, so two regional images sharing one build id upsert onto each other's rows and the
+merged package row ends up describing an image no phone ships.
 
 **The digest a row publishes describes the zip as served.** `size` matched the `Content-Range`
 total to the byte on both rows it was measured against (`PLK110`/CN 9,146,672,362 and
 `CPH2653`/EU 8,304,912,951, both opening `50 4b 03 04`), and `md5` sits beside it in the same
 `componentPackets` object the endpoint answers with, so the download is verified in md5 rather
 than landing integrity-unverified. Only a full transfer can prove the digest itself; what this
-buys today is that a gate answering its 30-byte `2306` refusal body fails loudly instead of
+buys today is that a gate answering its 21-byte `2306` refusal body fails loudly instead of
 being saved as an archive.
 
 **The protocol.** Request version 2 (ColorOS/RUI 2 and later) posts one AES-256-CTR blob to
@@ -55,16 +67,23 @@ being saved as an archive.
 under a per-region public key and travels in a `protectedKey` header, and the response body comes
 back under the same key with its own IV. There is **no IMEI, no account and no device state**:
 `imei` is fifteen zeroes and `deviceId` is its sha256, which is what makes a pipeline owning no
-phone able to ask at all. The `otaVersion` is synthesized as `{model}_11.{branch}.00_0001_
+phone able to ask at all. The `otaVersion` is synthesized as `{model}_{major}.{branch}.00_0001_
 100000000000` — the tail is load-bearing, `_0000_000000000000` answered `2100` on a device that
-answered `200` to this one — and the branch letter is read off the catalogue's own `ota_version`
-rather than enumerated, which is the difference between one request and four.
+answered `200` to this one — and both the major and the branch letter are read off the
+catalogue's own `ota_version` rather than enumerated, which is the difference between one request
+and four.
 
 The download URL comes back as either a signed CDN link or another `/downloadCheck` gate. The
 gate wants a `userId: oplus-ota|<anything>` header and validates only that prefix; without it it
 answers `200 {"responseCode":2306}`, which is a body a downloader would otherwise save as an
 archive. The signed link expires in about ten minutes and the gate does not, so what this driver
 stores in a `FirmwareRef` is always the gate.
+
+**The endpoint is the optional half and the gate is the durable one, so no endpoint failure ends
+a fetch.** A 500, a transport error, a body past the memory ceiling and a response this driver
+cannot read all land where `2004` already landed: a warning naming the model and the cause, then
+the catalogue's own gate. The reverse would let the reverse-engineered half fail every Oppo job
+at `acquire` while the URL the ref carries was live and serving.
 
 Written from the protocol and from captured request/response pairs. `R0rt1z2/realme-ota` is
 GPL-3.0 and was read to understand the wire format; no code from it is here. The four public
@@ -234,23 +253,38 @@ ALLOWED_DOWNLOAD_DOMAINS = frozenset(
 # `PLK110_11.A.72_0720_202607301131`. All 107 OPlus catalogue rows match, the major field is
 # `11` on every one of them, and the branch letter runs over A, C, F, H and J — which is why the
 # branch is read here rather than enumerated over the four letters a client without an index has
-# to guess between.
-_OTA_VERSION_RE = re.compile(
-    r"^(?P<model>[A-Za-z0-9]{2,32})_(?P<major>\d{1,3})\.(?P<branch>[A-Z0-9]{1,4})\."
-    r"(?P<minor>\d{1,4})_(?P<code>\d{1,8})_(?P<stamp>\d{6,20})$"
+# to guess between. The major is read for the same reason and not hardcoded to the one value the
+# catalogue happens to publish today: a request built at the wrong major is a `2004` this driver
+# cannot tell from the export-model hole.
+_OTA_VERSION_PATTERN = (
+    r"(?P<model>[A-Za-z0-9]{2,32})_(?P<major>\d{1,3})\.(?P<branch>[A-Z0-9]{1,4})\."
+    r"(?P<minor>\d{1,4})_(?P<code>\d{1,8})_(?P<stamp>\d{6,20})"
 )
+_OTA_VERSION_RE = re.compile(f"^{_OTA_VERSION_PATTERN}$")
+# A ref's build id: that `ota_version` plus the catalogue row's own region. The region is what
+# separates two regional images of one build, and no `ota_version` ends in a `_[A-Z]{2,8}` field,
+# so the two spellings can never be read as each other.
+_REF_BUILD_RE = re.compile(f"^(?P<ota_version>{_OTA_VERSION_PATTERN})_(?P<region>[A-Z]{{2,8}})$")
+# The catalogue's own region strings, which are NOT the four `REGIONS` keys: the global rows say
+# `GLO` where the endpoint's table says `GL`.
+_CATALOGUE_REGION_RE = re.compile(r"^[A-Z]{2,8}$")
 # The leading integer of the catalogue's marketing version (`CPH2655_15.0.0.832(EX01)` -> 15).
 _MARKETING_MAJOR_RE = re.compile(r"^[A-Za-z0-9]{2,32}_(?P<major>\d{1,3})\.")
-_MD5_RE = re.compile(r"^[0-9a-f]{32}$")
+# Case-insensitive and lowercased on the way in rather than refused. All 107 measured rows are
+# lowercase, which cannot separate "this source is lowercase-only" from "this source was
+# lowercase on 2026-08-12"; `.lower()` is a no-op under the first reading and the fix under the
+# second, and refusing instead would drop every digest in the catalogue at once the day it
+# changed — leaving every download integrity-unverified with a digest in hand.
+_MD5_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
-def synthesize_ota_version(model: str, branch: str) -> str:
+def synthesize_ota_version(model: str, branch: str, *, major: str) -> str:
     """The `otaVersion` that makes the endpoint offer a FULL package rather than an incremental.
 
     `_0001_100000000000` is not decoration: the same request with `_0000_000000000000` answered
     `2100` on a device that answered `200` to this one (measured 2026-08-12, `RMX3301`/GL).
     """
-    return f"{model}_11.{branch}.00_0001_100000000000"
+    return f"{model}_{major}.{branch}.00_0001_100000000000"
 
 
 def ota_version_branch(ota_version: str, *, model: str) -> str | None:
@@ -260,6 +294,47 @@ def ota_version_branch(ota_version: str, *, model: str) -> str | None:
     if match is None or match.group("model") != model:
         return None
     return match.group("branch")
+
+
+def ref_build(ota_version: str, catalogue_region: str) -> str | None:
+    """The build id a ref carries, or None when the row publishes no usable region.
+
+    The region is not decoration and not the gate host's: 12 of the 95 distinct
+    `(model, ota_version)` pairs in the catalogue are published twice with different bytes, and
+    two rows sharing a build id would share a `package_observations` key and overwrite each
+    other's per-path rows. A row this cannot identify is skipped rather than given a build id
+    another row can also claim.
+    """
+    normalized = catalogue_region.strip().upper()
+    if not ota_version or not _CATALOGUE_REGION_RE.match(normalized):
+        return None
+    return f"{ota_version}_{normalized}"
+
+
+@dataclass(frozen=True, slots=True)
+class RefBuild:
+    """A build id this driver minted, taken back apart: the catalogue's own `ota_version` (what
+    the endpoint's answer is compared against) and the fields one query is synthesized from."""
+
+    ota_version: str
+    region: str
+    major: str
+    branch: str
+
+
+def parse_ref_build(build: str, *, model: str) -> RefBuild | None:
+    """A ref's build id back into its parts, or None when it is not one this driver minted for
+    `model` — an operator-typed build or a catalogue shape that changed. Either way the endpoint
+    cannot be asked about it and the ref's own gate is what gets downloaded."""
+    match = _REF_BUILD_RE.match(build)
+    if match is None or match.group("model") != model:
+        return None
+    return RefBuild(
+        ota_version=match.group("ota_version"),
+        region=match.group("region"),
+        major=match.group("major"),
+        branch=match.group("branch"),
+    )
 
 
 def marketing_major(version: str) -> str | None:
@@ -418,9 +493,18 @@ def decrypt_update_response(text: str, key: bytes) -> tuple[int, dict[str, Any] 
             f"({text[:200]!r}); the envelope shape changed"
         )
     code = int(envelope["responseCode"])
-    body = envelope.get("body")
-    if code != RESPONSE_OK or not isinstance(body, str):
+    if code != RESPONSE_OK:
         return code, None
+    body = envelope.get("body")
+    if not isinstance(body, str):
+        # Not the same shape as a non-200 and never logged as one: a `2004` is the endpoint
+        # declining to offer a package, while a `200` carrying no sealed body is the envelope
+        # changing under this driver. The other two envelope failures raise; so does this.
+        raise OppoProtocolError(
+            f"OppoDriver: the update endpoint answered {RESPONSE_OK} with no string `body` "
+            f"({text[:200]!r}); every measured 200 carries the sealed document, so the envelope "
+            "shape changed"
+        )
     try:
         sealed = json.loads(body)
         decryptor = Cipher(
@@ -456,12 +540,20 @@ def resolved_package(document: dict[str, Any], *, model: str) -> ResolvedPackage
     here, so a response whose three names disagree is a protocol change rather than a download.
     """
     components = document.get("components")
-    if not isinstance(components, list) or not components:
+    if not isinstance(components, list) or len(components) != 1:
+        count = len(components) if isinstance(components, list) else "no"
         raise OppoProtocolError(
-            f"OppoDriver: a 200 update response for {model} carries no components; a resolved "
-            "answer always carries exactly one"
+            f"OppoDriver: a 200 update response for {model} carries {count} component(s); a "
+            "resolved answer always carries exactly one (8 of 8 captured 200s). Taking the first "
+            "of several would download part of a split package and only find out at the digest, "
+            "after the whole multi-GB transfer."
         )
-    component = components[0] if isinstance(components[0], dict) else {}
+    component = components[0]
+    if not isinstance(component, dict):
+        raise OppoProtocolError(
+            f"OppoDriver: the resolved component for {model} is not an object "
+            f"({str(component)[:120]})"
+        )
     packets = component.get("componentPackets")
     if not isinstance(packets, dict):
         raise OppoProtocolError(
@@ -494,7 +586,7 @@ def resolved_package(document: dict[str, Any], *, model: str) -> ResolvedPackage
     return ResolvedPackage(
         ota_version=ota_version,
         url=url,
-        md5=md5 if isinstance(md5, str) and _MD5_RE.match(md5) else None,
+        md5=md5.lower() if isinstance(md5, str) and _MD5_RE.match(md5) else None,
         size=int(size) if isinstance(size, str) and size.isdigit() else None,
     )
 
@@ -506,6 +598,17 @@ def parse_catalogue(payload: object, *, source_url: str) -> list[FirmwareRef]:
     `firmware.build_date` can parse, so "newest" falls back to the last row for that device. The
     order is the catalogue's own `build_timestamp` — a model published in several regions is one
     device with several builds, and the newest of them is the newest one anywhere.
+
+    **Empty is checked per gate host, not just overall.** Each of the four carries a disjoint
+    slice of the catalogue (EU 40, CN 37, GL 18, IN 12 on 2026-08-12), and a host that gets
+    renamed does not fail — its rows stop matching the filter and are counted as another OEM's,
+    so 82 models quietly become 45 behind a list that still looks like a list. None of the four
+    is waivable the way `unpack.PARTITIONS_ALLOWED_EMPTY` waives a partition: every one of them
+    has published rows on every read since this catalogue was first measured.
+
+    A row with no readable `source_url` is counted apart from a foreign one, because
+    `_host_of("")` is `""` and folding the two would report a broken OPlus row as some other
+    OEM's in the only message anyone reads when this fails.
     """
     releases = payload.get("releases") if isinstance(payload, dict) else None
     if not isinstance(releases, list) or not releases:
@@ -515,16 +618,23 @@ def parse_catalogue(payload: object, *, source_url: str) -> list[FirmwareRef]:
             "request was refused, not that OPPO published nothing."
         )
     rows: list[tuple[tuple[str, str, str], FirmwareRef]] = []
+    per_gate_host = dict.fromkeys(REGION_BY_GATE_HOST, 0)
     foreign = 0
+    unattributed = 0
     for release in releases:
         if not isinstance(release, dict):
+            unattributed += 1
             continue
-        region = REGION_BY_GATE_HOST.get(_host_of(str(release.get("source_url", ""))))
-        if region is None:
+        host = _host_of(str(release.get("source_url", "")))
+        if not host:
+            unattributed += 1
+            continue
+        if host not in REGION_BY_GATE_HOST:
             foreign += 1
             continue
-        ref = _ref_for(release, region=region)
+        ref = _ref_for(release)
         if ref is not None:
+            per_gate_host[host] += 1
             rows.append(
                 (
                     (
@@ -538,15 +648,26 @@ def parse_catalogue(payload: object, *, source_url: str) -> list[FirmwareRef]:
     if not rows:
         raise EmptyFirmwareIndexError(
             f"OppoDriver: {source_url} answered {len(releases)} rows and not one of them is an "
-            f"OPlus release ({foreign} belong to another OEM). This catalogue carries Xiaomi and "
-            "OnePlus-NA rows too, so zero OPlus rows means the gate hosts moved, not that the "
-            "catalogue is empty."
+            f"OPlus release ({foreign} belong to another OEM, {unattributed} publish no readable "
+            "source_url). This catalogue carries Xiaomi and OnePlus-NA rows too, so zero OPlus "
+            "rows means the gate hosts moved, not that the catalogue is empty."
+        )
+    empty_hosts = sorted(host for host, count in per_gate_host.items() if count == 0)
+    if empty_hosts:
+        raise EmptyFirmwareIndexError(
+            f"OppoDriver: {source_url} contributed no build on {', '.join(empty_hosts)} while the "
+            f"other gate host(s) carried {len(rows)}. Every one of the four has published rows on "
+            f"every read since 2026-08-12, so an empty one is a renamed host whose models are now "
+            f"being counted as another OEM's ({foreign} rows were, {unattributed} were "
+            "unattributable), not a region OPlus stopped serving."
         )
     logger.info(
-        "oppo catalogue: %d build(s) across %d model(s); %d row(s) belong to another OEM",
+        "oppo catalogue: %d build(s) across %d model(s); %d row(s) belong to another OEM, "
+        "%d publish no readable source_url",
         len(rows),
         len({ref.device for _key, ref in rows}),
         foreign,
+        unattributed,
     )
     rows.sort(key=lambda row: row[0])
     return [ref for _key, ref in rows]
@@ -575,24 +696,32 @@ async def _read_capped(response: httpx.Response, *, ceiling: int, context: str) 
     return b"".join(chunks).decode("utf-8", errors="replace")
 
 
-def _ref_for(release: dict[str, Any], *, region: OppoRegion) -> FirmwareRef | None:
+def _ref_for(release: dict[str, Any]) -> FirmwareRef | None:
     model = str(release.get("model", ""))
     ota_version = str(release.get("ota_version", ""))
+    build = ref_build(ota_version, str(release.get("region", "")))
+    if build is None:
+        logger.warning(
+            "oppo: catalogue row %s/%s publishes no usable region, which is the only field that "
+            "separates two regional images of one build; skipping it rather than filing it under "
+            "an id another row can also claim",
+            model,
+            ota_version,
+        )
+        return None
     md5 = str(release.get("md5", "") or "")
     try:
         return FirmwareRef(
             driver=OppoDriver.name,
             device=model,
-            build=ota_version,
+            build=build,
             url=str(release.get("source_url", "")),
-            md5=md5 if _MD5_RE.match(md5) else None,
+            md5=md5.lower() if _MD5_RE.match(md5) else None,
             android_version=marketing_major(str(release.get("version", ""))),
             marketing_name=str(release.get("device", "")) or None,
         )
     except ValueError as exc:
-        logger.warning(
-            "oppo: catalogue row %s/%s did not validate as a ref: %s", model, ota_version, exc
-        )
+        logger.warning("oppo: catalogue row %s/%s did not validate as a ref: %s", model, build, exc)
         return None
 
 
@@ -674,16 +803,44 @@ class OppoDriver(FirmwareDriver):
     ) -> ResolvedPackage | None:
         """The endpoint's own URL for exactly the build `ref` names, or None to use the gate.
 
+        Every way the endpoint can fail ends here rather than at the caller. It is the OPTIONAL
+        half of this driver: `ref.url` is a durable `/downloadCheck` gate that serves the same
+        bytes, the endpoint trails the catalogue on every model where both were measured, and
+        five modern export models refuse it outright — so letting a 500, a wedged body or a
+        protocol change out of here would fail an acquire stage the gate would have served.
+        """
+        try:
+            return await self._ask_endpoint(client, ref)
+        except FirmwareError as exc:
+            # Distinct from the `2004` and build-mismatch fallbacks below, which are the endpoint
+            # answering something usable-but-not-wanted. This one is the endpoint not answering,
+            # and WHICH shape it fails in is the only sign the protocol moved.
+            logger.warning(
+                "oppo: resolving %s/%s against the update endpoint failed (%s); downloading the "
+                "catalogue's gate instead, which is the durable URL this ref carries",
+                ref.device,
+                ref.build,
+                exc,
+                exc_info=exc,
+            )
+            return None
+
+    async def _ask_endpoint(
+        self, client: httpx.AsyncClient, ref: FirmwareRef
+    ) -> ResolvedPackage | None:
+        """One update query, or None when the answer is not this exact build.
+
         Only an exact `ota_version` match is accepted. The endpoint answers the next build in a
         chain rather than a requested one, so anything else means it offered a DIFFERENT package,
         and downloading that under this ref's name would file one build's packages under
         another's build id.
         """
         region = REGION_BY_GATE_HOST.get(_host_of(ref.url))
-        branch = ota_version_branch(ref.build, model=ref.device)
-        if region is None or branch is None:
+        parsed = parse_ref_build(ref.build, model=ref.device)
+        if region is None or parsed is None:
             logger.info(
-                "oppo: %s/%s carries no OPlus gate host or branch, downloading the stored URL",
+                "oppo: %s/%s carries no OPlus gate host or build this driver minted, downloading "
+                "the stored URL",
                 ref.device,
                 ref.build,
             )
@@ -693,7 +850,7 @@ class OppoDriver(FirmwareDriver):
         now_ms = int(time.time() * 1000)
         wire, headers = build_update_request(
             model=ref.device,
-            ota_version=synthesize_ota_version(ref.device, branch),
+            ota_version=synthesize_ota_version(ref.device, parsed.branch, major=parsed.major),
             region=region,
             android_major=ref.android_version or "16",
             key=key,
@@ -733,11 +890,11 @@ class OppoDriver(FirmwareDriver):
                 region.endpoint,
                 code,
                 ref.device,
-                synthesize_ota_version(ref.device, branch),
+                synthesize_ota_version(ref.device, parsed.branch, major=parsed.major),
             )
             return None
         package = resolved_package(document, model=ref.device)
-        if package.ota_version != ref.build:
+        if package.ota_version != parsed.ota_version:
             # Routine rather than alarming: the endpoint trailed the catalogue on every model
             # where both were measured (2026-08-12, `PLK110` A.68/A.72, `PKC110` C.78/C.79,
             # `RMX5010` F.61/F.66), and asking it again at its own answer just returns `2004`,
@@ -771,15 +928,26 @@ class OppoDriver(FirmwareDriver):
         client, owned = self._open_client()
         try:
             package = await self._resolve_direct(client, ref)
+            url = ref.url
+            # The ref's own digest first: it is the catalogue's, and the endpoint's is only
+            # reached after `_resolve_direct` proved the two name one build and do not disagree.
+            # Falling back to it matters for a ref that carries none — a job pinned through
+            # `FirmwareJobParams` with a build and a URL and no md5 — because the alternative is
+            # an integrity-unverified download with a published digest sitting in hand, and the
+            # gate's 21-byte `{"responseCode":2306}` refusal body landing as an archive.
+            digest = ref.md5
+            if package is not None:
+                url = package.url
+                digest = ref.md5 or package.md5
             return await download_to_file(
                 client,
-                package.url if package is not None else ref.url,
+                url,
                 dest_dir / ref.archive_filename,
                 # Both paths end at a `/downloadCheck` gate or at a link it minted, and the gate
-                # answers a 30-byte `{"responseCode":2306}` body rather than an error without
-                # this. The md5 above is what turns that body into a named failure.
+                # answers a 21-byte `{"responseCode":2306}` body rather than an error without
+                # this. The digest above is what turns that body into a named failure.
                 headers={"userId": GATE_USER_ID},
-                expected_digest=ref.md5,
+                expected_digest=digest,
                 digest_algorithm="md5",
                 max_bytes=self._max_archive_bytes,
             )

@@ -67,8 +67,10 @@ async def ask(client: httpx.AsyncClient, *, model: str, region_name: str, branch
     region = REGIONS[region_name]
     key = secrets.token_bytes(32)
     wire, headers = build_update_request(
+        # The OTA-format major, which is 11 on all 107 catalogue rows and is not the Android
+        # major `major` carries (15 or 16 on the same rows).
+        ota_version=synthesize_ota_version(model, branch, major="11"),
         model=model,
-        ota_version=synthesize_ota_version(model, branch),
         region=region,
         android_major=major,
         key=key,
