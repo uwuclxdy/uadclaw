@@ -269,42 +269,133 @@ async def test_search_matches_a_package_name_substring(db_env, db_session_factor
 # --- NULL vs false, the tri-state contract ----------------------------------------------------
 
 
-async def test_queued_null_false_and_true_are_three_distinct_states(
+async def test_the_verdict_badge_distinguishes_pending_not_queued_and_queued(
     db_env, db_session_factory, client
 ):
+    """The list row used to carry two separate badges (`queued`, `upstream`) derived from the
+    same `filter_verdict` enum — redundant, and together with `floor`/`conflict` it put four
+    tag-styled badges in one row against SPEC §5's "at most three" cap. They are merged into
+    one `verdict` badge here, so this is the tri-state test that badge now has to pass."""
     await _seed(
         db_session_factory,
         _fact("com.example.pending"),
         # No PackageAnalysis row at all: the filter stage has not touched this package.
         _fact("com.example.rejected"),
-        _analysis("com.example.rejected", queued=False),
+        _analysis("com.example.rejected", queued=False, filter_verdict="already_upstream"),
         _fact("com.example.queued"),
-        _analysis("com.example.queued", queued=True),
+        _analysis("com.example.queued", queued=True, filter_verdict="queued"),
     )
     await _login(client)
     resp = await client.get("/corpus")
     text = resp.text
 
-    # Each of the three renders with wording that does not collide with either of the others.
-    # Column order is package, devices, floor, queued, upstream, conflict — the queued badge
-    # is column index 3, found by walking the row's own `<td>` cells rather than by proximity
+    # Column order is package, devices, floor, verdict, conflict — the verdict badge is
+    # column index 3, found by walking the row's own `<td>` cells rather than by proximity
     # to the package name, which the floor column's badge sits closer to.
     import re
 
-    def queued_badge(package: str) -> str:
+    def verdict_badge(package: str) -> str:
         idx = text.index(package)
         row_start = text.rindex("<tr>", 0, idx)
         row_end = text.index("</tr>", idx)
         row = text[row_start:row_end]
         cells = row.split("<td")[1:]
-        queued_cell = cells[3]
-        match = re.search(r">([^<]*)</span>", queued_cell)
-        assert match, f"no tag span in the queued cell for {package}: {queued_cell!r}"
+        verdict_cell = cells[3]
+        match = re.search(r">([^<]*)</span>", verdict_cell)
+        assert match, f"no tag span in the verdict cell for {package}: {verdict_cell!r}"
         return match.group(1).strip()
 
-    assert queued_badge("com.example.pending") == "filter pending"
-    assert queued_badge("com.example.rejected") == "not queued"
-    assert queued_badge("com.example.queued") == "queued"
+    assert verdict_badge("com.example.pending") == "filter pending"
+    assert verdict_badge("com.example.rejected") == "already upstream"
+    assert verdict_badge("com.example.queued") == "queued"
+
+
+async def test_a_row_never_shows_more_than_three_badges_at_once(db_env, db_session_factory, client):
+    """SPEC §5: at most three badges in any one place. Before this round the row could show
+    four (floor, queued, upstream, conflict) — queued/upstream merged into one verdict badge
+    since both were derived from the same `filter_verdict` enum. floor + verdict + conflict is
+    the ceiling case; this pins that a row carrying all three never exceeds it."""
+    await _seed(
+        db_session_factory,
+        _fact(
+            "com.example.busy",
+            has_conflict=True,
+            conflicts=[
+                {
+                    "field": "cert_issuer",
+                    "values": [
+                        {"value": "a", "devices": ["d1"]},
+                        {"value": "b", "devices": ["d2"]},
+                    ],
+                }
+            ],
+        ),
+        _analysis(
+            "com.example.busy",
+            floor="Unsafe",
+            floor_rule="core_app",
+            queued=True,
+            filter_verdict="queued",
+        ),
+    )
+    await _login(client)
+
+    resp = await client.get("/corpus")
+    text = resp.text
+    idx = text.index("com.example.busy")
+    row_start = text.rindex("<tr>", 0, idx)
+    row_end = text.index("</tr>", idx)
+    row = text[row_start:row_end]
+
+    badge_count = row.count('class="tag ')
+    assert badge_count == 3, f"expected floor + verdict + conflict, got {badge_count}: {row!r}"
+
+
+async def test_filter_verdict_never_renders_its_raw_enum_spelling(
+    db_env, db_session_factory, client
+):
+    """The bug named in docs/todo.md §16: `package_analysis.filter_verdict` rendered as its raw
+    `already_upstream` spelling on the corpus detail screen. `FILTER_VERDICT_LABEL` maps every
+    defined member to display text; this pins that the raw spelling never reaches either
+    screen, list or detail."""
+    await _seed(
+        db_session_factory,
+        _fact("com.example.mapped"),
+        _analysis(
+            "com.example.mapped",
+            queued=False,
+            upstream_present=True,
+            filter_verdict="already_upstream",
+        ),
+    )
+    await _login(client)
+
+    listing = await client.get("/corpus")
+    detail = await client.get("/corpus/com.example.mapped")
+
+    assert "already_upstream" not in listing.text
+    assert "already_upstream" not in detail.text
+    assert "already upstream" in listing.text
+    assert "already upstream" in detail.text
+
+
+async def test_an_unmapped_filter_verdict_falls_through_raw_rather_than_prettified(
+    db_env, db_session_factory, client
+):
+    """A value nobody enumerated has to read as visibly unhandled, never as plausible prose a
+    blanket `.replace('_', ' ')` would produce silently — that is the exact failure mode
+    `FILTER_VERDICT_LABEL` exists to avoid (SPEC §4)."""
+    await _seed(
+        db_session_factory,
+        _fact("com.example.futureverdict"),
+        _analysis("com.example.futureverdict", filter_verdict="some_future_verdict"),
+    )
+    await _login(client)
+
+    resp = await client.get("/corpus/com.example.futureverdict")
+
+    assert "some_future_verdict" in resp.text
+    assert "some future verdict" not in resp.text
 
 
 async def test_queued_filter_null_returns_only_the_unfiltered_packages(
@@ -507,6 +598,30 @@ async def test_conflicts_render_with_both_values_and_are_not_hidden_by_default(
     assert "issuer-b" in detail_resp.text
     assert "pixel:oriole" in detail_resp.text
     assert "google:emulator-a16" in detail_resp.text
+
+
+# --- icons: has_icon / the monogram fallback -------------------------------------------------
+
+
+async def test_a_package_with_no_icon_renders_the_monogram_fallback(
+    db_env, db_session_factory, client
+):
+    """`icon_bytes`/`icon_mime` land on `package_facts` in a sibling worktree of this same
+    round and are not on this branch's `PackageFact` yet, so `_has_icon`'s `getattr` default
+    always reads False here — this pins the fallback path (the only one this worktree can
+    exercise) rather than the `<img>` path, which needs that migration to render for real."""
+    await _seed(db_session_factory, _fact("com.example.noicon"), _analysis("com.example.noicon"))
+    await _login(client)
+
+    listing = await client.get("/corpus")
+    detail = await client.get("/corpus/com.example.noicon")
+
+    assert 'class="monogram-sm"' in listing.text
+    assert 'aria-label="com.example.noicon"' in listing.text
+    assert ">NO<" in listing.text  # last dotted component "noicon" -> "NO"
+    assert "/icons/com.example.noicon" not in listing.text
+    assert 'class="monogram-sm"' in detail.text
+    assert ">NO<" in detail.text
 
 
 # --- untrusted bytes: package names are firmware data, never |safe -----------------------------

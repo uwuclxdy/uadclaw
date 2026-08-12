@@ -32,6 +32,7 @@ from sqlalchemy import Select, case, func, select
 
 from uadclaw import web
 from uadclaw.db import get_session_factory
+from uadclaw.filters import FilterVerdict
 from uadclaw.ladder import DANGER_ORDER, Removal, danger_rank
 from uadclaw.models import PackageAnalysis, PackageFact
 
@@ -70,6 +71,40 @@ FLOOR_TAG_CLASS: dict[str, str] = {
     str(Removal.UNSAFE): "tag-danger",
 }
 
+# `filter_verdict` is `uadclaw.filters.FilterVerdict`'s own spelling, meant for `uad_lists.json`
+# and never for a screen. A blanket `.replace("_", " ")` would also prettify a value nobody
+# enumerated, so a future FilterVerdict member would render as plausible prose instead of as
+# the visibly-unhandled raw string it should. `.get(value, value)` keeps that property: an
+# unmapped value falls through unprettified rather than silently passing for handled.
+FILTER_VERDICT_LABEL: dict[str, str] = {
+    str(FilterVerdict.QUEUED): "queued",
+    str(FilterVerdict.ALREADY_UPSTREAM): "already upstream",
+    str(FilterVerdict.AUTO_GENERATED_RRO): "generated overlay",
+    str(FilterVerdict.EMULATOR_ONLY): "emulator only",
+}
+
+FILTER_VERDICT_TAG_CLASS: dict[str, str] = {
+    str(FilterVerdict.QUEUED): "tag-success",
+    str(FilterVerdict.ALREADY_UPSTREAM): "tag-info",
+    str(FilterVerdict.AUTO_GENERATED_RRO): "tag-default",
+    str(FilterVerdict.EMULATOR_ONLY): "tag-default",
+}
+
+
+def _has_icon(fact: PackageFact) -> bool:
+    """`icon_bytes`/`icon_mime` land on `package_facts` in a sibling worktree of this same
+    round and are not on this branch's `PackageFact` yet. `getattr` with a default keeps this
+    screen's own gate green until that migration merges, and reads the real column exactly
+    the same way once it has — nothing here changes at that point."""
+    return getattr(fact, "icon_mime", None) is not None
+
+
+def _monogram(package: str) -> str:
+    """Two letters, from the last dotted component (icon contract, SPEC §6): a deterministic
+    fallback for the ~62% of packages measured to carry no icon at all."""
+    last = package.rsplit(".", 1)[-1]
+    return last[:2].upper() or "?"
+
 
 @dataclass(frozen=True, slots=True)
 class CorpusRow:
@@ -81,9 +116,10 @@ class CorpusRow:
     device_count: int
     floor: str | None
     floor_rule: str | None
-    queued: bool | None
-    upstream_present: bool | None
+    filter_verdict: str | None
     has_conflict: bool
+    has_icon: bool
+    monogram: str
 
 
 def _toggle_dir(column: str, sort: str, direction: str) -> str:
@@ -179,6 +215,8 @@ async def corpus_screen(request: Request):
         "dir": direction,
         "floors": [str(removal) for removal in Removal],
         "FLOOR_TAG_CLASS": FLOOR_TAG_CLASS,
+        "FILTER_VERDICT_LABEL": FILTER_VERDICT_LABEL,
+        "FILTER_VERDICT_TAG_CLASS": FILTER_VERDICT_TAG_CLASS,
         "filter_warning": floor_warning or queued_warning or upstream_warning,
     }
     filters_active = bool(q or floor_filter or queued_filter or upstream_filter)
@@ -228,9 +266,10 @@ async def corpus_screen(request: Request):
             device_count=fact.device_count,
             floor=analysis.floor if analysis is not None else None,
             floor_rule=analysis.floor_rule if analysis is not None else None,
-            queued=analysis.queued if analysis is not None else None,
-            upstream_present=analysis.upstream_present if analysis is not None else None,
+            filter_verdict=analysis.filter_verdict if analysis is not None else None,
             has_conflict=fact.has_conflict,
+            has_icon=_has_icon(fact),
+            monogram=_monogram(fact.package),
         )
         for fact, analysis in result
     ]
@@ -273,6 +312,8 @@ async def corpus_detail(request: Request, package: str):
         "active_nav": "corpus",
         "package": package,
         "FLOOR_TAG_CLASS": FLOOR_TAG_CLASS,
+        "FILTER_VERDICT_LABEL": FILTER_VERDICT_LABEL,
+        "FILTER_VERDICT_TAG_CLASS": FILTER_VERDICT_TAG_CLASS,
     }
     session_factory = get_session_factory()
     async with session_factory() as session:
@@ -295,4 +336,6 @@ async def corpus_detail(request: Request, package: str):
 
     context["fact"] = fact
     context["analysis"] = analysis
+    context["has_icon"] = _has_icon(fact)
+    context["monogram"] = _monogram(fact.package)
     return web.page(request, "corpus_detail.html", context)
