@@ -1,0 +1,56 @@
+/* ============================================================
+   uadclaw — the few rules cloudy-ui does not ship
+
+   `ui.css` is a VERBATIM extraction of the cloudy-ui design language and is meant to stay
+   re-extractable when that language updates. So anything this app needs and cloudy-ui does
+   not define lives here instead, loaded after it, and stays small enough to re-read.
+   ============================================================ */
+
+/* cloudy-ui ships no bare `a` rule, because it expects links to be components. A dashboard
+   renders links it did not author: corroboration sources, vendor index urls, upstream
+   entries. Left alone those render at the user agent's default dark blue on a dark surface,
+   which is the one contrast failure nothing else here can produce. Every named component
+   (.navbar-link, .btn, .nav-item) sets its own colour and wins on specificity, so this
+   reaches exactly the unclassed links. */
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
+
+/* htmx's own convention, which needs two rules to exist or every in-flight request is
+   silent. A vendor index fetch takes seconds and reaches the network, so "nothing appears to
+   have happened" is the default without this. `htmx-request` is set by htmx on the issuing
+   element (or on `hx-indicator`'s target) for exactly the duration of the request. */
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+  opacity: 1;
+}
+
+/* A request whose element is disabled for the duration still has to read as busy rather than
+   as broken. */
+[disabled].htmx-request,
+.htmx-request [disabled] {
+  cursor: progress;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .htmx-indicator {
+    transition: none;
+  }
+}
