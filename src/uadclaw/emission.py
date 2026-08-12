@@ -1,0 +1,532 @@
+"""Approved entries into `uad_lists.json` bytes and into the PR body that discloses them
+(`docs/pipeline-design.md` §10). Pure: no DB, no filesystem, no subprocess, no network, no
+clock — the same posture as `bundle.py` and for the same reason. A clock in here would make
+the emitted bytes differ between two runs over the same approved batch, and "the question is
+pinned even though the answer is not" is the only reproducibility claim this project makes.
+
+**Insertion is a textual splice, never a re-serialization.** `json.dump` over the whole
+document is not a slower way to do this, it is a different and wrong operation. Measured
+2026-08-13 over the live 5372-entry file: two key orders (4267 entries in the dominant
+`list, description, dependencies, neededBy, labels, removal`, 1051 in
+`description, removal, list, ...`), 51 entries carrying a `suggestions` key the upstream
+struct does not declare, three more carrying `leabel`/`labelid`/a leading `labels`, and even
+the package-key indentation is not uniform (5362 keys at two spaces, 6 at four, 1 at one). A
+round-trip normalises every one of those into a multi-thousand-line reformat diff bundled
+into a content PR, which is a documented upstream rejection reason. So every pre-existing
+byte survives verbatim and the new entries are spliced in ahead of the closing brace.
+
+Three more things shape the module:
+
+- **The vocabulary is imported, never restated.** `removal` tiers come from `ladder.Removal`
+  and `list` categories from `classify.UadList`. A second copy of a value set that ships into
+  somebody else's repository is exactly the drift that goes unnoticed until a PR is rejected,
+  and `Removal` is additionally never ordered by its own comparison — `danger_rank` is the
+  only ordering, because `"Expert" < "Recommended"` lexicographically.
+- **Refusal over repair.** A description carrying whitespace next to a newline, a rating under
+  its computed floor, a package with no device provenance: each refuses the whole emission
+  naming the package. The description is what a human approved in triage, so the fix belongs
+  to that human via a triage edit rather than to a silent rewrite here, and a rating below its
+  floor came from misreading the same evidence the description was written from.
+- **`_validate` is the one seam.** Both public writers (`build_entry`, `insert_entries`) pass
+  through it, so no caller can be the one that forgets — the same shape `classifystore._upsert`
+  uses to make the floor structural rather than remembered.
+"""
+
+import json
+import re
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from uadclaw.classify import UadList
+from uadclaw.ladder import Removal, danger_rank
+
+# Upstream's dominant key order, and the order every entry this module emits uses regardless
+# of what its neighbours in the file happen to use. Emitting the minority order to "match the
+# neighbourhood" would make the diff harder to read for no gain: an appended entry has no
+# neighbourhood, it lands at the end of the file.
+DOMINANT_KEY_ORDER: tuple[str, ...] = (
+    "list",
+    "description",
+    "dependencies",
+    "neededBy",
+    "labels",
+    "removal",
+)
+
+# The vendor a package is filed under when its device keys name more than one driver.
+SHARED_VENDOR = "shared"
+
+# The live file's prevailing shape, measured 2026-08-13: 5362 of 5372 package keys sit at two
+# spaces, and every one of the 32248 field lines but two sits at four.
+_KEY_INDENT = "  "
+_FIELD_INDENT = "    "
+
+# What RFC 8259 lets stand between tokens, and deliberately not `str.isspace()`: that also
+# matches NBSP and U+2028, so skipping them here would accept a leading byte the JSON parser
+# itself rejects and hand back a document `json.loads` refuses.
+_JSON_WHITESPACE = " \t\n\r"
+
+# Upstream's literal formatting rule, from maintainer `@AnonymousWP` on PR #1180: no space
+# adjacent to a `\n` inside a description, because it indents the next sentence. Wider than
+# `classify._SPACE_NEXT_TO_NEWLINE`, which matches a literal space only: a tab or a NBSP
+# indents exactly the same and that pattern does not see it. Measured over the live file
+# 2026-08-13, the space-only spelling finds 42 violating entries and this one finds 43.
+_WHITESPACE_NEXT_TO_NEWLINE = re.compile(r"[^\S\n]\n|\n[^\S\n]")
+
+# Control characters, refused in any name this module writes as a JSON key or into a name
+# array. `json.dumps` would escape them into valid JSON, which is the problem: the file stays
+# parseable and a human reviewing the PR cannot see what they are approving.
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+
+# A bundle hash as `bundle.bundle_sha256` spells it.
+_SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
+
+# The schemes a bundle base URL may carry. Operator configuration rather than third-party
+# input, but it is rendered into a link in a document a stranger clicks.
+_BUNDLE_URL_SCHEMES = ("http://", "https://")
+
+
+class EmissionError(RuntimeError):
+    """A batch could not be emitted. Bad input to emission — an approved row that is not
+    shippable, or a `uad_lists.json` that is not the file it claims to be — never a bug here,
+    and always fatal to the whole batch rather than to one entry: these bytes and the PR body
+    that discloses them ship as one unit."""
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedPackage:
+    """One human-approved package, as it will appear upstream plus what discloses it.
+
+    `uad_list` rather than `list` because the attribute cannot be named after the builtin;
+    `build_entry` maps it back to upstream's spelling, along with `needed_by` -> `neededBy`.
+
+    Nothing here has a default. Every field is either shipped into somebody else's repository
+    or is part of the disclosure that ships with it, so a caller that has not decided one has
+    not finished, and a default would let it ship the default.
+    """
+
+    package: str
+    uad_list: str
+    description: str
+    dependencies: tuple[str, ...]
+    needed_by: tuple[str, ...]
+    labels: tuple[str, ...]
+    removal: str
+    # The ladder's computed lower bound, or None when none was recorded. Carried so emission
+    # can refuse a rating that fell under it; see `_validate`.
+    floor: str | None
+    bundle_sha256: str
+    model: str
+    # `<driver>:<device>`, from `device_scans.device_key`. The vendor grouping reads the
+    # driver half of these and nothing else.
+    device_keys: tuple[str, ...]
+
+
+def _check_name(value: object, *, subject: str, field: str) -> str:
+    """One package name, as a key or as an element of `dependencies`/`neededBy`."""
+    if not isinstance(value, str) or not value.strip():
+        raise EmissionError(
+            f"{subject}: {field} is {value!r}, which is not a package name. Upstream reads "
+            "these as `String`, and a blank one becomes an entry nobody can look up."
+        )
+    found = _CONTROL_CHARACTERS.search(value)
+    if found is not None:
+        raise EmissionError(
+            f"{subject}: {field} {value!r} carries the control character "
+            f"{found.group()!r}. It would be escaped into valid JSON and stay invisible to "
+            "the reviewer reading the PR, so it is refused; fix it in triage."
+        )
+    return value
+
+
+def _validate(package: ApprovedPackage, *, subject: str) -> None:
+    """Everything that must hold before an entry and its disclosure may ship.
+
+    The single seam both writers pass through. Checks are ordered so the message names the
+    first thing wrong rather than a consequence of it: the tiers are parsed before the floor
+    is compared against one.
+    """
+    _check_name(package.package, subject=subject, field="package")
+    name = package.package
+
+    if package.uad_list not in tuple(UadList):
+        raise EmissionError(
+            f"{subject}: {name} has list {package.uad_list!r}, which upstream does not "
+            f"declare. It is one of {', '.join(UadList)}; `Pending` exists in the upstream "
+            "enum, is used by zero entries and has no written definition, so this pipeline "
+            "cannot propose it either."
+        )
+    if package.removal not in tuple(Removal):
+        raise EmissionError(
+            f"{subject}: {name} has removal {package.removal!r}, which is not one of "
+            f"{', '.join(Removal)}. `removal` reaches phones through Canta, AppManager and "
+            "android-debloat-list as well as uad-ng, so a tier nobody defined is refused."
+        )
+
+    if not package.description.strip():
+        raise EmissionError(
+            f"{subject}: {name} has a blank description. The description is the entry's whole "
+            "content and the thing the corroboration bar is about; there is nothing to ship."
+        )
+    offender = _WHITESPACE_NEXT_TO_NEWLINE.search(package.description)
+    if offender is not None:
+        raise EmissionError(
+            f"{subject}: {name}'s description carries {offender.group()!r} — whitespace next "
+            "to a newline, which indents the next sentence when the list is rendered and is a "
+            "literal upstream request (PR #1180). Rewriting it here would change what a human "
+            "approved in triage, so the whole batch is refused; edit the description in "
+            "triage and re-emit."
+        )
+
+    if package.floor is not None:
+        if package.floor not in tuple(Removal):
+            raise EmissionError(
+                f"{subject}: {name} carries floor {package.floor!r}, which is not one of "
+                f"{', '.join(Removal)}. A floor that cannot be read cannot bound anything; "
+                "re-run the rule_ladder stage over this corpus."
+            )
+        if danger_rank(Removal(package.removal)) < danger_rank(Removal(package.floor)):
+            raise EmissionError(
+                f"{subject}: {name} is rated {package.removal} against a computed floor of "
+                f"{package.floor}. Raising it to the floor here would keep the misreading that "
+                "produced it and hide it behind a corrected number, so the batch is refused; "
+                "re-classify the package or record a human decision at or above the floor."
+            )
+
+    for field_name, values in (
+        ("dependencies", package.dependencies),
+        ("neededBy", package.needed_by),
+    ):
+        for value in values:
+            _check_name(value, subject=subject, field=f"{name}'s {field_name} entry")
+    for label in package.labels:
+        if not isinstance(label, str) or not label.strip():
+            raise EmissionError(
+                f"{subject}: {name} carries the label {label!r}. Upstream reads `labels` as "
+                "`Vec<String>`, so a blank or non-string element fails its serde round-trip."
+            )
+
+    if not _SHA256.fullmatch(package.bundle_sha256):
+        raise EmissionError(
+            f"{subject}: {name} carries bundle_sha256 {package.bundle_sha256!r}, which is not "
+            "a sha256 digest. That hash is the entire evidence disclosure the PR body carries, "
+            "and an entry ships with its disclosure or not at all."
+        )
+    if not package.model.strip():
+        raise EmissionError(
+            f"{subject}: {name} names no model. Disclosing which model wrote a description is "
+            "mandatory upstream, so an unrecorded one is a refusal rather than a line quietly "
+            "left out of the PR body."
+        )
+
+
+def _vendor(device_keys: Sequence[str], *, subject: str) -> str:
+    """The driver every one of these device keys names, or `SHARED_VENDOR`."""
+    if not device_keys:
+        raise EmissionError(
+            f"{subject}: no device keys. A package with no device provenance has nothing to "
+            "file it under, and its name is not a substitute — a name-prefix rule swept 70 "
+            "Xiaomi packages into an OPPO bucket in this repo once already. Re-run the scan "
+            "for the devices that shipped it, or drop it from the batch."
+        )
+    drivers: set[str] = set()
+    for key in device_keys:
+        driver, separator, device = key.partition(":")
+        if not separator or not driver or not device:
+            raise EmissionError(
+                f"{subject}: {key!r} is not a `<driver>:<device>` device key. The vendor a "
+                "branch is filed under is read off that prefix and nothing else, so a key "
+                "with no driver half would file the package under a vendor nobody wrote; fix "
+                "the device_scans row rather than guessing from the package name."
+            )
+        drivers.add(driver)
+    return next(iter(drivers)) if len(drivers) == 1 else SHARED_VENDOR
+
+
+def vendor_for(device_keys: Sequence[str]) -> str:
+    """Which vendor branch a package belongs on, from its device provenance alone.
+
+    One driver across every key is that driver; more than one is `SHARED_VENDOR`, because a
+    package two OEMs ship is not either OEM's to review in isolation. Deliberately not derived
+    from the package name: the grouping reads a field that exists rather than a heuristic over
+    one that only looks like it does.
+    """
+    return _vendor(device_keys, subject="vendor_for")
+
+
+def group_by_vendor(packages: Iterable[ApprovedPackage]) -> dict[str, tuple[ApprovedPackage, ...]]:
+    """Split an approved batch into the vendor branches it will be pushed as.
+
+    Vendors and the packages under each come back sorted. Upstream's file is unsorted and
+    append-only, so nothing downstream needs an order — which is exactly why this one is fixed:
+    two runs over the same approved set have to produce the same branch, or the bytes stop
+    being comparable and the batch stops being reviewable twice.
+    """
+    grouped: dict[str, list[ApprovedPackage]] = {}
+    seen: set[str] = set()
+    for item in packages:
+        if item.package in seen:
+            raise EmissionError(
+                f"group_by_vendor: {item.package} appears twice in one batch. The two copies "
+                "can carry different removals and would land on two different branches, where "
+                "`insert_entries` never sees them together and neither refuses the other."
+            )
+        seen.add(item.package)
+        vendor = _vendor(item.device_keys, subject=f"group_by_vendor: {item.package}")
+        grouped.setdefault(vendor, []).append(item)
+    return {
+        vendor: tuple(sorted(grouped[vendor], key=lambda item: item.package))
+        for vendor in sorted(grouped)
+    }
+
+
+def _entry(package: ApprovedPackage) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        "list": package.uad_list,
+        "description": package.description,
+        "dependencies": list(package.dependencies),
+        "neededBy": list(package.needed_by),
+        "labels": list(package.labels),
+        "removal": package.removal,
+    }
+    # Built by walking the constant rather than by writing the keys out in order, so the
+    # emitted order IS `DOMINANT_KEY_ORDER` instead of happening to agree with it.
+    return {key: values[key] for key in DOMINANT_KEY_ORDER}
+
+
+def build_entry(package: ApprovedPackage) -> dict[str, Any]:
+    """One entry's value, in upstream's spelling and in the dominant key order."""
+    _validate(package, subject="build_entry")
+    return _entry(package)
+
+
+def _render_entry(package: ApprovedPackage) -> str:
+    """One entry as the text that goes into the file, in the file's own style.
+
+    `ensure_ascii=False` because the live file's own convention is raw UTF-8: measured
+    2026-08-13 it carries 118 non-ASCII characters (curly quotes, a `™`, non-breaking hyphens)
+    and zero `\\uXXXX` escapes, so escaping would make every new entry the odd one out.
+    """
+    body = ",\n".join(
+        f"{_FIELD_INDENT}{json.dumps(key, ensure_ascii=False)}: "
+        f"{json.dumps(value, ensure_ascii=False)}"
+        for key, value in _entry(package).items()
+    )
+    key = json.dumps(package.package, ensure_ascii=False)
+    return f"{_KEY_INDENT}{key}: {{\n{body}\n{_KEY_INDENT}}}"
+
+
+def insert_entries(raw: bytes, packages: Sequence[ApprovedPackage]) -> bytes:
+    """Append approved entries to `uad_lists.json`, leaving every existing byte untouched.
+
+    **How the splice point is found, and why not the obvious way.** The closing brace is
+    located by the JSON parser itself: `raw_decode` returns the index one past the value it
+    consumed, so `end - 1` is the top-level object's closing brace by the parser's own
+    accounting, for any document it accepts. A backwards `rfind(b"}")` would be right on
+    today's file and wrong as a rule — it has to guess about a brace inside a description
+    string (the live file has none today, but "no description contains a `}`" is a property of
+    one download rather than of the format), about trailing whitespace, and about a BOM. This
+    way there is nothing to guess: whatever the parser says it consumed is what gets spliced,
+    and whatever trailed it is copied through byte for byte, trailing newline or not.
+
+    The insertion point is then the last non-whitespace character before that brace, so the new
+    entries follow the last entry's own line rather than the file's closing indentation, and
+    the whitespace that separated the last entry from the brace is preserved ahead of it.
+    """
+    if not packages:
+        raise EmissionError(
+            "insert_entries: no packages to insert. An empty batch would rewrite the file's "
+            "final bytes for no content change and commit an empty diff; whether a vendor "
+            "group with nothing approved is a branch worth cutting is the caller's call."
+        )
+
+    seen: set[str] = set()
+    for item in packages:
+        if item.package in seen:
+            raise EmissionError(
+                f"insert_entries: {item.package} appears twice in one batch. Two members with "
+                "one key make a JSON object whose meaning depends on the reader — serde and "
+                "this repo's own loader keep the last, a human reviewing the diff reads the "
+                "first — so it is refused rather than written."
+            )
+        seen.add(item.package)
+        _validate(item, subject="insert_entries")
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EmissionError(
+            f"insert_entries: the current uad_lists.json is not valid UTF-8 ({exc}). It is "
+            "spliced as text so the new entries can be indented like their neighbours; "
+            "re-fetch the file rather than emitting against bytes nobody can read."
+        ) from exc
+
+    start = 1 if text.startswith("\ufeff") else 0
+    while start < len(text) and text[start] in _JSON_WHITESPACE:
+        start += 1
+    try:
+        parsed, end = json.JSONDecoder().raw_decode(text, start)
+    except json.JSONDecodeError as exc:
+        raise EmissionError(
+            f"insert_entries: the current uad_lists.json is not valid JSON ({exc}). Appending "
+            "to a document nobody can parse would produce a second, larger broken file; "
+            "re-fetch it from upstream's main."
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise EmissionError(
+            f"insert_entries: the current uad_lists.json parsed to {type(parsed).__name__}, "
+            "not an object. uad_lists.json is a JSON object keyed by package name."
+        )
+    if not parsed:
+        raise EmissionError(
+            "insert_entries: the current uad_lists.json carries zero entries. An empty file is "
+            "not a fresh one, it is the wrong file — every existing package would look like an "
+            "addition and the batch would be proposing 5372 entries somebody already wrote."
+        )
+    trailing = text[end:]
+    if trailing.strip(_JSON_WHITESPACE):
+        raise EmissionError(
+            f"insert_entries: the current uad_lists.json carries {trailing.strip()[:40]!r} "
+            "after its top-level object. That is not a document this module can splice; the "
+            "usual cause is two files concatenated."
+        )
+
+    already = sorted(item.package for item in packages if item.package in parsed)
+    if already:
+        raise EmissionError(
+            f"insert_entries: {', '.join(already)} already carried in uad_lists.json. An "
+            "addition PR that re-adds an existing key is a duplicate-key document upstream's "
+            "serde round-trip does not catch; re-run the filter stage against this copy of "
+            "the list, which is what decides the additions queue."
+        )
+
+    closing = end - 1
+    last = closing - 1
+    while last >= start and text[last] in _JSON_WHITESPACE:
+        last -= 1
+    gap = text[last + 1 : closing]
+    rendered = ",\n".join(_render_entry(item) for item in packages)
+    return f"{text[: last + 1]},\n{rendered}{gap}}}{trailing}".encode()
+
+
+def _cell(value: str) -> str:
+    """One markdown table cell. A package name and a label come out of downloaded firmware, so
+    a `|` in one would end the row early and silently drop every column after it."""
+    return value.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
+
+
+def render_pr_body(
+    *,
+    vendor: str,
+    packages: Sequence[ApprovedPackage],
+    pipeline_version: str,
+    commit_sha: str,
+    base_commit: str,
+    branch: str,
+    bundle_base_url: str | None = None,
+) -> str:
+    """The PR body that discloses how these entries were produced.
+
+    Upstream's CONTRIBUTING demands the disclosure and maintainer `@AnonymousWP` asked on
+    PR #1180 that AI-written descriptions be checked against an external source, so the body
+    states plainly that the entries are LLM-generated, human-reviewed, and put through a
+    corroboration pass. `pipeline_version` and `commit_sha` are refused blank: the disclosure
+    is mandatory, so an unrecorded one is a refusal rather than a line quietly left out.
+    `base_commit` and `branch` are navigation aids for the maintainer rather than part of that
+    disclosure, so a blank one is rendered as unrecorded instead of failing the emission.
+    """
+    if not packages:
+        raise EmissionError(
+            "render_pr_body: no packages. A PR body announcing zero additions describes a "
+            "branch with no diff on it."
+        )
+    if not pipeline_version.strip():
+        raise EmissionError(
+            "render_pr_body: no pipeline version. Which version of this pipeline wrote an "
+            "entry is half of what makes the entry auditable, and disclosing it is not "
+            "optional upstream; record it rather than opening the PR without it."
+        )
+    if not commit_sha.strip():
+        raise EmissionError(
+            "render_pr_body: no commit sha. The evidence bundle is regenerated from a named "
+            "commit and from nothing else, so a body without one links its hashes to nothing "
+            "and the disclosure is decorative."
+        )
+    base_url = bundle_base_url
+    if base_url is not None:
+        if not base_url.startswith(_BUNDLE_URL_SCHEMES):
+            raise EmissionError(
+                f"render_pr_body: bundle_base_url {base_url!r} is not an http(s) URL. It is "
+                "rendered as a link a maintainer clicks; pass None when the bundles are not "
+                "hosted, which is the normal case."
+            )
+        base_url = base_url.rstrip("/")
+    for item in packages:
+        _validate(item, subject="render_pr_body")
+
+    models = sorted({item.model for item in packages})
+    lines = [
+        f"## {vendor}: {len(packages)} package addition(s)",
+        "",
+        f"{len(packages)} new entries for devices this pipeline scanned under the `{vendor}` "
+        "driver, appended to `uad_lists.json` in the dominant key order. No existing entry is "
+        "touched and nothing anywhere in the file is reformatted.",
+        "",
+        "### How these entries were produced",
+        "",
+        "The `list` and `description` fields are **generated by a large language model**, and "
+        "every one of them was **reviewed by a human** before it reached this branch — an "
+        "entry a reviewer rejected is not here. Each description was additionally put through "
+        "an automated corroboration pass that searches the open web and judges whether an "
+        "independent source supports the specific claim the description makes. Corroboration "
+        "is attempted for every package and succeeds for a minority of them, because most "
+        "preinstalled system components have no public footprint to find; a package no source "
+        "could support is included on the human review alone, never on the model's word.",
+        "",
+        "`removal` is bounded below by a deterministic rule ladder computed from the package's "
+        "own manifest and from the rest of the firmware it shipped in. The model may rate a "
+        "package more dangerous to remove than that bound and can never rate it less: an "
+        "answer under the floor is rejected rather than corrected up to it.",
+        "",
+        "`dependencies` and `neededBy` are never model output. They come from a mechanical "
+        "graph over the scanned firmware, or from a human.",
+        "",
+        "### Provenance",
+        "",
+        "| field | value |",
+        "| --- | --- |",
+        f"| pipeline | uadclaw {_cell(pipeline_version)} |",
+        f"| pipeline commit | `{_cell(commit_sha)}` |",
+        f"| base commit | {f'`{_cell(base_commit)}`' if base_commit.strip() else 'unrecorded'} |",
+        f"| branch | {f'`{_cell(branch)}`' if branch.strip() else 'unrecorded'} |",
+        f"| model | {', '.join(f'`{_cell(model)}`' for model in models)} |",
+        "",
+        "### Packages",
+        "",
+        "| package | list | removal | evidence bundle |",
+        "| --- | --- | --- | --- |",
+    ]
+    for item in packages:
+        digest = _cell(item.bundle_sha256)
+        bundle = f"[`{digest}`]({base_url}/{digest})" if base_url else f"`{digest}`"
+        lines.append(
+            f"| `{_cell(item.package)}` | {_cell(item.uad_list)} | {_cell(item.removal)} | "
+            f"{bundle} |"
+        )
+    lines.append("")
+    if base_url:
+        lines.append(
+            "Each hash above links to the evidence bundle that package was classified from: "
+            "the exact facts, graph edges and rule floor the model was shown, and nothing else."
+        )
+    else:
+        lines.append(
+            "Each hash above is the sha256 of the evidence bundle that package was classified "
+            "from — the exact facts, graph edges and rule floor the model was shown. The "
+            "bundles are not hosted anywhere. They are regenerated deterministically from this "
+            f"pipeline at commit `{_cell(commit_sha)}`, which serializes them canonically and "
+            "writes no timestamp and no run-scoped id into them, so the same corpus produces "
+            "byte-identical bundles and the same hashes on any machine."
+        )
+    return "\n".join(lines) + "\n"
