@@ -1,0 +1,52 @@
+{# The device picker, or the reason there is none.
+
+   Three outcomes and they are deliberately three, not two: an index that failed is an ERROR
+   and never a rendered "no devices". A terms-walled index answers 200 with zero links, and
+   telling the operator the vendor has nothing would send them looking in the wrong place. #}
+{% if device_error %}
+  <div class="callout callout-danger">
+    <div>
+      <div class="callout-title">{{ device_error.title }}</div>
+      <div class="callout-body">{{ device_error.detail }}</div>
+      {% if device_error.name %}
+        <div class="callout-body" style="margin-top:var(--space-2)">
+          <span class="tag tag-data">{{ device_error.name }}</span>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+{% elif devices is none %}
+  <div class="callout callout-info">
+    <div>
+      <div class="callout-title">no device list yet</div>
+      <div class="callout-body">pick a driver above and load its index to choose a device.</div>
+    </div>
+  </div>
+{% else %}
+  <div class="label" style="margin-bottom:var(--space-2)">
+    {{ devices | length }} devices, {{ devices | sum(attribute='build_count') }} builds
+  </div>
+  <form method="post" action="/jobs/launch/firmware">
+    <input type="hidden" name="driver" value="{{ selected_driver }}">
+    <div class="field" style="margin-bottom:var(--space-4)">
+      <label class="field-label" for="device-select">device</label>
+      <select class="input" id="device-select" name="device" required>
+        {% for option in devices %}
+          <option value="{{ option.device }}"{% if option.device == form.device %} selected{% endif %}>
+            {{ option.device }}{% if option.marketing_name %} · {{ option.marketing_name }}{% endif %}
+            ({{ option.build_count }} builds, newest {{ option.newest_build }})
+          </option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field" style="margin-bottom:var(--space-5)">
+      <label class="field-label" for="build-input">build (optional)</label>
+      <input class="input" id="build-input" name="build" value="{{ form.build }}" placeholder="newest">
+      <div class="field-hint">
+        leave empty and the acquire stage resolves the newest build when the job runs, so a link
+        that expires while it waits in the queue costs nothing.
+      </div>
+    </div>
+    <button class="btn btn-primary" type="submit" style="width:100%">queue firmware job</button>
+  </form>
+{% endif %}

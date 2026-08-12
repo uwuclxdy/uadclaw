@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}run {{ short_id }} · uadclaw{% endblock %}
+{% block content %}
+<section>
+  <nav class="breadcrumb" style="margin-bottom:var(--space-4)">
+    <a class="breadcrumb-item" href="/jobs">jobs</a>
+    <span class="breadcrumb-sep">/</span>
+    <span class="breadcrumb-item current">{{ short_id }}</span>
+  </nav>
+
+  <header style="margin-bottom:var(--space-8);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
+    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">run</div>
+    <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em">{{ short_id }}</h2>
+  </header>
+
+  {% if panel_ok %}
+    {% include "partials/jobs_detail_panel.html" %}
+  {% else %}
+    {% include "partials/jobs_unavailable.html" %}
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,23 @@
+{# The error state for anything on this screen that comes out of the database.
+
+   It carries no `hx-trigger`, so a database that stopped answering is asked once and then
+   waits for the operator, rather than being polled every three seconds while it is down. The
+   retry button is that way back. #}
+<div id="{{ unavailable.element_id }}">
+  <div class="callout callout-danger">
+    <div>
+      <div class="callout-title">this did not load</div>
+      <div class="callout-body">
+        the query behind it failed. <a href="/health" style="color:var(--accent)">/health</a> reports whether the database is
+        reachable. the worker is a separate process and keeps running either way.
+      </div>
+      <div style="margin-top:var(--space-3)">
+        <button class="btn btn-secondary btn-sm"
+                hx-get="{{ unavailable.retry_url }}"
+                hx-target="#{{ unavailable.element_id }}"
+                hx-swap="outerHTML"
+                hx-disabled-elt="this">try again</button>
+      </div>
+    </div>
+  </div>
+</div>

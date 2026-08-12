@@ -1,0 +1,95 @@
+{# One run, and the poll target the detail page swaps itself with.
+
+   The trigger is emitted only while the job can still change. A finished job's panel comes
+   back without one, and that swap is what ends the polling. #}
+<div id="job-panel"
+     hx-get="/jobs/{{ job.id }}/detail/panel"
+     hx-swap="outerHTML"
+     {% if poll %}hx-trigger="{{ poll }}"{% endif %}>
+
+  <div class="card" style="margin-bottom:var(--space-4)">
+    <div class="card-header">
+      <div>
+        <div class="card-title" style="font-size:var(--text-lg)">{{ job.kind }}</div>
+        <div class="card-subtitle">{{ job.id }}</div>
+      </div>
+      <span class="tag {{ job.state_tag }}">{{ job.state }}</span>
+    </div>
+    <table class="info-table">
+      <tr><td>attempt</td><td>{{ job.attempt }}</td></tr>
+      <tr><td>worker</td><td>{{ job.worker_id }}</td></tr>
+      <tr><td>created</td><td>{{ job.created_at }} utc</td></tr>
+      <tr><td>started</td><td>{{ job.started_at }}</td></tr>
+      <tr><td>finished</td><td>{{ job.finished_at }}</td></tr>
+      <tr><td>heartbeat</td><td>{{ job.heartbeat_at }}</td></tr>
+      <tr><td>duration</td><td>{{ job.duration }}</td></tr>
+      {% for key, value in job.params.items() %}
+        <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  {% if job.failure_reason %}
+    <div class="callout callout-danger" style="margin-bottom:var(--space-4)">
+      <div>
+        <div class="callout-title">this run failed</div>
+        <div class="callout-body">{{ job.failure_reason }}</div>
+      </div>
+    </div>
+  {% endif %}
+
+  <div class="card" style="margin-bottom:var(--space-4)">
+    <div class="card-header">
+      <div>
+        <div class="card-title" style="font-size:var(--text-lg)">stages</div>
+        {# The KIND's walk, never the design's whole vocabulary: a firmware job ends at
+           rule_ladder and rendering the four stages it does not run would report every
+           finished one as 6 of 10. #}
+        <div class="card-subtitle">the {{ job.kind }} walk, {{ job.stages_done }} of {{ job.stages_total }} done</div>
+      </div>
+    </div>
+    <div class="progress" style="margin-bottom:var(--space-4)">
+      <div class="progress-bar" style="width:{{ job.progress_pct }}%"></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>stage</th><th>status</th><th>started</th><th class="num-col">seconds</th><th>outcome</th></tr>
+        </thead>
+        <tbody>
+          {% for step in walk %}
+            <tr>
+              <td><span class="table-name">{{ step.stage }}</span></td>
+              <td><span class="tag {{ step.tag }}">{{ step.status }}</span></td>
+              <td style="color:var(--text-dim);font-size:var(--text-xs)">{{ step.started_at }}</td>
+              <td class="num-col">{{ step.seconds }}</td>
+              <td style="color:var(--text-dim);font-size:var(--text-xs)">{{ step.outcome }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if run_count < walk | length %}
+      <div style="font-size:var(--text-sm);color:var(--text-faint);margin-top:var(--space-3)">
+        {{ run_count }} of {{ walk | length }} stages have a recorded run.
+        {% if job.live %}the rest have not started.{% else %}the rest never ran.{% endif %}
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <div>
+        <div class="card-title" style="font-size:var(--text-lg)">log tail</div>
+        <div class="card-subtitle">the most recent lines the worker wrote onto this run.</div>
+      </div>
+    </div>
+    {% if job.log_tail %}
+      <pre style="white-space:pre-wrap;overflow-x:auto"><code style="display:block;padding:var(--space-3);line-height:1.5">{{ job.log_tail }}</code></pre>
+    {% else %}
+      <div style="font-size:var(--text-sm);color:var(--text-dim)">
+        no lines yet. the worker writes one as each stage completes.
+      </div>
+    {% endif %}
+  </div>
+</div>

@@ -1,0 +1,72 @@
+{# The run list, and the poll target the page swaps itself with.
+
+   `poll` is None once every listed job is terminal, and the absence of the trigger is what
+   stops the polling: an `hx-trigger="every 3s"` that outlives the last running job re-queries
+   Postgres for the life of the browser tab over rows that cannot change again. #}
+<div id="job-list"
+     hx-get="{{ rows_url }}"
+     hx-swap="outerHTML"
+     {% if poll %}hx-trigger="{{ poll }}"{% endif %}>
+
+  {% if not jobs %}
+    {% if job_total %}
+      <div class="callout callout-info">
+        <div>
+          <div class="callout-title">no run matches this filter</div>
+          <div class="callout-body">
+            {{ job_total }} runs exist. <a href="/jobs" style="color:var(--accent)">drop the filter</a> to see them.
+          </div>
+        </div>
+      </div>
+    {% else %}
+      <div class="callout callout-info">
+        <div>
+          <div class="callout-title">nothing has run yet</div>
+          <div class="callout-body">queue a firmware analysis above, and this fills in as the worker walks it.</div>
+        </div>
+      </div>
+    {% endif %}
+  {% else %}
+    {% if list_capped or jobs | length < job_total %}
+      <div style="font-size:var(--text-sm);color:var(--text-faint);margin-bottom:var(--space-2)">
+        showing {{ jobs | length }} of {{ job_total }} runs{% if list_capped %}, newest {{ list_limit }} first{% endif %}.
+      </div>
+    {% endif %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>run</th>
+            <th>state</th>
+            <th>stage</th>
+            <th class="num-col">attempt</th>
+            <th>worker</th>
+            <th>created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for job in jobs %}
+            <tr>
+              <td>
+                <a class="table-name" href="/jobs/{{ job.id }}/detail">{{ job.short_id }}</a>
+                <div style="font-size:var(--text-xs);color:var(--text-faint)">{{ job.kind }}</div>
+              </td>
+              <td>
+                <span class="tag {{ job.state_tag }}">{{ job.state }}</span>
+              </td>
+              <td style="min-width:180px">
+                <div style="font-size:var(--text-xs);color:var(--text-dim);margin-bottom:4px">
+                  {{ job.stages_done }} of {{ job.stages_total }}{% if job.live and job.current_stage %} · {{ job.current_stage }}{% elif job.state == 'failed' and job.current_stage %} · failed at {{ job.current_stage }}{% endif %}
+                </div>
+                <div class="progress"><div class="progress-bar" style="width:{{ job.progress_pct }}%"></div></div>
+              </td>
+              <td class="num-col">{{ job.attempt }}</td>
+              <td style="color:var(--text-dim);font-size:var(--text-xs)">{{ job.worker_id }}</td>
+              <td style="color:var(--text-dim);font-size:var(--text-xs)">{{ job.created_at }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>

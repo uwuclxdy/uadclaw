@@ -1,0 +1,13 @@
+{# The panel's replacement when the run it was polling is no longer in the database. It
+   carries no `hx-trigger`, so this swap is what ends the poll. #}
+<div id="job-panel">
+  <div class="callout callout-warning">
+    <div>
+      <div class="callout-title">this run is gone</div>
+      <div class="callout-body">
+        <span class="tag tag-data">{{ job_id }}</span> is no longer in the database, so this stopped
+        following it. <a href="/jobs" style="color:var(--accent)">back to the run list</a>.
+      </div>
+    </div>
+  </div>
+</div>

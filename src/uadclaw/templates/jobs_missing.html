@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}run not found · uadclaw{% endblock %}
+{% block content %}
+<section>
+  <header style="margin-bottom:var(--space-6)">
+    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">run</div>
+    <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em">not found</h2>
+  </header>
+  <div class="callout callout-warning" style="margin-bottom:var(--space-5)">
+    <div>
+      <div class="callout-title">no run with that id</div>
+      <div class="callout-body">
+        nothing in the database carries <span class="tag tag-data">{{ job_id }}</span>. it may have been
+        queued against a different database.
+      </div>
+    </div>
+  </div>
+  <a class="btn btn-secondary" href="/jobs">back to the run list</a>
+</section>
+{% endblock %}
