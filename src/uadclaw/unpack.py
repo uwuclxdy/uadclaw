@@ -142,6 +142,17 @@ _EXT4_MAGIC_OFFSET = 1024 + 0x38
 # payload can be classified (`_HEADER_BYTES` covers every magic offset above).
 _STREAM_CHUNK_BYTES = 4 * 1024 * 1024
 
+# How much decoded output one `LZ4FrameDecompressor.decompress()` call may return. Without it
+# the call is bounded only by what the input expands to: 4 MiB of compressed zeros returns
+# 1016 MiB in a single allocation (measured 2026-08-12), a heap spike per worker that no
+# ceiling downstream ever sees, because every ceiling here is checked on what came BACK.
+_DECODE_MAX_LENGTH = 4 * 1024 * 1024
+
+# AOSP libsparse's `sparse_header`: magic, major, minor, file_hdr_sz, chunk_hdr_sz, blk_sz,
+# total_blks, total_chunks, image_checksum.
+_SPARSE_HEADER = struct.Struct("<IHHHHIIII")
+_SPARSE_MAGIC_LE = 0xED26FF3A
+
 # Recursion cap for the container chain (zip -> zip -> super -> partition is depth 4 on real
 # firmware). A cap turns a pathological or hostile nesting into a named error instead of a
 # worker that unpacks until the disk fills.
@@ -211,25 +222,23 @@ _TOOL_PROVIDERS = {
     "fsck.erofs": "erofs-utils",
 }
 
-# Partitions that legitimately carry no APK and no config input, so yielding nothing is not
-# an extraction failure for them. Measured: `system_other` (the inactive slot's staging
-# partition, 429 entries on oriole, zero matches) and every `*_dlkm` partition (kernel modules
-# only — 333 entries on oriole's vendor_dlkm, 105 on the emulator's system_dlkm). Anything
-# else that comes back empty is a bug in the patterns or the extraction, and says so.
-# `prism` and `optics` are Samsung's CSC pair and are kept rather than skipped: they are
-# where a carrier build could put an app, and on the measured `SM-S911U` they hold 397 and 72
-# entries with not one artifact among them. Listed here rather than in `_NO_APP_PARTITIONS`
-# so that the day one of them does carry an APK, it is extracted instead of never opened.
+# Partitions whose image legitimately carries no APK and no config input, so matching nothing
+# is not an extraction failure for them. This is the WEAKER of the two emptiness rules and
+# says nothing about the stronger one: an image that yields no file AT ALL is an extraction
+# failure for every partition, this set included, because no vendor ships an empty filesystem
+# — Samsung's `odm` stub still holds 10 files. `extract_artifacts` checks the two separately,
+# which is what keeps a name here from also excusing a broken extractor.
 #
-# `odm` is the one entry here that COSTS something. It carries 4 APKs on Nothing's FroggerPro
-# and is a 10-file stub on Samsung's SM-S911U — `etc/build.prop`, `etc/passwd`, four selinux
-# files — so it is a partition that genuinely holds no app on one vendor and real apps on
-# another, and this list is per-partition rather than per-vendor. Listing it buys Samsung a
-# job that finishes at the price of Nothing's `odm` no longer raising if its extraction
-# breaks. The alternative is to separate "the image yielded no file" from "the image yielded
-# files and none was wanted", which the EROFS path cannot currently tell apart at all
-# (`listed is None` below); that is a change to what this guard MEANS and wants deciding
-# rather than slipping in.
+# Measured: `system_other` (the inactive slot's staging partition, 429 entries on oriole, zero
+# matches) and every `*_dlkm` partition (kernel modules only — 333 entries on oriole's
+# vendor_dlkm, 105 on the emulator's system_dlkm). `prism` and `optics` are Samsung's CSC pair
+# and are kept rather than skipped: they are where a carrier build could put an app, and on the
+# measured `SM-S911U` they hold 397 and 72 entries with not one artifact among them. `odm`
+# carries 4 APKs on Nothing's FroggerPro and is a 10-file stub on Samsung's SM-S911U
+# (`etc/build.prop`, `etc/passwd`, four selinux files), which is why it is per-partition here
+# rather than per-vendor. All three list files and match none of the patterns, so all three
+# still need to be here once the two rules are separated; what the separation buys is that a
+# vendor whose `odm` extraction produces nothing is loud again.
 PARTITIONS_ALLOWED_EMPTY = frozenset(
     {"system_other", "cache", "metadata", "userdata", "prism", "optics", "odm"}
 )
@@ -443,6 +452,12 @@ def safe_archive_path(path: str, *, context: str) -> str:
     if not path or path.startswith("/") or path.startswith("\\"):
         raise UnsafePathError(f"{context}: refusing absolute path {path!r} from an image listing")
     parts = PurePosixPath(path).parts
+    if not parts:
+        # `PurePosixPath(".").parts` is empty, and so is `"./"`'s. Reading `parts[0]` below
+        # then raised IndexError — a genuine-bug type for what is bad input off a tar.
+        raise UnsafePathError(
+            f"{context}: refusing path {path!r} from an image listing: it names no file"
+        )
     if any(part in {"..", "."} for part in parts) or ":" in parts[0]:
         raise UnsafePathError(
             f"{context}: refusing path {path!r} from an image listing: it contains a traversal "
@@ -574,6 +589,51 @@ def _copy_slice(source: Path, dest: Path, *, root: Path, offset: int, size: int)
             f"offset {offset}; the image is truncated"
         )
     return dest
+
+
+def sparse_declared_bytes(image: Path) -> int:
+    """How much raw output a sparse image declares, read out of its own header.
+
+    Read BEFORE `simg2img` is invoked, because there is no other place to refuse: the tool
+    takes no size flag at all (its whole usage is `simg2img <sparse_image_files>
+    <raw_image_file>`), and a sparse header's `total_blks * blk_sz` is bounded by nothing that
+    the file's own size implies. One `CHUNK_TYPE_FILL` chunk covers every declared block in
+    four bytes of payload: measured 2026-08-12, a 44-byte image declaring 1 GiB made simg2img
+    write 104,857,600 bytes of FULLY ALLOCATED blocks (`st_blocks * 512` equal to the apparent
+    size, so not even a sparse hole) before a `ulimit -f` cap killed it — a declared ratio of
+    24,403,223 to 1.
+    """
+    with image.open("rb") as fh:
+        header = fh.read(_SPARSE_HEADER.size)
+    if len(header) < _SPARSE_HEADER.size:
+        raise UnpackError(
+            f"sparse_declared_bytes: {image.name} is {len(header)} bytes, too short to hold the "
+            f"{_SPARSE_HEADER.size}-byte sparse header its magic claims"
+        )
+    magic, major, _minor, file_hdr_sz, _chunk_hdr_sz, blk_sz, total_blks, _chunks, _crc = (
+        _SPARSE_HEADER.unpack(header)
+    )
+    if magic != _SPARSE_MAGIC_LE or major != 1 or file_hdr_sz < _SPARSE_HEADER.size:
+        raise UnpackError(
+            f"sparse_declared_bytes: {image.name} carries magic {magic:#x} version {major} with "
+            f"a {file_hdr_sz}-byte header, which libsparse would refuse; the image is corrupt"
+        )
+    if blk_sz == 0 or blk_sz % 4:
+        raise UnpackError(
+            f"sparse_declared_bytes: {image.name} declares a {blk_sz}-byte block, which is not a "
+            "multiple of 4; the image is corrupt"
+        )
+    return blk_sz * total_blks
+
+
+def _refuse_oversize_sparse(declared: int, *, ceiling: int, context: str, source: Path) -> None:
+    if declared > ceiling:
+        raise UnpackError(
+            f"{context}: {source.name} is {source.stat().st_size} bytes declaring {declared} "
+            f"bytes of raw output, over the {ceiling}-byte ceiling. Refused before simg2img runs, "
+            "since it has no size flag and would write every declared block; raise "
+            "max_firmware_archive_bytes if this firmware is genuinely that large."
+        )
 
 
 async def unpack_to_partitions(
@@ -833,6 +893,19 @@ async def _unpack_sparsechunks(
             )
         extracted.append(path)
 
+    # After the whole set is known to be sparse, because a member that is not one is the more
+    # specific complaint. The MAX rather than the sum: every chunk of a set declares the whole
+    # image's `total_blks` (2,426,880 on Motorola `rtwo`) and opens with a DONT_CARE chunk
+    # skipping to its own offset, so simg2img writes each at its absolute position rather than
+    # appending, and the set's output is one image's worth however many chunks carry it.
+    for path in extracted:
+        _refuse_oversize_sparse(
+            await asyncio.to_thread(sparse_declared_bytes, path),
+            ceiling=settings.max_firmware_archive_bytes,
+            context="_unpack_sparsechunks",
+            source=path,
+        )
+
     raw_dir = workdir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     name = safe_component(Path(stem).stem, context="_unpack_sparsechunks")
@@ -963,27 +1036,96 @@ def _decoded_chunks(
 ) -> Iterator[bytes]:
     """One entry's payload, LZ4-decoded when its own leading bytes said it was a frame.
 
-    Streamed rather than decoded in one call: an LZ4 frame declares no output size anywhere
-    in its header, so `lz4.frame.decompress` on a Samsung `super.img.lz4` builds an 11 GB
-    `bytes` in the worker's heap before returning any of it. `max_bytes` is the same ceiling
-    the zip path applies to a declared member size, applied here to what actually comes out,
-    since nothing declares it up front — which is also what bounds a decompression bomb.
+    Streamed rather than decoded in one call, and every call bounded by `max_length`. A
+    frame's content size is OPTIONAL and not read here: it is FLG bit 3, and measured
+    2026-08-12 Samsung's own producer does set it (`FLG=0x6c` on all 31 entries of the `BL_`
+    tar) while python-lz4's default does not (`0x4c` with `store_size`, `0x40` without). A
+    ceiling that only some producers declare is not a ceiling, and `lz4.frame.decompress` on a
+    Samsung `super.img.lz4` builds an 11 GB `bytes` in the worker's heap before returning any
+    of it either way. So `max_bytes` is the same ceiling the zip path applies to a declared
+    member size, applied here to what actually comes out, and `_DECODE_MAX_LENGTH` bounds the
+    one allocation underneath it.
+
+    A frame that never reaches its end marker is REFUSED rather than yielded short (`_copy_slice`
+    already treats a truncated slice that way): measured, a frame cut at 50% returned 2,490,368
+    of 5,000,000 bytes with no error at all, and downstream then blames whichever tool choked on
+    the prefix — or, when the prefix still classifies, drops the partition silently. A member
+    holding two frames is decoded whole for the same reason: it used to yield the first and
+    discard the rest as `unused_data`.
     """
-    decompressor = lz4.frame.LZ4FrameDecompressor() if framed else None
     produced = 0
-    chunk = head
-    while chunk:
-        decoded = decompressor.decompress(chunk) if decompressor is not None else chunk
-        if decoded:
-            produced += len(decoded)
-            if produced > max_bytes:
-                raise UnpackError(
-                    f"{context}: decoded more than the {max_bytes}-byte ceiling without reaching "
-                    "the end of the entry; raise max_firmware_archive_bytes if this firmware is "
-                    "genuinely that large"
-                )
-            yield decoded
+
+    def accounted(decoded: bytes) -> bytes:
+        nonlocal produced
+        produced += len(decoded)
+        if produced > max_bytes:
+            raise UnpackError(
+                f"{context}: decoded more than the {max_bytes}-byte ceiling without reaching "
+                "the end of the entry; raise max_firmware_archive_bytes if this firmware is "
+                "genuinely that large"
+            )
+        return decoded
+
+    if not framed:
+        chunk = head
+        while chunk:
+            yield accounted(chunk)
+            chunk = payload.read(_STREAM_CHUNK_BYTES)
+        return
+
+    decompressor = lz4.frame.LZ4FrameDecompressor()
+    pending = head
+    complete = False
+    while True:
+        if pending or not decompressor.needs_input:
+            decoded = decompressor.decompress(pending, max_length=_DECODE_MAX_LENGTH)
+            pending = b""
+            if decoded:
+                yield accounted(decoded)
+            if decompressor.eof:
+                complete = True
+                trailing = decompressor.unused_data or b""
+                if trailing:
+                    # A fresh decompressor per frame rather than the reset one the library
+                    # hands back, so `eof` means this frame and cannot be read off the last.
+                    decompressor = lz4.frame.LZ4FrameDecompressor()
+                    pending = trailing
+                    complete = False
+            continue
         chunk = payload.read(_STREAM_CHUNK_BYTES)
+        if not chunk:
+            break
+        pending = chunk
+        complete = False
+    if not complete:
+        raise UnpackError(
+            f"{context}: the LZ4 frame ends without its end-of-frame marker after {produced} "
+            "decoded byte(s); the entry is truncated, and a short image classifies and mounts "
+            "exactly like a whole one"
+        )
+
+
+def _tar_entry_partition_claim(member_name: str) -> str | None:
+    """The partition an entry's NAME claims to hold, or None when it claims none.
+
+    Dispatch stays on the bytes; this decides only whether an entry was MEANT to be a
+    partition image, which is the difference between data this pipeline lost and data it was
+    right to ignore. A `product.img.lz4` that decodes to nothing recognisable is a partition
+    gone missing; the `meta-data/fota.zip` sitting beside it in the same `AP_` tar is not, and
+    neither is `NON-HLOS.bin.lz4`. Same rule `_unpack_sparsechunks` already applies to a member
+    named as a sparse chunk whose magic disagrees: the name says what it should be, the magic
+    says what it is, and a disagreement is refused rather than dropped.
+
+    Measured across all 65 file entries of the six `SM-S911U` tars (2026-08-12): 19 claim an
+    image, 7 of those decode to no partition format, and all 7 are names
+    `_SKIPPED_TAR_PARTITIONS` already carries (`vbmeta`, `vbmeta_system`, `boot`, `init_boot`,
+    `vendor_boot`, `dtbo`, `recovery`), so the caller drops the claim for those before this can
+    refuse them.
+    """
+    components = PurePosixPath(member_name).name.lower().split(".")
+    if "img" not in components[1:]:
+        return None
+    return components[0]
 
 
 def _extract_tar_partitions(
@@ -1009,9 +1151,15 @@ def _extract_tar_partitions(
     partitions that happen to hold the same bytes — two near-empty images of one size is not
     an exotic shape — stay two partitions. There is nothing to guess between two copies of one
     partition, which is what separates this from `DuplicatePartitionError`.
+
+    An entry the two classifications reject is dropped only when its NAME claimed nothing
+    either. `max_bytes` is the ceiling for the whole tar and not for each entry: it used to be
+    per entry, so an archive of N entries could write N times the ceiling into a scratch lease
+    sized for one.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     found: list[tuple[str, Path]] = []
+    spent = 0
     with tarfile.open(fileobj=stream, mode="r|") as tar:
         for member in tar:
             if not member.isfile():
@@ -1023,7 +1171,17 @@ def _extract_tar_partitions(
             raw_head = payload.read(_HEADER_BYTES)
             raw_fmt = _classify_header(raw_head)
             framed = raw_fmt is ContainerFormat.LZ4_FRAME
+            claim = _tar_entry_partition_claim(member.name)
+            if claim is not None and normalize_partition_name(claim) in _SKIPPED_TAR_PARTITIONS:
+                claim = None
             if not framed and raw_fmt not in _PARTITION_FORMATS:
+                if claim is not None:
+                    raise UnpackError(
+                        f"{context}: {member.name} is named as partition {claim!r} but its "
+                        f"leading bytes are {raw_fmt}, neither a partition image nor an LZ4 "
+                        "frame. A partition that fails to decode is not a partition that was "
+                        "never there; add the format to the dispatch table or fix the archive."
+                    )
                 logger.info("%s: %s is %s, not a partition image", context, member.name, raw_fmt)
                 continue
             # The suffix is dropped only because the magic already said the payload was a
@@ -1035,11 +1193,18 @@ def _extract_tar_partitions(
                 logger.info("%s: skipping %s, it carries no artifact", context, member.name)
                 continue
 
+            remaining = max_bytes - spent
+            if remaining <= 0:
+                raise UnpackError(
+                    f"{context}: the entries decoded so far fill the whole {max_bytes}-byte "
+                    f"ceiling and {member.name} would add to it; raise "
+                    "max_firmware_archive_bytes if this firmware is genuinely that large"
+                )
             chunks = _decoded_chunks(
                 payload,
                 raw_head,
                 framed=framed,
-                max_bytes=max_bytes,
+                max_bytes=remaining,
                 context=f"{context}[{member.name}]",
             )
             head = bytearray()
@@ -1049,6 +1214,13 @@ def _extract_tar_partitions(
                     break
             fmt = _classify_header(bytes(head[:_HEADER_BYTES]))
             if fmt not in _PARTITION_FORMATS:
+                if claim is not None:
+                    raise UnpackError(
+                        f"{context}: {member.name} is named as partition {claim!r} and arrived "
+                        f"as an LZ4 frame, but decodes to {fmt}, which is no partition image. "
+                        "A partition that fails to decode is not a partition that was never "
+                        "there; the entry is corrupt or is compressed with something else."
+                    )
                 logger.info(
                     "%s: %s decodes to %s, not a partition image", context, member.name, fmt
                 )
@@ -1057,12 +1229,23 @@ def _extract_tar_partitions(
             dest = unique_path(dest_dir, filename)
             ensure_within(root, dest, context=context)
             digest = hashlib.sha256()
-            with dest.open("wb") as out:
-                out.write(head)
-                digest.update(head)
-                for chunk in chunks:
-                    out.write(chunk)
-                    digest.update(chunk)
+            written = 0
+            try:
+                with dest.open("wb") as out:
+                    out.write(head)
+                    digest.update(head)
+                    written += len(head)
+                    for chunk in chunks:
+                        out.write(chunk)
+                        digest.update(chunk)
+                        written += len(chunk)
+            except BaseException:
+                # A half-written image is a whole one to everything downstream — it classifies
+                # by the same magic and mounts — and closing the block leaves it on disk. The
+                # write is all or nothing, whether the disk filled or the frame was truncated.
+                dest.unlink(missing_ok=True)
+                raise
+            spent += written
             key = (name, digest.hexdigest())
             if key in seen:
                 logger.info(
@@ -1087,15 +1270,26 @@ def _stream_zip_tar(
     max_bytes: int,
     seen: dict[tuple[str, str], Path],
 ) -> list[tuple[str, Path]]:
-    with zipfile.ZipFile(archive) as zf, zf.open(member) as stream:
-        return _extract_tar_partitions(
-            stream,
-            dest_dir,
-            root=root,
-            context=f"_stream_zip_tar[{member}]",
-            max_bytes=max_bytes,
-            seen=seen,
-        )
+    with zipfile.ZipFile(archive) as zf:
+        # The same declared-size check every other zip member gets, which streaming past
+        # `_extract_zip_member` had skipped: a tar is opened here and never lands on disk, but
+        # what comes OUT of it does.
+        declared = zf.getinfo(member).file_size
+        if declared > max_bytes:
+            raise UnpackError(
+                f"_stream_zip_tar: {member!r} in {archive.name} declares {declared} bytes, over "
+                f"the {max_bytes}-byte ceiling; raise max_firmware_archive_bytes if this "
+                "firmware is genuinely that large"
+            )
+        with zf.open(member) as stream:
+            return _extract_tar_partitions(
+                stream,
+                dest_dir,
+                root=root,
+                context=f"_stream_zip_tar[{member}]",
+                max_bytes=max_bytes,
+                seen=seen,
+            )
 
 
 def _zip_tar_members(archive: Path, members: Sequence[str]) -> list[str]:
@@ -1117,15 +1311,17 @@ def _zip_tar_members(archive: Path, members: Sequence[str]) -> list[str]:
 async def _unpack_images(
     images: Sequence[tuple[str, Path]], workdir: Path, settings: Settings, depth: int
 ) -> list[PartitionImage]:
-    """Recurse into images already classified as partition formats, dropping the ones that
-    turn out not to be a filesystem this pipeline reads."""
+    """Recurse into images already classified as partition formats.
+
+    Nothing is dropped here, unlike the `.img`-member scan in `_unpack_zip`: every path handed
+    in has already had its own decoded bytes classified as one of `_PARTITION_FORMATS`, so one
+    that then reads as no container at all is a partition this pipeline LOST — a truncated or
+    corrupt image, or a sparse one whose raw output is not a filesystem. Swallowing that put a
+    job at SUCCEEDED with two of four partitions' APKs in it.
+    """
     found: list[PartitionImage] = []
     for name, path in images:
-        try:
-            found.extend(await _unpack(path, name, workdir, settings, depth + 1))
-        except UnsupportedContainerError:
-            logger.info("skipping %s: not a filesystem image", path.name)
-            await asyncio.to_thread(path.unlink, True)
+        found.extend(await _unpack(path, name, workdir, settings, depth + 1))
     return found
 
 
@@ -1150,13 +1346,9 @@ async def _unpack_tar(
             "tar handed here directly is expected to be the one carrying them"
         )
     _drop_consumed_intermediate(source, depth)
-    found = await _unpack_images(images, workdir, settings, depth)
-    if not found:
-        raise UnpackError(
-            f"_unpack_tar: none of the {len(images)} image(s) in {source.name} is a filesystem "
-            "this pipeline reads"
-        )
-    return found
+    # No "and none of them was a filesystem" guard after this: `_unpack_images` drops nothing,
+    # so a non-empty `images` either yields partitions or raises naming the one that failed.
+    return await _unpack_images(images, workdir, settings, depth)
 
 
 async def _unpack_lz4(
@@ -1186,6 +1378,12 @@ async def _unpack_lz4(
 async def _unpack_sparse(
     source: Path, name: str, workdir: Path, settings: Settings, depth: int
 ) -> list[PartitionImage]:
+    _refuse_oversize_sparse(
+        await asyncio.to_thread(sparse_declared_bytes, source),
+        ceiling=settings.max_firmware_archive_bytes,
+        context="_unpack_sparse",
+        source=source,
+    )
     raw_dir = workdir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     raw = unique_path(raw_dir, f"{safe_component(name, context='_unpack_sparse')}.raw.img")
@@ -1387,17 +1585,29 @@ async def _extract_ext4(image: Path, names: Sequence[str], dest: Path) -> None:
     await asyncio.to_thread(list_file.unlink, True)
 
 
-def _harvest_erofs_staging(staging: Path, dest: Path, patterns: Sequence[str]) -> list[str]:
-    """`os.walk(followlinks=False)` rather than `rglob`: not descending into a symlinked
-    directory is what stops a partition image's own symlink from walking the host filesystem,
-    and on `rglob` that is an interpreter default (3.13 added `recurse_symlinks`) rather than
-    anything this code states. Stated here instead."""
+def _harvest_erofs_staging(
+    staging: Path, dest: Path, patterns: Sequence[str]
+) -> tuple[list[str], int]:
+    """The wanted paths, and how many files the image yielded at all.
+
+    Both numbers, because they answer different questions and only one of them is about the
+    patterns: an image that yielded 105 files and matched none is a partition with no app in
+    it, while an image that yielded nothing is `fsck.erofs` having failed quietly. Before this
+    the EROFS path could not tell them apart and reported neither.
+
+    `os.walk(followlinks=False)` rather than `rglob`: not descending into a symlinked directory
+    is what stops a partition image's own symlink from walking the host filesystem, and on
+    `rglob` that is an interpreter default (3.13 added `recurse_symlinks`) rather than anything
+    this code states. Stated here instead.
+    """
     moved: list[str] = []
+    listed = 0
     for root, _dirs, files in os.walk(staging, followlinks=False):
         for filename in sorted(files):
             path = Path(root) / filename
             if path.is_symlink() or not path.is_file():
                 continue
+            listed += 1
             relative = path.relative_to(staging).as_posix()
             if not matches_artifact_patterns(relative, patterns):
                 continue
@@ -1405,10 +1615,10 @@ def _harvest_erofs_staging(staging: Path, dest: Path, patterns: Sequence[str]) -
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(path), str(target))
             moved.append(relative)
-    return sorted(moved)
+    return sorted(moved), listed
 
 
-async def _extract_erofs(image: Path, dest: Path, patterns: Sequence[str]) -> list[str]:
+async def _extract_erofs(image: Path, dest: Path, patterns: Sequence[str]) -> tuple[list[str], int]:
     """The EROFS path, because 7z has no EROFS handler at all (measured: it reports one file
     on an image holding 105). `fsck.erofs --extract` has no selective mode and no listing
     mode, so the whole partition is unpacked into a temporary tree, the wanted paths are
@@ -1432,19 +1642,23 @@ async def extract_artifacts(
     """Pull every APK plus the config inputs later stages read out of `partitions`, into
     `dest_dir/<partition>/<path-inside-the-image>`.
 
-    Emptiness is an error at BOTH scales. A partition that yields nothing raises unless it is
-    one that legitimately holds nothing (see `partition_may_be_empty`), because a whole
-    partition matching nothing is the same bug as the whole build matching nothing, only
-    quieter: four populated partitions out of five still returns hundreds of APKs and a job
-    that records SUCCEEDED. And a run that yields no APK anywhere raises regardless, since
-    that is indistinguishable from a build with no preinstalled apps.
+    Emptiness is an error at BOTH scales, and "empty" means two different things that are
+    checked separately. An image that yields no FILE AT ALL is a failed extraction for every
+    partition without exception — no vendor ships an empty filesystem, and Samsung's `odm`
+    stub still holds 10 files — while an image that yields files and matches no PATTERN is a
+    partition with no app in it, which `PARTITIONS_ALLOWED_EMPTY` is the list of. Collapsing
+    the two is how naming a partition there also excused its extractor breaking. A partition
+    matching nothing when it is not on that list still raises, because a whole partition
+    matching nothing is the same bug as the whole build matching nothing, only quieter: four
+    populated partitions out of five still returns hundreds of APKs and a job that records
+    SUCCEEDED. And a run that yields no APK anywhere raises regardless, since that is
+    indistinguishable from a build with no preinstalled apps.
     """
     artifacts: list[ExtractedArtifact] = []
     for partition in partitions:
         dest = ensure_within(dest_dir, Path(partition.name), context="extract_artifacts")
         if partition.fmt is ContainerFormat.EROFS:
-            listed = None
-            wanted = await _extract_erofs(partition.path, dest, patterns)
+            wanted, listed = await _extract_erofs(partition.path, dest, patterns)
         else:
             entries = await _list_ext4(partition.path)
             listed = len(entries)
@@ -1456,19 +1670,29 @@ async def extract_artifacts(
             if wanted:
                 await _extract_ext4(partition.path, wanted, dest)
 
+        if listed == 0:
+            raise NothingExtractedError(
+                f"extract_artifacts: partition {partition.name!r} ({partition.path.name}, "
+                f"{partition.fmt}) yielded no file at all. That is the extraction failing, not "
+                "a partition with no app on it: PARTITIONS_ALLOWED_EMPTY excuses an image that "
+                "matches no artifact and never an image that holds nothing, so check the tool "
+                "that opened it and the image it was handed."
+            )
         if not wanted:
             if not partition_may_be_empty(partition.name):
                 raise NothingExtractedError(
                     f"extract_artifacts: partition {partition.name!r} "
                     f"({partition.path.name}, {partition.fmt}) yielded no artifact at all out of "
-                    f"{'an unlisted image' if listed is None else f'{listed} entries'}. A "
-                    "partition matching nothing is an extraction failure, not an empty "
-                    "partition: check the artifact patterns against a listing of this image, or "
-                    "add it to PARTITIONS_ALLOWED_EMPTY if it genuinely carries no app."
+                    f"{listed} entries. A partition matching nothing is an extraction failure, "
+                    "not an empty partition: check the artifact patterns against a listing of "
+                    "this image, or add it to PARTITIONS_ALLOWED_EMPTY if it genuinely carries "
+                    "no app."
                 )
             logger.info(
-                "partition %s yielded nothing, which is expected for this partition",
+                "partition %s yielded nothing out of %d entries, which is expected for this "
+                "partition",
                 partition.name,
+                listed,
             )
             continue
 
@@ -1489,10 +1713,10 @@ async def extract_artifacts(
                 )
             )
         logger.info(
-            "partition %s: extracted %d artifact(s) out of %s",
+            "partition %s: extracted %d artifact(s) out of %d entries",
             partition.name,
             len(wanted),
-            "an unlisted image" if listed is None else f"{listed} entries",
+            listed,
         )
 
     apks = sum(1 for artifact in artifacts if artifact.image_path.endswith(".apk"))

@@ -465,9 +465,212 @@ def test_a_tar_entry_name_that_would_escape_is_refused(tmp_path, entry):
         )
 
 
+def test_an_lz4_frame_declares_its_output_size_only_when_it_chooses_to(tmp_path):
+    """The measurement `_decoded_chunks` rests on, and the correction to what it used to say.
+    FLG bit 3 is an OPTIONAL content size: Samsung's own producer sets it (`0x6c` on all 31
+    entries of the measured `BL_` tar) and python-lz4's default does not, so a frame may or
+    may not declare its output and the ceiling is counted on the way out."""
+    declared = lz4.frame.compress(b"A" * 100000, store_size=True)
+    silent = lz4.frame.compress(b"A" * 100000, store_size=False)
+
+    assert declared[4] & 0b1000  # FLG bit 3, measured 2026-08-12 as 0x4c
+    assert lz4.frame.get_frame_info(declared)["content_size"] == 100000
+    assert not silent[4] & 0b1000  # 0x40
+    assert lz4.frame.get_frame_info(silent)["content_size"] == 0
+
+
+def test_one_decompress_call_cannot_return_the_whole_frame(tmp_path):
+    """4 MiB of compressed zeros returns 1016 MiB in ONE allocation without `max_length`, and
+    every ceiling in this module is checked on what came back — so the ceiling never sees the
+    spike. Bounding the call is what bounds the worker's heap."""
+    payload = io.BytesIO(lz4.frame.compress(b"\x00" * (16 * 1024 * 1024)))
+
+    sizes = [
+        len(chunk)
+        for chunk in unpack_module._decoded_chunks(
+            payload,
+            payload.read(unpack_module._STREAM_CHUNK_BYTES),
+            framed=True,
+            max_bytes=1 << 30,
+            context="test",
+        )
+    ]
+
+    assert sum(sizes) == 16 * 1024 * 1024
+    assert max(sizes) <= unpack_module._DECODE_MAX_LENGTH
+
+
+def test_a_truncated_lz4_entry_is_refused_rather_than_decoded_short(tmp_path):
+    """Measured: a frame cut at 50% yields 2,490,368 of 5,000,000 bytes and raises nothing, so
+    whatever chokes on the prefix downstream reports the wrong layer — and when the prefix
+    still classifies, the partition is dropped in silence instead. `_copy_slice` already
+    refuses a short slice for the same reason."""
+    whole = lz4.frame.compress(magic_blob(EXT4_MAGIC_AT, size=5_000_000))
+    stream = io.BytesIO(tar_bytes([("system.img.lz4", whole[: len(whole) // 2])]))
+    out = tmp_path / "out"
+
+    with pytest.raises(UnpackError, match="truncated"):
+        _extract_tar_partitions(
+            stream, out, root=tmp_path, context="test", max_bytes=1 << 30, seen={}
+        )
+
+    # And nothing half-written survives: a partial image classifies and mounts like a whole one.
+    assert list(out.iterdir()) == []
+
+
+def test_an_entry_holding_two_lz4_frames_is_decoded_whole(tmp_path):
+    """A second frame used to be discarded as `unused_data`: measured, a two-frame member
+    yielded 4000 of 8000 bytes with nothing raised."""
+    tail = b"the second frame" * 8
+    stream = io.BytesIO(
+        tar_bytes(
+            [
+                (
+                    "system.img.lz4",
+                    lz4.frame.compress(magic_blob(EXT4_MAGIC_AT)) + lz4.frame.compress(tail),
+                )
+            ]
+        )
+    )
+
+    found = _extract_tar_partitions(
+        stream, tmp_path / "out", root=tmp_path, context="test", max_bytes=1 << 20, seen={}
+    )
+
+    assert [name for name, _path in found] == ["system"]
+    assert found[0][1].read_bytes() == magic_blob(EXT4_MAGIC_AT) + tail
+
+
+def test_the_ceiling_is_for_the_whole_tar_and_not_for_each_entry(tmp_path):
+    """Per entry, an archive of N entries writes N times the ceiling into a scratch lease
+    sized for one."""
+    image = magic_blob(EXT4_MAGIC_AT)
+    stream = io.BytesIO(
+        tar_bytes([(f"p{index}.img.lz4", lz4.frame.compress(image)) for index in range(3)])
+    )
+
+    with pytest.raises(UnpackError, match="ceiling"):
+        _extract_tar_partitions(
+            stream,
+            tmp_path / "out",
+            root=tmp_path,
+            context="test",
+            max_bytes=2 * len(image) + 1,
+            seen={},
+        )
+
+
+def test_a_tar_member_bigger_than_the_ceiling_is_refused_before_it_is_walked(tmp_path):
+    """Every other zip member has its declared size checked against the ceiling; a tar member
+    is streamed rather than extracted and skipped that check entirely. Sized so the ceiling
+    the entries themselves decode past cannot stand in for it: the member declares 10,240
+    bytes and the one image inside it decodes to 1,100."""
+    member = tar_bytes(
+        [("system.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT, size=1100)))]
+    )
+    archive = samsung_shaped_zip(tmp_path / "fw.zip", [("AP_x.tar.md5", member)])
+
+    with zipfile.ZipFile(archive) as zf:
+        assert zf.getinfo("AP_x.tar.md5").file_size == len(member) == 10240
+
+    with pytest.raises(UnpackError, match="declares 10240 bytes"):
+        unpack_module._stream_zip_tar(
+            archive,
+            "AP_x.tar.md5",
+            tmp_path / "out",
+            root=tmp_path,
+            max_bytes=1200,
+            seen={},
+        )
+
+
+def test_an_entry_named_as_a_partition_that_is_not_one_stops_the_job(tmp_path):
+    """The silent half of the measured loss: `product.img.lz4` compressed with anything but an
+    LZ4 frame (zstd here) was dropped with a `logger.info` and the job recorded SUCCEEDED with
+    two partitions' APKs out of four. The name says what the entry should hold and the magic
+    says what it is; a disagreement is refused, exactly as it is for a sparsechunk member."""
+    stream = io.BytesIO(
+        tar_bytes(
+            [
+                ("system.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT))),
+                ("product.img.lz4", b"\x28\xb5\x2f\xfd" + b"\x00" * 4096),
+            ]
+        )
+    )
+
+    with pytest.raises(UnpackError) as excinfo:
+        _extract_tar_partitions(
+            stream, tmp_path / "out", root=tmp_path, context="test", max_bytes=1 << 20, seen={}
+        )
+
+    assert "product" in str(excinfo.value)
+
+
+def test_an_entry_named_as_a_partition_that_decodes_to_junk_stops_the_job(tmp_path):
+    """The other half: a corrupt `product.img.lz4` that still decodes returns bytes matching no
+    magic, and the second gate dropped it as quietly as the first."""
+    stream = io.BytesIO(
+        tar_bytes(
+            [
+                ("system.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT))),
+                ("product.img.lz4", lz4.frame.compress(b"\x00" * 8192)),
+            ]
+        )
+    )
+
+    with pytest.raises(UnpackError) as excinfo:
+        _extract_tar_partitions(
+            stream, tmp_path / "out", root=tmp_path, context="test", max_bytes=1 << 20, seen={}
+        )
+
+    assert "product" in str(excinfo.value)
+
+
+def test_an_entry_claiming_a_skipped_partition_is_still_only_skipped(tmp_path):
+    """Measured across all 65 file entries of the six `SM-S911U` tars: 19 claim an image and 7
+    of those (`vbmeta`, `vbmeta_system`, `boot`, `init_boot`, `vendor_boot`, `dtbo`,
+    `recovery`) decode to no partition format at all. Every one is on the skip list, and the
+    claim rule must lose to it or the real archive fails at its first entry."""
+    stream = io.BytesIO(
+        tar_bytes(
+            [
+                ("boot.img.lz4", lz4.frame.compress(magic_blob())),
+                ("vbmeta_system.img.lz4", b"\x00" * 4096),
+                ("system.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT))),
+            ]
+        )
+    )
+
+    found = _extract_tar_partitions(
+        stream, tmp_path / "out", root=tmp_path, context="test", max_bytes=1 << 20, seen={}
+    )
+
+    assert [name for name, _path in found] == ["system"]
+
+
+def test_an_entry_whose_name_claims_nothing_is_dropped_and_never_named(tmp_path):
+    """The early raw-format gate earns its keep here rather than only on `fota.zip`: `...` is a
+    legal tar entry name that `safe_component` refuses outright, so without the gate deciding
+    first, one junk entry fails the whole job instead of being ignored."""
+    stream = io.BytesIO(
+        tar_bytes(
+            [
+                ("...", b"\x00" * 4096),
+                ("system.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT))),
+            ]
+        )
+    )
+
+    found = _extract_tar_partitions(
+        stream, tmp_path / "out", root=tmp_path, context="test", max_bytes=1 << 20, seen={}
+    )
+
+    assert [name for name, _path in found] == ["system"]
+
+
 def test_an_lz4_entry_that_decodes_past_the_ceiling_is_a_named_error(tmp_path):
-    """An LZ4 frame declares no output size anywhere in its header, so the only bound on what
-    a hostile entry expands to is what is counted on the way out."""
+    """An LZ4 frame's content size is optional and nothing here reads it, so the only bound on
+    what a hostile entry expands to is what is counted on the way out."""
     stream = io.BytesIO(
         tar_bytes([("system.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT, size=1 << 20)))])
     )
@@ -594,6 +797,90 @@ async def test_a_sparsechunk_member_whose_bytes_are_not_sparse_is_refused(tmp_pa
     assert "ext4" in str(excinfo.value)
 
 
+def sparse_bomb(*, total_blocks: int, block_size: int = 4096) -> bytes:
+    """44 bytes declaring `total_blocks * block_size` of output.
+
+    One `CHUNK_TYPE_FILL` chunk covers every declared block in four bytes of payload, which is
+    what makes a sparse header's declared size unbounded by the file's own. Measured
+    2026-08-12: a 44-byte image declaring 1 GiB made `simg2img` write 104,857,600 bytes of
+    fully allocated blocks (`st_blocks * 512` equal to the apparent size — not one sparse hole)
+    before a `ulimit -f` cap killed it with SIGXFSZ.
+    """
+    header = struct.pack("<IHHHHIIII", 0xED26FF3A, 1, 0, 28, 12, block_size, total_blocks, 1, 0)
+    return header + struct.pack("<HHII", 0xCAC2, 0, total_blocks, 16) + b"\xff\xff\xff\xff"
+
+
+def _refuse_to_run_tools(monkeypatch):
+    async def _never(argv, **kwargs):
+        raise AssertionError(f"a tool ran that should have been refused first: {argv}")
+
+    monkeypatch.setattr(unpack_module, "_run_tool", _never)
+
+
+async def test_a_sparse_image_declaring_past_the_ceiling_never_reaches_simg2img(
+    tmp_path, monkeypatch
+):
+    """`simg2img` has no size flag — its whole usage is `simg2img <sparse> <raw>` — so the
+    declared output is refused from the header or it is not refused at all."""
+    _refuse_to_run_tools(monkeypatch)
+    image = tmp_path / "system.img"
+    image.write_bytes(sparse_bomb(total_blocks=9_000_000))  # 36.86 GB declared out of 44 bytes
+
+    with pytest.raises(UnpackError, match="ceiling"):
+        await unpack_to_partitions(image, tmp_path / "work", settings=make_settings())
+
+    assert not (tmp_path / "work" / "raw").exists()
+
+
+async def test_a_sparsechunk_set_declaring_past_the_ceiling_never_reaches_simg2img(
+    tmp_path, monkeypatch
+):
+    """The same tool, the same absence of a ceiling, reached through Motorola's chunk set."""
+    _refuse_to_run_tools(monkeypatch)
+    archive = tmp_path / "moto.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for index in range(2):
+            zf.writestr(f"super.img_sparsechunk.{index}", sparse_bomb(total_blocks=9_000_000))
+
+    with pytest.raises(UnpackError, match="ceiling"):
+        await unpack_to_partitions(archive, tmp_path / "work", settings=make_settings())
+
+
+@needs_simg
+async def test_a_partition_image_that_unpacks_to_nothing_readable_is_not_dropped(tmp_path):
+    """A tar entry reaches `_unpack_images` only after its own decoded bytes classified as a
+    partition format, so one that then reads as no container at all is a partition LOST, not a
+    blob it was right to ignore. Dropping it left a job SUCCEEDED with `system` alone."""
+    block = 4096
+    archive = samsung_shaped_zip(
+        tmp_path / "fw.zip",
+        [
+            (
+                "AP_x.tar.md5",
+                tar_bytes(
+                    [
+                        ("system.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT))),
+                        (
+                            "product.img.lz4",
+                            lz4.frame.compress(
+                                sparse_chunk(
+                                    total_blocks=1,
+                                    block_size=block,
+                                    skip_blocks=0,
+                                    data=bytes(block),
+                                )
+                            ),
+                        ),
+                    ]
+                ),
+            )
+        ],
+    )
+
+    with pytest.raises(unpack_module.UnsupportedContainerError):
+        await unpack_to_partitions(archive, tmp_path / "work", settings=make_settings())
+
+
 def sparse_chunk(*, total_blocks: int, block_size: int, skip_blocks: int, data: bytes) -> bytes:
     """One member of a real sparsechunk set, in the format measured off Motorola's own.
 
@@ -679,11 +966,14 @@ def test_erofs_harvest_moves_only_the_wanted_paths(tmp_path):
     dest = tmp_path / "out"
     dest.mkdir()
 
-    moved = _harvest_erofs_staging(staging, dest, ["*.apk", "*/etc/sysconfig/*"])
+    moved, listed = _harvest_erofs_staging(staging, dest, ["*.apk", "*/etc/sysconfig/*"])
 
     assert sorted(moved) == ["etc/sysconfig/google.xml", "priv-app/Settings/Settings.apk"]
     assert (dest / "priv-app/Settings/Settings.apk").is_file()
     assert not (dest / "lib64/libc.so").exists()
+    # The other half of the answer: four files came out of the image and two were wanted, which
+    # is a partition with no app in it rather than an extraction that produced nothing.
+    assert listed == 4
 
 
 def test_7z_listing_parse_skips_folders_and_symlinks():
@@ -803,6 +1093,27 @@ def test_safe_archive_path_refuses_absolute_and_traversing_entries():
     assert safe_archive_path("system/priv-app/X/X.apk", context="test")
 
 
+@pytest.mark.parametrize("path", [".", "./"])
+def test_a_name_that_is_only_a_dot_is_bad_input_and_not_a_crash(path):
+    """`PurePosixPath(".").parts` is empty, so reading `parts[0]` raised IndexError — a
+    genuine-bug type for what is attacker-controlled input off a tar's header block."""
+    with pytest.raises(UnsafePathError):
+        safe_archive_path(path, context="test")
+
+
+def test_a_tar_entry_named_only_a_dot_does_not_crash_the_worker(tmp_path):
+    """Reached the moment a tar is walked: entry names go into `safe_archive_path` raw, and a
+    regular file named `.` is a legal thing to put in a tar."""
+    stream = io.BytesIO(
+        tar_bytes([(".", b"\x00" * 4096), ("system.img.lz4", lz4.frame.compress(magic_blob()))])
+    )
+
+    with pytest.raises(UnsafePathError):
+        _extract_tar_partitions(
+            stream, tmp_path / "out", root=tmp_path, context="test", max_bytes=1 << 20, seen={}
+        )
+
+
 def test_ensure_within_refuses_an_absolute_join(tmp_path):
     """`Path("/a/b") / "/etc/passwd"` is `/etc/passwd`, and every `exists()` check downstream
     of that happily passes."""
@@ -881,13 +1192,56 @@ def test_the_allowed_empty_set_is_exactly_what_the_test_below_pins():
 
 
 @pytest.mark.parametrize("partition", ALLOWED_EMPTY)
+async def test_an_allowed_empty_partition_whose_image_yields_nothing_still_raises(
+    tmp_path, monkeypatch, partition
+):
+    """The two meanings of empty, kept apart. Naming a partition here says its image may match
+    no PATTERN; it never says the image may hold no FILE, and no vendor ships an empty
+    filesystem — Samsung's `odm` stub still holds 10. Collapsed into one rule, adding `odm`
+    for Samsung took Nothing's `odm` (4 APKs on FroggerPro) out of the guard entirely."""
+    _stub_extraction(monkeypatch, {"system": ["system/priv-app/A/A.apk"], partition: []})
+    partitions = [_image(tmp_path, "system"), _image(tmp_path, partition)]
+
+    with pytest.raises(unpack_module.NothingExtractedError) as excinfo:
+        await extract_artifacts(partitions, tmp_path / "out")
+
+    assert f"{partition!r}" in str(excinfo.value)
+    assert "no file at all" in str(excinfo.value)
+
+
+async def test_an_erofs_partition_that_yields_no_file_is_told_apart_from_one_that_matches_none(
+    tmp_path, monkeypatch
+):
+    """The EROFS path could not tell the two apart at all — it reported the wanted paths and
+    nothing else — so `fsck.erofs` producing an empty tree read exactly like a partition with
+    no app on it. Both halves pinned in one test, because it is the difference that matters."""
+    _stub_extraction(monkeypatch, {"system": ["system/priv-app/A/A.apk"]})
+    yielded: list[int] = []
+
+    async def _erofs(image, dest, patterns):
+        return [], yielded.pop()
+
+    monkeypatch.setattr(unpack_module, "_extract_erofs", _erofs)
+    partitions = [_image(tmp_path, "odm", fmt=ContainerFormat.EROFS), _image(tmp_path, "system")]
+
+    yielded.append(10)  # Samsung's 10-file `odm` stub: files out, no artifact among them
+    assert [a.partition for a in await extract_artifacts(partitions, tmp_path / "out")] == [
+        "system"
+    ]
+
+    yielded.append(0)  # the same partition when the extractor produced nothing at all
+    with pytest.raises(unpack_module.NothingExtractedError, match="no file at all"):
+        await extract_artifacts(partitions, tmp_path / "out2")
+
+
+@pytest.mark.parametrize("partition", ALLOWED_EMPTY)
 async def test_every_allowed_empty_partition_really_is_allowed_to_be_empty(
     tmp_path, monkeypatch, partition
 ):
     """`odm` is the entry that costs something: it holds 4 APKs on Nothing's FroggerPro and is
     a 10-file stub on Samsung's SM-S911U, so listing it buys Samsung a job that finishes and
-    gives up the guard on Nothing's odm. Pinned here so the trade is visible rather than
-    reachable only through a multi-GB heavy run."""
+    gives up the guard on Nothing's odm matching nothing. Pinned here so the trade is visible
+    rather than reachable only through a multi-GB heavy run."""
     _stub_extraction(
         monkeypatch,
         {"system": ["system/priv-app/A/A.apk"], partition: ["etc/build.prop", "etc/passwd"]},
@@ -907,7 +1261,7 @@ async def test_an_erofs_partition_before_an_ext4_one_does_not_crash(tmp_path, mo
     _stub_extraction(monkeypatch, {"system": ["system/priv-app/A/A.apk"]})
 
     async def _no_erofs_artifacts(image, dest, patterns):
-        return []
+        return [], 105  # 105 kernel modules out, none of them an artifact
 
     monkeypatch.setattr(unpack_module, "_extract_erofs", _no_erofs_artifacts)
     partitions = [

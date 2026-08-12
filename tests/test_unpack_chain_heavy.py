@@ -167,7 +167,8 @@ async def test_erofs_partition_is_read_by_fsck_erofs_not_by_7z(chain, tmp_path):
     partitions, _artifacts, _work = chain
     dlkm = next(partition for partition in partitions if partition.name == "system_dlkm")
 
-    modules = await _extract_erofs(dlkm.path, tmp_path / "dlkm", ["*.ko"])
+    modules, listed = await _extract_erofs(dlkm.path, tmp_path / "dlkm", ["*.ko"])
 
     assert len(modules) == 97
+    assert listed == 105  # what the image yields at all, which is the other half of the count
     assert all((tmp_path / "dlkm" / name).is_file() for name in modules)
