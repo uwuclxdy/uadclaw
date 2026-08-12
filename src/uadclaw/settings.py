@@ -177,6 +177,12 @@ class Settings(BaseSettings):
     # a wide crawl; the driver caps the product.
     samsung_models: str = ""
     samsung_regions: str = ""
+    # Oppo/OnePlus/realme (task 11). The INDEX only: a third-party catalogue of what each model's
+    # newest build is. The four component-OTA endpoints that resolve a download are
+    # reverse-engineered and live in the driver beside the request shapes they belong to, for the
+    # same reason Samsung's FUS hosts do. This catalogue blocks a scraping IP across its whole
+    # domain, so the driver reads it once per job — never per device — and caches it.
+    oppo_catalogue_url: str = "https://roms.danielspringer.at/api/ota.php?latest=1"
     # Read/connect timeout for firmware HTTP. No total deadline: a factory zip is multi-GB
     # and a slow-but-progressing transfer is not a failure.
     firmware_http_timeout_seconds: float = 60.0

@@ -285,6 +285,7 @@ def _driver_factories() -> dict[str, DriverFactory]:
     six drivers are six entries here and no change anywhere else."""
     from uadclaw.drivers.motorola import MotorolaDriver
     from uadclaw.drivers.nothing import NothingDriver
+    from uadclaw.drivers.oppo import OppoDriver
     from uadclaw.drivers.pixel import PixelDriver
     from uadclaw.drivers.samsung import SamsungDriver
     from uadclaw.drivers.xiaomi import XiaomiDriver
@@ -292,6 +293,7 @@ def _driver_factories() -> dict[str, DriverFactory]:
     return {
         MotorolaDriver.name: MotorolaDriver,
         NothingDriver.name: NothingDriver,
+        OppoDriver.name: OppoDriver,
         PixelDriver.name: PixelDriver,
         SamsungDriver.name: SamsungDriver,
         XiaomiDriver.name: XiaomiDriver,

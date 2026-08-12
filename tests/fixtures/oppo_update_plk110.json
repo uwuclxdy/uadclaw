@@ -1,0 +1,141 @@
+{
+ "parent": "ota",
+ "components": [
+  {
+   "componentId": "my_manifest_PLK110_11.A.68_0680_202606250030.97.3d82867d",
+   "componentName": "my_manifest",
+   "componentVersion": "PLK110_11.A.68_0680_202606250030.97.3d82867d",
+   "componentPackets": {
+    "size": "9112442382",
+    "vabInfo": {
+     "data": {
+      "otaStreamingProperty": "payload_metadata.bin:61:330596,payload.bin:61:9112436194,payload_properties.txt:9112436307:429,care_map.pb:9112436777:505,metadata:9112438374:1176,metadata.pb:9112437344:971",
+      "vab_package_hash": "8fdbfd42136ac85e4a763129491a2b7f",
+      "extra_params": "metadata_hash:ac1717d4b1dd56fbabfbbb3dc81df14fce00154db18dd9387d9f2defb35ee38c",
+      "header": [
+       "FILE_HASH=QiuNY8yyalljlQtiZlUxi3A8DdMwRCGh7JlKMKQOTPM=",
+       "FILE_SIZE=9112436194",
+       "METADATA_HASH=1ZHgbrdAcFKay8OVruWH3oBIqUkyaJ8RAW6cyZilqu0=",
+       "METADATA_SIZE=330073",
+       "android_version=16",
+       "forbid_ota_local_update=false",
+       "ota_root_or_debug=false",
+       "oplus_update_engine_verify_disable=0",
+       "ota_target_version=PLK110_11.A.68_0680_202606250030",
+       "oplus_rom_version=V16.1.0",
+       "security_patch=2026-07-01",
+       "security_patch_vendor=2026-07-01",
+       "oplus_separate_soft=24831"
+      ]
+     }
+    },
+    "manualUrl": "https://component-ota-cn.allawntech.com/downloadCheck?c=fab6d4619d09f4ad03363505ace31ccb&p=a6c78fdd375388883cce8fac17cb6530c123fbb71c6f54f5d4eb5aee937b5092edbc36dab22b3872bc6ed3282179&d=e181cd82745f88956e8098ec0182623bca30a2a51b7b03ead6e04ce9ca7400d5b4e921c5b4276d&g=e85d254ec8c5f58e7bf6e5729bd6b72f&id=6a5a14ab007ddc01813e1449&taste=0&supportDLTaste=0&mode=1&tr=manual&s=e9a6e952564fd4aab6fcc797a1c76b98",
+    "id": "domestic_my_manifest_PLK110_11.A.68_0680_202606250030.97.3d82867d_1_8fdbfd42136ac85e4a763129491a2b7f",
+    "type": "1",
+    "url": "https://component-ota-cn.allawntech.com/downloadCheck?c=fab6d4619d09f4ad03363505ace31ccb&p=a6c78fdd375388883cce8fac17cb6530c123fbb71c6f54f5d4eb5aee937b5092edbc36dab22b3872bc6ed3282179&d=e181cd82745f88956e8098ec0182623bca30a2a51b3715b3daa301a5c5764fc3b6e3339cb92e7339ee6490&g=e85d254ec8c5f58e7bf6e5729bd6b72f&id=6a5a14ab007ddc01813e1449&taste=0&supportDLTaste=0&mode=1&tr=auto&s=b08f6ed14038fe6643277213b6650d8d",
+    "md5": "8fdbfd42136ac85e4a763129491a2b7f"
+   }
+  }
+ ],
+ "securityPatch": "2026-07-01",
+ "otaVersion": "PLK110_11.A.68_0680_202606250030",
+ "isNvDescription": true,
+ "description": {
+  "opex": {
+   "title": "更新包（%s）",
+   "content": "• 优化部分场景的系统稳定性"
+  },
+  "share": ".",
+  "panelUrl": "https://gauss-compotacostauto-cn.allawnfs.com/remove-fab6d4619d09f4ad03363505ace31ccb/component-ota/26/07/17/89964a281a6b45ecb7fa9bc4b22618e0.html",
+  "url": "https://h5fs.coloros.com/d31a3e6937404b7198a51f99cc033e08/static/index.html#/about",
+  "firstTitle": ""
+ },
+ "virtualFlag": false,
+ "versionTypeId": "non_display",
+ "versionName": "PLK110_16.0.9.400(CN01)",
+ "rid": "1b4f47f4-e650-42b4-9a20-9db6c8ef7c42",
+ "reminderValue": {
+  "download": {
+   "notice": [
+    1,
+    3,
+    5,
+    7,
+    7,
+    7
+   ],
+   "pop": [
+    1,
+    1,
+    1
+   ],
+   "version": "1783044826000"
+  },
+  "upgrade": {
+   "notice": [
+    3,
+    5,
+    7,
+    7,
+    7
+   ],
+   "pop": [
+    3,
+    3,
+    3,
+    3,
+    3
+   ],
+   "version": "1783044826000"
+  }
+ },
+ "isRecruit": false,
+ "realAndroidVersion": "Android 16",
+ "opexInfo": [
+  {
+   "aid": "ovl_update_5389",
+   "versionCode": "1"
+  },
+  {
+   "aid": "ovl_update_5394",
+   "versionCode": "1"
+  },
+  {
+   "aid": "ovl_update_5432",
+   "versionCode": "3"
+  },
+  {
+   "aid": "ovl_update_5441",
+   "versionCode": "1"
+  }
+ ],
+ "isSecret": false,
+ "realOsVersion": "ColorOS 16.1.0",
+ "osVersion": "ColorOS 16.1",
+ "publishedTime": 1784288830654,
+ "componentAssembleType": true,
+ "googlePatchInfo": "0",
+ "id": "6a5a14ab007ddc01813e1449",
+ "colorOSVersion": "ColorOS 16.1",
+ "isConfidential": 0,
+ "paramFlag": 1,
+ "reminderType": 1,
+ "noticeType": 0,
+ "decentralize": {
+  "strategyVersion": "9",
+  "round": 28800,
+  "offset": 25522
+ },
+ "versionCode": 680,
+ "silenceUpdate": 0,
+ "securityPatchVendor": "2026-07-01",
+ "gkaReq": 0,
+ "realOtaVersion": "PLK110_11.A.68_0680_202606250030",
+ "androidVersion": "Android 16",
+ "nightUpdateLimit": "00-99",
+ "secLevel": "5",
+ "versionTypeH5": "不显示",
+ "aid": "PLK110NV97_11.A",
+ "nvId16": "NV97",
+ "status": "published"
+}

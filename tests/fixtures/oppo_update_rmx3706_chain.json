@@ -1,0 +1,116 @@
+{
+ "parent": "ota",
+ "components": [
+  {
+   "componentId": "my_manifest_RMX3706_11.C.22_1220_202312062317.97.c49566cd",
+   "componentName": "my_manifest",
+   "componentVersion": "RMX3706_11.C.22_1220_202312062317.97.c49566cd",
+   "componentPackets": {
+    "size": "7865286014",
+    "vabInfo": {
+     "data": {
+      "otaStreamingProperty": "payload_metadata.bin:2220:286444,payload.bin:2220:7865280247,payload_properties.txt:7865282525:357,metadata:69:1041,metadata.pb:1178:975",
+      "vab_package_hash": "0f86c33a8bc465aaa6187de4abd6ea22",
+      "extra_params": "metadata_hash:bcd8f6cbc39568f70b32d2dcd6efe09f20de8c6f05630ae863febf0d10b9c858",
+      "header": [
+       "FILE_HASH=scoXr56a6dXslByX/TI+72uKCZoV0bKc/i6XqZ9i6yY=",
+       "FILE_SIZE=7865280247",
+       "METADATA_HASH=QIG101YHpKbQtD9V+wylUmwcICQ+ImGeztsq8Oc5ogw=",
+       "METADATA_SIZE=286177",
+       "oplus_update_engine_verify_disable=0",
+       "ota_target_version=RMX3706_11.C.22_1220_202312062317",
+       "oplus_rom_version=V14.0.0",
+       "security_patch=2023-11-05",
+       "security_patch_vendor=2023-11-05",
+       "oplus_separate_soft=22624"
+      ]
+     }
+    },
+    "manualUrl": "https://gauss-componentotacostmanual-cn.allawnfs.com/remove-0d84d24c3b983f2e945a8a270beb33e9/component-ota/23/12/07/bc8afea25bec46278dc4f2e191096b3f.zip",
+    "id": "domestic_my_manifest_RMX3706_11.C.22_1220_202312062317.97.c49566cd_1_0f86c33a8bc465aaa6187de4abd6ea22",
+    "type": "1",
+    "url": "https://gauss-compotacostauto-cn.allawnfs.com/remove-0d84d24c3b983f2e945a8a270beb33e9/component-ota/23/12/07/bc8afea25bec46278dc4f2e191096b3f.zip",
+    "md5": "0f86c33a8bc465aaa6187de4abd6ea22"
+   }
+  }
+ ],
+ "securityPatch": "2023-11-05",
+ "otaVersion": "RMX3706_11.A.22_1220_202312062317",
+ "isNvDescription": true,
+ "description": {
+  "opex": {},
+  "share": ".",
+  "panelUrl": "https://gauss-compotacostauto-cn.allawnfs.com/remove-0d84d24c3b983f2e945a8a270beb33e9/component-ota/24/01/04/91cde77f2b094f42b617ba41e6d0457f.html",
+  "url": "https://h5fs.coloros.com/d31a3e6937404b7198a51f99cc033e08/static/index.html#/about",
+  "firstTitle": "为您检测到最新的系统版本，欢迎您升级体验 优化 系统性能和稳定性，系统运行更流畅"
+ },
+ "versionName": "RMX3706_14.0.0.100(CN01)",
+ "rid": "c2faa303-ec4b-4f4e-8e88-e647b5106080",
+ "reminderValue": {
+  "download": {
+   "notice": [
+    1,
+    3,
+    5,
+    7,
+    7,
+    7
+   ],
+   "pop": [
+    1,
+    1,
+    1
+   ],
+   "version": "1702016434000"
+  },
+  "upgrade": {
+   "notice": [
+    3,
+    5,
+    7,
+    7,
+    7
+   ],
+   "pop": [
+    3,
+    3,
+    3,
+    3,
+    3
+   ],
+   "version": "1702016434000"
+  }
+ },
+ "isRecruit": false,
+ "realAndroidVersion": "Android 14",
+ "opexInfo": [],
+ "isSecret": false,
+ "realOsVersion": "ColorOS 14.0.0",
+ "osVersion": "ColorOS 14.0",
+ "publishedTime": 1704339557900,
+ "componentAssembleType": true,
+ "isV5GkaVersion": 0,
+ "googlePatchInfo": "0",
+ "id": "659626c6124eec011ace4344",
+ "colorOSVersion": "ColorOS 14.0",
+ "nightUpdateContent": "本次将升级至最新的 Android 版本，带来全新的视觉设计和功能体验，推荐进行更新。",
+ "isConfidential": 0,
+ "paramFlag": 0,
+ "reminderType": 1,
+ "noticeType": 0,
+ "decentralize": {
+  "strategyVersion": "9",
+  "round": 28800,
+  "offset": 18892
+ },
+ "versionCode": 1220,
+ "silenceUpdate": 0,
+ "securityPatchVendor": "2023-11-05",
+ "gkaReq": 0,
+ "realOtaVersion": "RMX3706_11.C.22_1220_202312062317",
+ "androidVersion": "Android 14",
+ "versionTypeH5": "正式版",
+ "aid": "RMX3706NV97_11.A",
+ "nvId16": "NV97",
+ "status": "published"
+}

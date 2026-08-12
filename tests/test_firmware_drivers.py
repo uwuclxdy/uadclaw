@@ -102,12 +102,12 @@ def mock_client(handler) -> httpx.AsyncClient:
 
 
 def test_every_driver_is_registered_and_resolvable():
-    assert driver_names() == ("motorola", "nothing", "pixel", "samsung", "xiaomi")
+    assert driver_names() == ("motorola", "nothing", "oppo", "pixel", "samsung", "xiaomi")
     for name in driver_names():
         assert get_driver(name, make_settings()).name == name
 
 
-@pytest.mark.parametrize("disabled", ["xiaomi", "nothing", "motorola", "samsung"])
+@pytest.mark.parametrize("disabled", ["xiaomi", "nothing", "motorola", "samsung", "oppo"])
 def test_disabling_one_driver_leaves_the_others_resolvable(disabled):
     """Task 11's whole point: a source that breaks is switched off without touching a stage."""
     settings = make_settings(disabled_firmware_drivers=disabled)
@@ -123,8 +123,8 @@ def test_disabling_one_driver_leaves_the_others_resolvable(disabled):
         assert get_driver(name, settings).name == name
 
 
-def test_all_four_new_drivers_can_be_disabled_at_once():
-    settings = make_settings(disabled_firmware_drivers="xiaomi, nothing ,motorola,samsung")
+def test_every_reverse_engineered_or_mirrored_driver_can_be_disabled_at_once():
+    settings = make_settings(disabled_firmware_drivers="xiaomi, nothing ,motorola,samsung,oppo")
 
     assert enabled_driver_names(settings) == ("pixel",)
 
