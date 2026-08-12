@@ -11,7 +11,6 @@ The five screen states each get a test. Four of them are the ones that ship brok
 
 import json
 import re
-from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -992,27 +991,29 @@ async def test_a_corroboration_status_reads_as_its_label_and_never_as_its_value(
 # --- icons ---------------------------------------------------------------------------------
 
 
-@pytest.fixture
-def has_icons(monkeypatch):
-    """Every row and card answers "this package has an icon".
+async def give_icons(session_factory, *packages: str) -> None:
+    """Store a real launcher icon for each package, through the writer production uses.
 
-    `package_facts.icon_mime` is another lane's column and does not exist in this checkout, so
-    the store cannot produce a true `has_icon` here. What this fixture pins is the half that
-    is this screen's: given the flag, the markup. The flag's own derivation is pinned in the
-    store suite against the column being absent.
+    Was a monkeypatch over `load_board`/`load_candidate` while `icon_mime` lived in another
+    lane's worktree and the store could not answer True here at all. Now that the column
+    exists the fake is worse than useless: it pinned the markup against a flag no writer had
+    ever produced, which is the shape that passes while the real path is broken.
     """
-    real_board = triagestore.load_board
-    real_candidate = triagestore.load_candidate
-
-    async def board(session, *, view):
-        rows, counts = await real_board(session, view=view)
-        return tuple(replace(row, has_icon=True) for row in rows), counts
-
-    async def candidate(session, package, *, upstream=None):
-        return replace(await real_candidate(session, package, upstream=upstream), has_icon=True)
-
-    monkeypatch.setattr(triagestore, "load_board", board)
-    monkeypatch.setattr(triagestore, "load_candidate", candidate)
+    async with session_factory() as session, session.begin():
+        for package in packages:
+            await store_device_facts(
+                session,
+                device_key="pixel:device0",
+                build="bp1a.260505.001",
+                facts=[
+                    make_facts(
+                        package,
+                        icon_bytes=b"\x89PNG\r\n\x1a\n" + b"0" * 32,
+                        icon_mime="image/png",
+                    )
+                ],
+                observed_at=NOW,
+            )
 
 
 def test_the_stylesheet_covers_every_class_the_icon_macro_can_emit():
@@ -1048,10 +1049,11 @@ async def test_a_package_with_no_icon_gets_a_monogram_and_never_a_request(
 
 
 async def test_a_package_with_an_icon_renders_the_image_at_both_sizes(
-    db_env, triage_env, triage_db, client, has_icons
+    db_env, triage_env, triage_db, client
 ):
     await login(client)
     await seed(triage_db, {"com.example.notes": 1})
+    await give_icons(triage_db, "com.example.notes")
 
     body = await screen(client)
 
@@ -1062,7 +1064,7 @@ async def test_a_package_with_an_icon_renders_the_image_at_both_sizes(
 
 
 async def test_an_icon_url_encodes_the_package_name_rather_than_escaping_it(
-    db_env, triage_env, triage_db, client, has_icons
+    db_env, triage_env, triage_db, client
 ):
     """The icon src is a PATH SEGMENT, which is a stricter rule than the queue link beside it.
 
@@ -1075,6 +1077,7 @@ async def test_an_icon_url_encodes_the_package_name_rather_than_escaping_it(
     """
     await login(client)
     await seed(triage_db, {"com.example.notes&x=1": 1, "../../secret": 1})
+    await give_icons(triage_db, "com.example.notes&x=1", "../../secret")
 
     body = await screen(client)
 
@@ -1424,6 +1427,14 @@ def test_every_monogram_tint_clears_the_contrast_floor(theme):
     """
     ui = (web.STATIC_DIR / "ui.css").read_text(encoding="utf-8")
     app = (web.STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    # `_tokens` classifies a block by its SELECTOR and cannot see an enclosing at-rule, so a
+    # palette moved under `@media (prefers-color-scheme: dark)` would be filed by whichever
+    # leg its selector matched and this guard would measure the wrong one while staying green.
+    # That `ui.css` themes by attribute selector alone is a property of that stylesheet rather
+    # than of the parser, which makes it something to assert instead of rely on.
+    assert "prefers-color-scheme" not in ui, (
+        "ui.css themes by media query now; _tokens reads selectors and cannot see at-rules"
+    )
     tokens = _tokens(ui, theme)
 
     if theme == "light":

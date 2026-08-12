@@ -800,6 +800,40 @@ async def test_the_card_names_the_evidence_that_is_missing(db_env, triage_db):
 # --- icons -----------------------------------------------
 
 
+async def test_a_stored_icon_reaches_the_row_and_the_card(db_env, triage_db):
+    """The half that could not run while `icon_mime` lived in another lane's worktree.
+
+    Driven through `store_device_facts`, the writer production uses, rather than by setting
+    the column: `factstore` merges the icon first-wins across observations, so a fixture that
+    wrote the merged row directly would pin the reader against a row shape the writer may not
+    produce. Both readers are asserted because they read the column two different ways — the
+    queue selects it, the card gets it off the ORM object — and only one of them was ever
+    exercised against a real column.
+    """
+    await seed(triage_db, {"com.example.one": 1})
+    async with triage_db() as session, session.begin():
+        await store_device_facts(
+            session,
+            device_key="pixel:device0",
+            build="bp1a.260505.001",
+            facts=[
+                make_facts(
+                    "com.example.one",
+                    icon_bytes=b"\x89PNG\r\n\x1a\n" + b"0" * 32,
+                    icon_mime="image/png",
+                )
+            ],
+            observed_at=NOW,
+        )
+
+    async with triage_db() as session:
+        rows = await triagestore.load_rows(session)
+        card = await triagestore.load_candidate(session, "com.example.one", upstream=UPSTREAM)
+
+    assert [row.has_icon for row in rows] == [True]
+    assert card.has_icon is True
+
+
 async def test_a_package_with_no_stored_icon_says_so_on_the_row_and_on_the_card(db_env, triage_db):
     """`has_icon` is what the templates branch on, so the screen never probes the icon route
     to find out whether there is anything behind it. Measured here against the column being

@@ -458,7 +458,7 @@ async def load_candidate(
     return Candidate(
         package=package,
         device_count=fact.device_count if fact else 0,
-        has_icon=getattr(fact, "icon_mime", None) is not None,
+        has_icon=fact.icon_mime is not None if fact else False,
         devices=tuple(str(device) for device in (fact.devices if fact else [])),
         evidence=_evidence_rows(fact),
         has_conflict=bool(fact.has_conflict) if fact else False,
