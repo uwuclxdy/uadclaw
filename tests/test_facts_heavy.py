@@ -198,6 +198,27 @@ def test_every_emulator_signal_comes_out_at_its_measured_count(emulator_facts):
     }
 
 
+def test_parse_apk_actually_carries_the_extracted_icon_out(oriole_facts):
+    """The `parse_apk` -> `extract_icon` wiring, which only a real APK can reach: nothing in
+    the default suite constructs one, so blanking both assignments in `parse_apk` leaves the
+    whole suite green.
+
+    Counts measured 2026-08-12 over `oriole-cp2a.260705.006.a1` at `ICON_MAX_DPI = 320`: 52
+    rasters, 12 binary-XML drawables this renderer can turn into an SVG, and one 69,038-byte
+    PNG refused by the 64 KB cap. The exact numbers rather than "some": a renderer that
+    silently stops handling a drawable shape returns fewer icons and raises nothing.
+    """
+    by_mime: dict[str | None, int] = {}
+    for facts in oriole_facts:
+        by_mime[facts.icon_mime] = by_mime.get(facts.icon_mime, 0) + 1
+
+    assert by_mime == {None: 248, "image/png": 47, "image/webp": 5, "image/svg+xml": 12}
+    assert all((facts.icon_bytes is None) == (facts.icon_mime is None) for facts in oriole_facts), (
+        "the two icon columns are written as a pair or not at all"
+    )
+    assert max(len(facts.icon_bytes) for facts in oriole_facts if facts.icon_bytes) <= 64 * 1024
+
+
 def test_an_undeclared_label_reads_unknown_and_no_resource_id_reaches_a_name(oriole_facts):
     """The misses are undeclared attributes, not resolution failures, so `unknown` is the
     answer and there is no ARSC fallback to build. The `@7f0…` branch is still asserted: it

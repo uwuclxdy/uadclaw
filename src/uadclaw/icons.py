@@ -63,8 +63,24 @@ ICON_MAX_DPI = 320
 
 # A drawable graph out of a downloaded firmware image is untrusted input: the bound is what
 # stops a cycle, not the vendor's build tools.
+#
+# Two SEPARATE axes, and conflating them is what let a stack overflow through review once.
+# `_MAX_DRAWABLE_DEPTH` bounds drawable REFERENCE resolution — how many `@ref` and inline-child
+# hops one icon may take. `_MAX_ELEMENT_DEPTH` bounds ELEMENT NESTING inside a single decoded
+# document, which the reference bound never touches: `<group>` inside `<group>` recurses through
+# `_group`/`_vector_children` without resolving anything. Measured on this box, 497 nested
+# `<group>` elements reached CPython's default recursion limit, out of roughly 24 KB of AXML.
 _MAX_DRAWABLE_DEPTH = 8
+_MAX_ELEMENT_DEPTH = 32
 _MAX_REF_HOPS = 4
+
+# The 64 KB cap above bounds what is STORED, which is not the same as bounding what is
+# ALLOCATED to get there: the raster path checks its input, and the XML path used to decode,
+# render and encode an unbounded document before meeting the output cap (1M path tokens peaked
+# at 34 MB). The largest binary AXML drawable across both local corpora (540 APKs, top-level
+# and referenced) is 22,664 bytes and the median is 960, so this is an order of magnitude of
+# headroom over anything measured.
+MAX_DRAWABLE_BYTES = 256 * 1024
 
 _AXML_MAGIC = b"\x03\x00\x08\x00"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -348,13 +364,19 @@ def _path(element: Any, source: DrawableSource) -> str:
     return f"<path {' '.join(parts)}/>"
 
 
-def _group(element: Any, source: DrawableSource) -> str:
+def _group(element: Any, source: DrawableSource, depth: int) -> str:
     """A `<group>` as an SVG `<g transform=…>`.
 
     Android composes the group as `T(pivot + translate) · R · S · T(-pivot)`, and an SVG
     transform list applies left to right in that same order, so the components are emitted in
     exactly that sequence. Any other order moves the artwork.
+
+    `depth` is the element-nesting axis, not the reference axis: this function and
+    `_vector_children` call each other, so without it a document nesting groups deeply
+    overflows the interpreter stack rather than being refused.
     """
+    if depth >= _MAX_ELEMENT_DEPTH:
+        raise _Unsupported("_group: element nesting bound reached")
     _reject_unknown_attributes(element, _GROUP_ATTRIBUTES)
     pivot_x = _float(_attr(element, "pivotX"), 0.0)
     pivot_y = _float(_attr(element, "pivotY"), 0.0)
@@ -374,19 +396,19 @@ def _group(element: Any, source: DrawableSource) -> str:
     if pivot_x or pivot_y:
         parts.append(f"translate({_num(-pivot_x)} {_num(-pivot_y)})")
 
-    body = _vector_children(element, source)
+    body = _vector_children(element, source, depth + 1)
     transform = f' transform="{" ".join(parts)}"' if parts else ""
     return f"<g{transform}>{body}</g>"
 
 
-def _vector_children(parent: Any, source: DrawableSource) -> str:
+def _vector_children(parent: Any, source: DrawableSource, depth: int) -> str:
     body: list[str] = []
     for child in parent:
         tag = _tag(child)
         if tag == "path":
             body.append(_path(child, source))
         elif tag == "group":
-            body.append(_group(child, source))
+            body.append(_group(child, source, depth))
         else:
             raise _Unsupported(f"_vector_children: <{tag or child.tag}> inside a vector")
     return "".join(body)
@@ -399,7 +421,7 @@ def _vector(element: Any, source: DrawableSource) -> tuple[str, float, float]:
     height = _float(_attr(element, "viewportHeight"))
     if width <= 0 or height <= 0:
         raise _Unsupported("_vector: a viewport with no area")
-    body = _vector_children(element, source)
+    body = _vector_children(element, source, 0)
     alpha = _float(_attr(element, "alpha"), 1.0)
     if alpha < 1.0:
         body = f'<g opacity="{_num(alpha)}">{body}</g>'
@@ -554,6 +576,12 @@ def svg_from_drawable(root: Any, source: DrawableSource) -> str | None:
 
     Pure over `(root, source)`: hand it the same drawable twice and it returns the same bytes,
     which is what makes a re-scan's icon column idempotent.
+
+    **Never raises.** `_Unsupported` is this module's own refusal and is expected; anything
+    else is a defect or a shape nobody has met, and either way the answer a caller can act on
+    is the same one — no icon. A bound closes the escape known today; the broad catch is what
+    closes the ones nobody has thought of, and the traceback is logged in full first so an
+    unexpected escape is visible rather than absorbed.
     """
     try:
         tag = _tag(root)
@@ -570,6 +598,9 @@ def svg_from_drawable(root: Any, source: DrawableSource) -> str | None:
         raise _Unsupported(f"svg_from_drawable: <{tag or root.tag}> is not an icon drawable")
     except _Unsupported as exc:
         logger.debug("icon refused: %s", exc)
+        return None
+    except Exception:
+        logger.warning("icon renderer failed on a drawable it could not refuse", exc_info=True)
         return None
 
 
@@ -613,7 +644,7 @@ class ApkDrawables:
         except Exception:
             logger.debug("icon: %s is not in the archive", member, exc_info=True)
             return None
-        if not data.startswith(_AXML_MAGIC):
+        if not data.startswith(_AXML_MAGIC) or len(data) > MAX_DRAWABLE_BYTES:
             return None
         try:
             return AXMLPrinter(data).get_xml_obj()
@@ -675,39 +706,45 @@ def _raster_mime(data: bytes) -> str | None:
     return None
 
 
-def extract_icon(apk: APK) -> tuple[bytes, str] | None:
+def extract_icon(apk: APK, *, origin: str = "an unnamed apk") -> tuple[bytes, str] | None:
     """`(bytes, mime)` for one opened APK's launcher icon, or None when it has none this
     module can render.
+
+    **Total: this never raises, whatever the APK contains.** That is a blast-radius decision,
+    not tidiness. `facts.parse_apk` calls this while building twenty other signals, and
+    `stages.parse_device_apks` catches `ApkParseError` alone — so an escape from here does not
+    cost one APK its facts, it kills the whole `extract_facts` stage and discards every other
+    package on the device. An icon is decoration; the two honest answers were "no icon plus a
+    logged traceback" and "an `ApkParseError` the failure budget can see", and this is the
+    first because the second still throws away a package's twenty good facts over its launcher
+    graphic, and a vendor-wide drawable style would then fail whole devices through
+    `max_apk_parse_failure_ratio` while every manifest parsed perfectly. Nothing is swallowed:
+    the full traceback is logged before the refusal.
+
+    `origin` names the APK in that log, since nothing else in the message identifies it.
 
     Blocking and CPU-bound, like the rest of `facts.parse_apk`, which is its only caller.
     """
     try:
-        member = apk.get_app_icon(max_dpi=ICON_MAX_DPI)
+        return _extract_icon(apk)
     except Exception:
-        logger.warning("icon: androguard could not select an icon", exc_info=True)
+        logger.warning("icon: %s yielded no icon, unexpected failure", origin, exc_info=True)
         return None
+
+
+def _extract_icon(apk: APK) -> tuple[bytes, str] | None:
+    member = apk.get_app_icon(max_dpi=ICON_MAX_DPI)
     if not member:
         return None
 
-    try:
-        data = apk.get_file(member)
-    except Exception:
-        logger.warning("icon: %s is declared but not in the archive", member, exc_info=True)
-        return None
-
+    data = apk.get_file(member)
     mime = _raster_mime(data)
     if mime is not None:
         return (data, mime) if len(data) <= MAX_ICON_BYTES else None
-    if not data.startswith(_AXML_MAGIC):
+    if not data.startswith(_AXML_MAGIC) or len(data) > MAX_DRAWABLE_BYTES:
         return None
 
-    try:
-        root = AXMLPrinter(data).get_xml_obj()
-    except Exception:
-        logger.warning("icon: %s did not decode as binary XML", member, exc_info=True)
-        return None
-
-    svg = svg_from_drawable(root, ApkDrawables(apk))
+    svg = svg_from_drawable(AXMLPrinter(data).get_xml_obj(), ApkDrawables(apk))
     if svg is None:
         return None
     blob = svg.encode("utf-8")

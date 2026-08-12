@@ -320,6 +320,9 @@ class PackageObservation(Base):
             "device_key", "build", "device_path", name="uq_package_observations_device_path"
         ),
         Index("ix_package_observations_package", "package"),
+        CheckConstraint(
+            "(icon_bytes IS NULL) = (icon_mime IS NULL)", name="ck_package_observations_icon_pair"
+        ),
     )
 
 
@@ -397,12 +400,30 @@ class PackageFact(Base):
     # What `GET /icons/{package}` serves. Merged with the same first-wins ordering the identity
     # scalars use, except that an observation carrying no icon never hides one that does — the
     # rule `label` already follows, for the same reason.
+    #
+    # **`has_icon` is `icon_mime is not None`**, and every screen builds it that way. Named
+    # here rather than left for each lane to invent, because the screen decides whether to
+    # emit an `<img>` from one column while the route serves the other: a third predicate
+    # anywhere is a broken-image glyph on somebody's screen. The CHECK below is what keeps the
+    # two agreeing; the route's own `icon_mime in ICON_MIMES` gate is a separate question (a
+    # paired column can still name `text/html`) and does not fold into it.
     icon_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     icon_mime: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         Index("ix_package_facts_device_count", "device_count"),
         Index("ix_package_facts_has_conflict", "has_conflict"),
+        # Every screen decides whether to emit an `<img src="/icons/…">` from `icon_mime`
+        # while the route serves `icon_bytes`, so a row carrying one without the other renders
+        # a broken-image glyph in place of the monogram that is the DESIGNED answer for "no
+        # icon" — strictly worse than what it displaced. `extract_icon` returns both or
+        # neither, which makes the pair consistent by convention; a partial backfill, a manual
+        # fix-up or a future writer setting one column does not. This repo's rule is that an
+        # "X cannot happen" is a guarantee only when the counterexample is rejected, so it is
+        # rejected here rather than promised in prose.
+        CheckConstraint(
+            "(icon_bytes IS NULL) = (icon_mime IS NULL)", name="ck_package_facts_icon_pair"
+        ),
     )
 
 

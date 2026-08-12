@@ -11,8 +11,11 @@ query rather than probing this route.
 Three response headers carry the whole safety story, because the payload is a document
 generated from bytes a vendor firmware image supplied:
 
-- `Content-Type` is re-derived from a fixed set rather than echoed out of the column, so a row
-  written by anything other than `icons.extract_icon` still cannot name its own type;
+- `Content-Type` IS the column's own value, and what makes echoing it safe is the membership
+  test against `icons.ICON_MIMES` in the 404 branch: a row whose `icon_mime` is outside that
+  set never reaches the response at all. The backfill writes that column through a plain
+  `UPDATE`, so a value that did not come from `icons.extract_icon` is a real path rather than
+  a hypothetical one;
 - `X-Content-Type-Options: nosniff` stops a browser re-reading a PNG body as HTML when it
   disagrees with the declared type — the classic content-sniffing XSS;
 - `Content-Security-Policy` is what makes an SVG safe to serve. An SVG opened at its own URL

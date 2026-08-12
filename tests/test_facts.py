@@ -15,10 +15,13 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy import inspect as sa_inspect
 
+from uadclaw import icons as icons_module
 from uadclaw import jobs as jobs_module
 from uadclaw import stages as stages_module
 from uadclaw.facts import LABEL_UNKNOWN, ApkFacts, ApkParseError, IntentFilterFact, parse_apk
 from uadclaw.factstore import (
+    _SCALAR_OBSERVATION_FIELDS,
+    UNION_FIELDS,
     FactMergeError,
     merge_observations,
     observation_row,
@@ -175,6 +178,28 @@ def test_a_package_no_device_shipped_an_icon_for_merges_to_nothing():
 
     assert merged["icon_bytes"] is None
     assert merged["icon_mime"] is None
+
+
+def test_every_observation_column_is_either_upserted_or_deliberately_not():
+    """The re-scan upsert's `set_` list, pinned as a CONTRACT rather than per column.
+
+    `test_the_same_build_parsed_twice_yields_identical_facts` writes the same values twice, so
+    it cannot tell that list from an empty one — which is how the icon columns were omitted
+    from it and nothing went red. Fixing that for two columns leaves the next column added
+    here with the identical silent gap, so the set difference is asserted instead: a new
+    column lands on the left of this subtraction and reds until somebody either upserts it or
+    writes down why not.
+
+    The four exclusions each have a reason. `id` is the surrogate key; `device_key` and
+    `build` are two thirds of the conflict key, so re-asserting them says nothing; and
+    `observed_at` is excluded on purpose — it is when the APK was FIRST seen, per the comment
+    on the `set_` itself, so a re-scan must not move it.
+    """
+    columns = {column.key for column in sa_inspect(PackageObservation).mapper.column_attrs}
+    upserted = {*_SCALAR_OBSERVATION_FIELDS, *UNION_FIELDS, "package"}
+
+    assert columns - upserted == {"id", "device_key", "build", "observed_at"}
+    assert upserted - columns == set(), "the upsert names a column that does not exist"
 
 
 def test_first_seen_and_last_seen_span_the_observations():
@@ -613,6 +638,73 @@ async def test_one_unparseable_apk_lands_in_the_scan_row_and_the_rest_still_stor
     ]
     assert stored == ["com.example.alpha"]
     assert read_state(scratch).parse_failed_count == 1
+
+
+async def test_an_icon_that_blows_up_costs_its_own_apk_nothing_and_the_device_nothing(
+    db_env, db_session_factory, monkeypatch, tmp_path
+):
+    """An icon is decoration, and `parse_device_apks` catches `ApkParseError` alone — so
+    anything else escaping the icon path does not fail one APK, it fails the whole stage and
+    discards every other package on the device.
+
+    A plain `ValueError` on purpose. If this pinned `RecursionError`, a guard spelled
+    `except RecursionError` would pass it while `MemoryError`, a future androguard's
+    `AttributeError` and every other escape still killed the stage.
+
+    The observable is stronger than "the other APKs survived": the hostile APK keeps its own
+    facts too, and the failure budget sees nothing, because there was no fact-parse failure
+    to see."""
+    scratch = build_scratch(tmp_path, ["Alpha", "Hostile", "Beta"])
+
+    def parse_with_icon(path: Path, *, partition: str, device_path: str) -> ApkFacts:
+        """`parse_apk`'s own shape: build the facts, then read the icon off the open APK.
+        The real `extract_icon` runs — only the APK it is handed is a stand-in."""
+        apk = _ApkWhoseIconExplodes() if "Hostile" in path.name else _ApkWithNoIcon()
+        icon = icons_module.extract_icon(apk, origin=device_path)
+        return make_facts(
+            f"com.example.{path.stem.lower()}",
+            partition=partition,
+            device_path=device_path,
+            icon_bytes=icon[0] if icon else None,
+            icon_mime=icon[1] if icon else None,
+        )
+
+    monkeypatch.setattr(stages_module, "parse_apk", parse_with_icon)
+    ctx = StageContext(
+        job_id=await queued_job(db_session_factory),
+        attempt=1,
+        scratch_dir=scratch,
+        session_factory=db_session_factory,
+    )
+
+    await extract_facts_stage(ctx)
+
+    async with db_session_factory() as session:
+        rows = (
+            (await session.execute(select(PackageFact).order_by(PackageFact.package)))
+            .scalars()
+            .all()
+        )
+        scan = (await session.execute(select(DeviceScan))).scalar_one()
+    assert [row.package for row in rows] == [
+        "com.example.alpha",
+        "com.example.beta",
+        "com.example.hostile",
+    ]
+    assert {row.package: row.icon_bytes for row in rows}["com.example.hostile"] is None
+    assert (scan.apk_total, scan.parsed_ok, scan.parse_failed) == (3, 3, 0)
+    assert scan.failures == []
+    assert read_state(scratch).parse_failed_count == 0
+
+
+class _ApkWhoseIconExplodes:
+    def get_app_icon(self, max_dpi: int = 65536):
+        raise ValueError("androguard fell over rendering a drawable")
+
+
+class _ApkWithNoIcon:
+    def get_app_icon(self, max_dpi: int = 65536):
+        return None
 
 
 async def test_the_stage_refuses_a_scratch_directory_with_no_artifacts(

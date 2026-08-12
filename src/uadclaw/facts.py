@@ -335,7 +335,9 @@ def parse_apk(path: Path, *, partition: str, device_path: str) -> ApkFacts:
     cert_issuer, cert_subject = _certificate_names(apk)
     uses_required, uses_optional = _uses_libraries(application)
     filters = _intent_filters(application)
-    icon = extract_icon(apk)
+    # Total by contract: an icon must never be able to cost this APK its facts, let alone
+    # cost the whole device's scan through the ApkParseError-only guard above this.
+    icon = extract_icon(apk, origin=device_path)
 
     return ApkFacts(
         package=package,

@@ -104,6 +104,12 @@ CONFLICT_FIELDS: tuple[str, ...] = (
 # scalars above, with one difference: a device that shipped the package without a renderable
 # icon must not hide the icon another device shipped. That is the rule `label` already follows
 # and for the same reason — strict first-wins would let one silent device blank the column.
+#
+# "First" is the LOWEST-sorting build, so re-scanning a phone at a newer build leaves the older
+# build's artwork in place: `package_observations` never deletes, and the older row keeps
+# winning. Deliberate rather than overlooked — `label` and every FIRST_WINS_FIELDS entry behave
+# identically, and making the icon rank by recency would make it the one field on the row that
+# disagrees with the rest.
 ICON_FIELDS: tuple[str, ...] = ("icon_bytes", "icon_mime")
 
 _SCALAR_OBSERVATION_FIELDS: tuple[str, ...] = (
