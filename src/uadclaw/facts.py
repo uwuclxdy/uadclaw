@@ -24,6 +24,9 @@ androguard 4.x logs through **loguru**, which stdlib `logging.disable()` does no
 APKs emitted 123 KB of DEBUG in the baseline run. `logger.disable("androguard")` at import
 silences that path by module name, so the worker does not flood its own logs, and it is scoped
 to androguard rather than removing every loguru sink the process might own.
+
+The launcher icon is read here rather than in a later stage because `extract_facts` deletes
+the APKs the moment their facts land: this is the only moment the file exists.
 """
 
 import hashlib
@@ -38,7 +41,7 @@ _loguru_logger.disable("androguard")
 
 from androguard.core.apk import APK  # noqa: E402
 
-ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
+from uadclaw.icons import ANDROID_NS, extract_icon  # noqa: E402
 
 # What a package with no declared (or unresolvable) label is called downstream. A real word
 # rather than an empty string, because this reaches a triage card and a model prompt.
@@ -139,6 +142,11 @@ class ApkFacts:
     is_device_admin: bool = False
     is_accessibility_service: bool = False
     is_carrier_service: bool = False
+    # The launcher icon, already sized and typed by `uadclaw.icons`. Absent for most packages
+    # (223 of the 312 on the Pixel corpus declare none), which is why the dashboard's fallback
+    # is the designed case rather than the exception.
+    icon_bytes: bytes | None = None
+    icon_mime: str | None = None
 
 
 def _parse_int(value: str | None) -> int | None:
@@ -327,6 +335,9 @@ def parse_apk(path: Path, *, partition: str, device_path: str) -> ApkFacts:
     cert_issuer, cert_subject = _certificate_names(apk)
     uses_required, uses_optional = _uses_libraries(application)
     filters = _intent_filters(application)
+    # Total by contract: an icon must never be able to cost this APK its facts, let alone
+    # cost the whole device's scan through the ApkParseError-only guard above this.
+    icon = extract_icon(apk, origin=device_path)
 
     return ApkFacts(
         package=package,
@@ -360,4 +371,6 @@ def parse_apk(path: Path, *, partition: str, device_path: str) -> ApkFacts:
         is_device_admin=_declares(filters, "receiver", DEVICE_ADMIN_ACTION),
         is_accessibility_service=_declares(filters, "service", ACCESSIBILITY_SERVICE_ACTION),
         is_carrier_service=_declares(filters, "service", CARRIER_SERVICE_ACTION),
+        icon_bytes=icon[0] if icon else None,
+        icon_mime=icon[1] if icon else None,
     )

@@ -100,6 +100,18 @@ CONFLICT_FIELDS: tuple[str, ...] = (
     "overlay_target",
 )
 
+# The launcher icon. Merged first-wins by `(device_key, build, device_path)` like the identity
+# scalars above, with one difference: a device that shipped the package without a renderable
+# icon must not hide the icon another device shipped. That is the rule `label` already follows
+# and for the same reason — strict first-wins would let one silent device blank the column.
+#
+# "First" is the LOWEST-sorting build, so re-scanning a phone at a newer build leaves the older
+# build's artwork in place: `package_observations` never deletes, and the older row keeps
+# winning. Deliberate rather than overlooked — `label` and every FIRST_WINS_FIELDS entry behave
+# identically, and making the icon rank by recency would make it the one field on the row that
+# disagrees with the rest.
+ICON_FIELDS: tuple[str, ...] = ("icon_bytes", "icon_mime")
+
 _SCALAR_OBSERVATION_FIELDS: tuple[str, ...] = (
     "label",
     "label_unresolved",
@@ -112,6 +124,7 @@ _SCALAR_OBSERVATION_FIELDS: tuple[str, ...] = (
     "shared_user_id",
     "overlay_target",
     "overlay_priority",
+    *ICON_FIELDS,
     *STICKY_TRUE_FIELDS,
 )
 
@@ -141,6 +154,8 @@ def observation_row(
         "overlay_target": facts.overlay_target,
         "overlay_static": facts.overlay_static,
         "overlay_priority": facts.overlay_priority,
+        "icon_bytes": facts.icon_bytes,
+        "icon_mime": facts.icon_mime,
         "is_input_method": facts.is_input_method,
         "is_device_admin": facts.is_device_admin,
         "is_accessibility_service": facts.is_accessibility_service,
@@ -222,6 +237,7 @@ def merge_observations(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     # name every other device carries.
     labelled = [row for row in ordered if row.get("label") not in (None, LABEL_UNKNOWN)]
     label_source = labelled[0] if labelled else first
+    iconed = [row for row in ordered if row.get("icon_bytes")]
     conflicts = _conflicts(rows)
 
     merged: dict[str, Any] = {
@@ -237,6 +253,8 @@ def merge_observations(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "has_conflict": bool(conflicts),
         "conflicts": conflicts,
     }
+    for field in ICON_FIELDS:
+        merged[field] = iconed[0].get(field) if iconed else None
     for field in STICKY_TRUE_FIELDS:
         merged[field] = any(bool(row.get(field)) for row in rows)
     for field in FIRST_WINS_FIELDS:
@@ -332,6 +350,7 @@ async def recompute_package_facts(session: AsyncSession, packages: Sequence[str]
                 "cert_subject": observation.cert_subject,
                 "shared_user_id": observation.shared_user_id,
                 "overlay_target": observation.overlay_target,
+                **{field: getattr(observation, field) for field in ICON_FIELDS},
                 **{field: getattr(observation, field) for field in STICKY_TRUE_FIELDS},
                 **{field: getattr(observation, field) for field in UNION_FIELDS},
             }
