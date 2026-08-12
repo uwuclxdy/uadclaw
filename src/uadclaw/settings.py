@@ -239,7 +239,17 @@ class Settings(BaseSettings):
     # against this ceiling, and a budget that only covers the answer returns
     # `finish_reason="length"` with EMPTY content — indistinguishable from DeepSeek's
     # documented empty-content bug from the envelope, and with the opposite fix.
-    deepseek_max_tokens: int = 4096
+    #
+    # 16384 because 4096 stopped being enough. Measured 2026-08-12 over the 48 queued packages
+    # of the real merged corpus: reasoning ran 227 to 3557 tokens on the shipped prompt and one
+    # package spent the whole 4096 on reasoning alone (`finish_reason='length'`,
+    # `reasoning_tokens=4096`, zero content). `DeepSeekBudgetError` is deliberately job-level,
+    # so that one package failed the job at 9 of 48 classified; the identical run at 16384
+    # finished 48 of 48 with zero parks. The 293-595 range recorded 2026-08-11 in
+    # `docs/domain-knowledge.md` moved ~6x in a month on a byte-identical prompt, so this is
+    # headroom against a number that moves rather than a fit to the one measured. `max_tokens`
+    # is a ceiling and not a reservation, so a high one costs nothing on a call under it.
+    deepseek_max_tokens: int = 16384
     # Concurrency is account-wide across every key (there is no documented RPM or TPM), and
     # the account is shared with whatever else is talking to DeepSeek, so this defaults far
     # below the 2500 ceiling rather than near it.
