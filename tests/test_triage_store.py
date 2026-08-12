@@ -363,6 +363,58 @@ async def test_a_re_classification_returns_a_decided_package_to_the_queue(db_env
         assert len(result.scalars().all()) == 1
 
 
+async def test_the_queue_and_the_card_agree_when_an_older_bundle_comes_back(db_env, triage_db):
+    """One definition of "the current decision", asked through both readers.
+
+    They had two. The queue took the NEWEST decision and asked whether it was current; the
+    card took the newest decision that IS current, walking past newer ones. The two disagree
+    the moment a row's `bundle_sha256` returns to a value an older decision was filed
+    against, which the content-addressed bundle makes reachable: a corpus that shrinks back
+    reproduces a hash. The queue then said undecided while the card rendered `reject` as
+    current, over the same row, in the same render.
+
+    The newest decision is the one that counts, and a package whose newest decision was filed
+    against other evidence goes back in the queue — which is the safe reading either way: a
+    reviewer looks again at a proposal nobody has judged, rather than a stale verdict
+    silently deciding it.
+    """
+    await seed(triage_db, {"com.example.one": 1})
+    await decide(triage_db, "com.example.one", "reject", reason="too vague", at=NOW)
+
+    async def reclassify(bundle: str) -> None:
+        async with triage_db() as session, session.begin():
+            await store_classification(
+                session,
+                proposal("com.example.one", bundle=bundle),
+                model=MODEL,
+                thinking=True,
+                usage={},
+                attempts=1,
+                at=NOW,
+            )
+
+    await reclassify("c" * 64)
+    await decide(
+        triage_db,
+        "com.example.one",
+        "approve",
+        at=NOW + timedelta(minutes=1),
+        bundle="c" * 64,
+    )
+    # The evidence reverts, so the content-addressed hash comes back with it.
+    await reclassify(BUNDLE)
+
+    async with triage_db() as session:
+        card = await triagestore.load_candidate(session, "com.example.one")
+    assert await queue(triage_db) == ["com.example.one"]
+    assert card.decision is None, (
+        f"the queue says undecided and the card shows {card.decision} as current"
+    )
+    assert [item.action for item in card.history] == ["approve", "reject"], (
+        "the log is untouched: what changed is which entry counts, never what is kept"
+    )
+
+
 async def test_an_unknown_action_is_refused(db_env, triage_db):
     await seed(triage_db, {"com.example.one": 1})
 

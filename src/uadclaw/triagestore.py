@@ -9,8 +9,9 @@ Three properties this module owes the rest of the pipeline:
 
 - **Decisions are an append-only log, never a status column.** Rejections are the only
   measurement of whether the funnel is improving and the raw material for prompt work, so
-  what is kept is the series and not the current value. "Current" is derived: the latest
-  decision whose `bundle_sha256` matches the proposal on the row today.
+  what is kept is the series and not the current value. "Current" is derived by
+  `current_decision` and nowhere else: the NEWEST decision, and only while its
+  `bundle_sha256` matches the proposal on the row today.
 - **The queue is ranked by `package_facts.device_count`, descending.** That column is stored
   rather than joined at read time precisely to be this ranking signal.
 - **Nothing is filtered out for looking weak.** A conflicted package (134 of 147 shared
@@ -228,6 +229,24 @@ def _decision(row: DecisionRow | None, bundle_sha256: str) -> Decision | None:
     )
 
 
+def current_decision(newest: Decision | None) -> Decision | None:
+    """The decision that counts against the proposal on the row today, or None.
+
+    One definition, because there were two and they disagreed. The queue took the NEWEST
+    decision and asked whether it was current; the card took the newest decision that IS
+    current, walking past newer ones filed against other evidence. A row's `bundle_sha256`
+    can return to a value an older decision was filed against — the bundle is
+    content-addressed and pure, so a corpus that shrinks back reproduces a hash — and the two
+    then answered differently about the same row in the same render.
+
+    The newest is the one that counts. A package whose newest decision was made about
+    different evidence is undecided and goes back in the queue, which is the reading that
+    loses nothing: a reviewer looks again rather than a stale verdict deciding a proposal
+    nobody has read.
+    """
+    return newest if newest is not None and newest.current else None
+
+
 def in_view(row: QueueRow, view: str) -> bool:
     """Which list a package belongs to.
 
@@ -235,7 +254,8 @@ def in_view(row: QueueRow, view: str) -> bool:
     re-classification return a decided package to the queue with nobody deleting anything: the
     bundle hash moves, the old verdict stops being current, and the history is untouched.
     """
-    verdict = row.decision.action if row.decision and row.decision.current else None
+    counting = current_decision(row.decision)
+    verdict = counting.action if counting else None
     if view == "parked":
         return row.parked
     if row.parked:
@@ -444,7 +464,7 @@ async def load_candidate(
         corroboration_failure=corroboration.failure_reason if corroboration else None,
         sources=_sources(corroboration),
         anchors=anchors,
-        decision=next((item for item in history if item.current), None),
+        decision=current_decision(history[0] if history else None),
         history=history,
         missing=_missing(fact, analysis, classification, corroboration, anchors),
     )
