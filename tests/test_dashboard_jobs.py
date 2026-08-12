@@ -201,6 +201,54 @@ async def test_each_driver_shows_the_terms_posture_it_declares(
 # --- loading a device list ----------------------------------------------------------------
 
 
+async def test_the_load_devices_button_carries_hx_disabled_elt(
+    db_env, db_session_factory, client, monkeypatch
+):
+    """docs/todo.md §16: `hx-disabled-elt="this"` disables the button while
+    `POST /jobs/launch/devices` is in flight — a multi-second vendor request per the module
+    docstring — and had never been observed to fire, because the only browser that could drive
+    it failed instantly. Observing it actually fire still needs a browser running htmx's JS,
+    which nothing in this suite does; what a request/response test can pin is that the wiring
+    survives, so a regression dropping the attribute is caught rather than silently shipped."""
+    install_drivers(monkeypatch, FakeDriver("pixel"))
+    await _login(client)
+
+    resp = await client.get("/jobs", headers={"accept": "text/html"})
+
+    assert 'hx-disabled-elt="this"' in resp.text
+    assert 'hx-post="/jobs/launch/devices"' in resp.text
+
+
+async def test_a_realistic_sized_index_renders_grouped_by_device_not_by_ref(
+    db_env, db_session_factory, client, monkeypatch
+):
+    """docs/todo.md §16: no screen had ever rendered a real vendor index. The Pixel index is
+    2293 refs across 58 devices, and `_device_options` groups by device, so the rendered
+    `<select>` should be bounded by device count rather than ref count — reasoning the todo
+    item names as unmeasured. This renders a stubbed index of that exact shape through the
+    real view and template and measures the result instead of reasoning about it."""
+    device_count = 58
+    total_refs = 2293
+    base, extra = divmod(total_refs, device_count)
+    refs = [
+        _ref(f"device{i:02d}", f"BUILD.{i:02d}.{b:03d}")
+        for i in range(device_count)
+        for b in range(base + (1 if i < extra else 0))
+    ]
+    assert len(refs) == total_refs
+    install_drivers(monkeypatch, FakeDriver("pixel", refs=refs))
+    await _login(client)
+
+    resp = await client.post("/jobs/launch/devices", data={"driver": "pixel"})
+
+    assert resp.status_code == 200
+    option_count = resp.text.count('<option value="device')
+    assert option_count == device_count, (
+        f"the device picker renders one <option> per device, not per ref: got {option_count}"
+    )
+    assert f"{device_count} devices, {total_refs} builds" in resp.text
+
+
 async def test_loading_devices_is_an_explicit_action_that_lists_them(
     db_env, db_session_factory, client, monkeypatch
 ):
