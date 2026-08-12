@@ -188,7 +188,7 @@ class XiaomiDriver(FirmwareDriver):
                 "Xiaomi's own CDN, unauthenticated and ungated, indexed by the community "
                 "XiaomiFirmwareUpdater tracker that has scraped it publicly for years with "
                 "no recorded objection. Xiaomi has published no API and no terms grant, so "
-                "this is tolerated rather than authorised — as is every source here: no "
+                "this is tolerated rather than authorised, as is every source here: no "
                 "OEM's terms were found to authorise automated bulk downloading."
             ),
             # Nothing to acknowledge: there is no gate, and no acceptance to record.

@@ -107,6 +107,21 @@ def test_every_driver_is_registered_and_resolvable():
         assert get_driver(name, make_settings()).name == name
 
 
+@pytest.mark.parametrize("name", driver_names())
+def test_a_drivers_terms_summary_reads_as_operator_copy(name):
+    """`TermsPosture.summary` stopped being an internal note the moment the dashboard grew a
+    driver picker: the jobs screen renders it verbatim so an operator can see what they are
+    about to pull from. That puts it under the house copy rules, and the dash ban is the one
+    a summary written as a code comment fails, because a comment is where a dash reads fine.
+
+    Samsung's and Xiaomi's both carried one and reached nobody until the screen shipped.
+    """
+    summary = get_driver(name, make_settings()).terms().summary
+    assert summary
+    for dash in ("—", "–"):
+        assert dash not in summary, f"{name} terms summary carries {dash!r}"
+
+
 @pytest.mark.parametrize("disabled", ["xiaomi", "nothing", "motorola", "samsung", "oppo"])
 def test_disabling_one_driver_leaves_the_others_resolvable(disabled):
     """Task 11's whole point: a source that breaks is switched off without touching a stage."""
