@@ -694,6 +694,30 @@ async def test_a_description_the_reviewer_actually_rewrites_is_still_validated(d
     assert row.unknown_fields == []
 
 
+async def test_a_fresh_edit_clears_the_mark_saying_an_earlier_one_was_superseded(db_env, triage_db):
+    """The mark records the value it replaced. Left beside a value the reviewer has just
+    written, it tells them their own answer was already overruled, which is a lie the card
+    renders in their face."""
+    await seed(triage_db, {"com.example.one": 1}, floor="Advanced")
+    async with triage_db() as session, session.begin():
+        row = await session.get(PackageClassification, "com.example.one")
+        row.provenance = {
+            **row.provenance,
+            "removal_superseded": "rule:floor superseded human:triage Recommended",
+        }
+
+    async with triage_db() as session, session.begin():
+        await triagestore.apply_edit(
+            session, package="com.example.one", edits={"removal": "Expert"}, at=NOW
+        )
+
+    async with triage_db() as session:
+        row = await session.get(PackageClassification, "com.example.one")
+    assert row is not None
+    assert row.removal == "Expert"
+    assert "removal_superseded" not in row.provenance
+
+
 async def test_an_edit_to_a_package_with_no_proposal_is_refused(db_env, triage_db):
     with pytest.raises(triagestore.TriageError, match="com.example.absent"):
         async with triage_db() as session, session.begin():

@@ -459,6 +459,10 @@ async def store_human_edit(
     provenance = {**(existing.provenance or {})}
     for field in changed:
         provenance[field] = HUMAN_TRIAGE
+        # A mark saying an earlier human value was superseded describes the value it replaced,
+        # not the one being written now. Leaving it beside a fresh edit tells the next reviewer
+        # their own answer was already overruled.
+        provenance.pop(f"{field}{SUPERSEDED_SUFFIX}", None)
     values["provenance"] = provenance
     if "description" in changed:
         # A row carrying a written description while still declaring it unknown asserts two
