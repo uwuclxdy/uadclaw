@@ -1438,6 +1438,14 @@ def test_every_monogram_tint_clears_the_contrast_floor(theme):
     """
     ui = (web.STATIC_DIR / "ui.css").read_text(encoding="utf-8")
     app = (web.STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    # `_tokens` classifies a block by its SELECTOR and cannot see an enclosing at-rule, so a
+    # palette moved under `@media (prefers-color-scheme: dark)` would be filed by whichever
+    # leg its selector matched and this guard would measure the wrong one while staying green.
+    # That `ui.css` themes by attribute selector alone is a property of that stylesheet rather
+    # than of the parser, which makes it something to assert instead of rely on.
+    assert "prefers-color-scheme" not in ui, (
+        "ui.css themes by media query now; _tokens reads selectors and cannot see at-rules"
+    )
     tokens = _tokens(ui, theme)
 
     if theme == "light":
