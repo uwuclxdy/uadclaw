@@ -271,6 +271,66 @@ class Settings(BaseSettings):
     # service that is already failing is not a retry strategy, it is the outage getting help.
     classification_max_calls_per_package: int = 3
 
+    # Corroboration (task 8). Same posture as `deepseek_key` and deliberately NOT in
+    # `_reject_blank`: the deterministic half of this pipeline must still boot on a box with
+    # no search account. A blank token is refused at the point of use by
+    # `brave.require_brave_key`. The consequence is worth stating plainly — a classification
+    # job now ENDS at `corroborate`, so finishing one needs a Brave key where it used to need
+    # only a DeepSeek key.
+    brave_key: SecretStr = SecretStr("")
+    brave_search_url: str = "https://api.search.brave.com/res/v1/web/search"
+    # The API's own `count` parameter. 10 because that is what the top-ten judge input needs
+    # from the `web` block alone; the `discussions` block arrives beside it and is not counted
+    # against this (measured 2026-08-12: one probe answered 10 web results and 13 discussions).
+    brave_result_count: int = 10
+    # How many merged results are fetched and shown to the judge per package. Ten, per the
+    # design; each one costs a page fetch, so this multiplies the fetch load rather than the
+    # search load.
+    corroboration_sources_per_package: int = 10
+    # Read/connect deadline for one search call. Short on purpose: a slow search is a package
+    # marked `search_failed` and retried later at the cost of one query, not a stalled job.
+    brave_request_timeout_seconds: float = 15.0
+    # Queries ONE corroboration job may spend. The measured rate headers read
+    # `50;w=1, 0;w=2678400` — 50 requests per SECOND, with the monthly component reporting a
+    # limit of 0 while still serving, so the monthly quota is UNVERIFIED and no number here is
+    # derived from one. This is a job-level ceiling an operator sets against whatever plan they
+    # actually hold; nothing in this stage approaches the per-second limit, because every query
+    # is followed by up to ten page fetches.
+    corroboration_max_queries_per_job: int = 500
+    # How long a package's cached search rows stand before the package re-searches. 30 days
+    # because these rows exist to keep a re-classification from re-spending the search quota,
+    # and the web's answer to "what is com.example.foo" does not turn over inside a month.
+    corroboration_search_ttl_days: float = 30.0
+    # How many packages one corroboration job may judge. The classification ceiling's twin:
+    # a job's own params can lower it and never raise it.
+    corroboration_max_packages: int = 500
+    # Total billed judge requests ONE package may cost, counting every wire retry — the same
+    # single-budget shape as `classification_max_calls_per_package`, and for the same reason:
+    # the wire retries inside `DeepSeekClient` and the re-prompts on a rejected verdict must
+    # not multiply into a ceiling nine times the number anybody reads.
+    corroboration_max_calls_per_package: int = 3
+    # Read/connect deadline for one page fetch. Ten seconds because a slow page is not worth a
+    # judge waiting on it: the Brave snippet stands in and the verdict still lands.
+    page_fetch_timeout_seconds: float = 10.0
+    # Hard ceiling on one page body, enforced while streaming. 4 MiB is roughly an order of
+    # magnitude above a heavy real article and small enough that ten concurrent fetches cannot
+    # put more than 40 MiB in the worker heap. A body past it is TRUNCATED, not refused: the
+    # head of a long page is still evidence.
+    page_fetch_max_bytes: int = 4 * 1024 * 1024
+    # Characters of extracted text kept per source, for the judge and for the row. Ten sources
+    # at this cap is ~40k characters of evidence per package, roughly 10k input tokens — about
+    # 9x the 1116-token classification prompt measured 2026-08-11, and ~$0.0014 per package at
+    # the fully-uncached miss price. Cost is not the constraint; a judge asked to weigh ten
+    # full pages is.
+    page_text_max_chars: int = 4000
+    # Concurrent page fetches across the whole job, the way `DeepSeekClient` bounds its own.
+    # These go to arbitrary third-party hosts, so this is politeness as much as memory.
+    page_fetch_max_concurrency: int = 8
+    # Redirect hops one page fetch may take before it gives up. Walked by hand rather than by
+    # httpx so every hop's scheme is checked; three admits the ordinary
+    # http->https->canonical-path chain and stops a redirect loop dead.
+    page_fetch_max_redirects: int = 3
+
     @field_validator("postgres_password", "auth_password", "session_secret")
     @classmethod
     def _reject_blank(cls, value: SecretStr) -> SecretStr:
@@ -303,6 +363,9 @@ class Settings(BaseSettings):
         "firmware_http_timeout_seconds",
         "deepseek_request_timeout_seconds",
         "deepseek_retry_backoff_seconds",
+        "brave_request_timeout_seconds",
+        "corroboration_search_ttl_days",
+        "page_fetch_timeout_seconds",
     )
     @classmethod
     def _reject_non_positive_duration(cls, value: float) -> float:
@@ -316,11 +379,28 @@ class Settings(BaseSettings):
         "deepseek_max_attempts",
         "classification_max_packages",
         "classification_max_calls_per_package",
+        "brave_result_count",
+        "corroboration_sources_per_package",
+        "corroboration_max_queries_per_job",
+        "corroboration_max_packages",
+        "corroboration_max_calls_per_package",
+        "page_fetch_max_bytes",
+        "page_text_max_chars",
+        "page_fetch_max_concurrency",
     )
     @classmethod
     def _reject_non_positive_count(cls, value: int) -> int:
         if value < 1:
             raise ValueError("must be >= 1")
+        return value
+
+    @field_validator("page_fetch_max_redirects")
+    @classmethod
+    def _reject_negative_redirects(cls, value: int) -> int:
+        # 0 is legitimate and is not in the count validator above for that reason: "never
+        # follow a redirect" is a defensible posture for a fetcher pointed at hostile URLs.
+        if value < 0:
+            raise ValueError("page_fetch_max_redirects must be >= 0")
         return value
 
     @field_validator("max_apk_parse_failure_ratio")

@@ -18,6 +18,11 @@ dependencies = [
   "fastapi>=0.141.1",
   "httpx>=0.28.1",
   "itsdangerous>=2.2.0",
+  # HTML to text for the corroborate stage's page fetcher. Declared rather than leaned on as
+  # androguard's transitive dependency, which it already is — the same call `cryptography` and
+  # `pyyaml` get above, and for the same reason: a dependency this code imports directly is
+  # this project's to pin, not something to inherit from a library that could drop it.
+  "lxml>=6.1.1",
   "lz4>=4.4.5",
   "pydantic>=2.13.4",
   "pydantic-settings>=2.15.0",
