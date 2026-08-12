@@ -990,3 +990,18 @@ async def test_every_screen_route_is_behind_the_default_deny_middleware(client, 
 async def test_every_launch_route_is_behind_the_default_deny_middleware(client, path):
     resp = await client.post(path, data={})
     assert resp.status_code == 401
+
+
+def test_every_terms_risk_has_a_written_label_rather_than_a_mangled_enum():
+    """`.replace("_", " ")` stood here and is right on all four of today's members, which is
+    what makes it dangerous: a fifth arrives rendering as prose nobody chose, and a wrong word
+    on screen is indistinguishable from a handled one. An unmapped member must fall through to
+    its own spelling so it reads as unhandled."""
+    from uadclaw import firmware
+    from uadclaw.views.jobs import _RISK_LABEL
+
+    assert set(_RISK_LABEL) == set(firmware.TermsRisk)
+    assert "_" not in " ".join(_RISK_LABEL.values())
+    assert _RISK_LABEL.get("a_member_nobody_mapped", "a_member_nobody_mapped") == (
+        "a_member_nobody_mapped"
+    )

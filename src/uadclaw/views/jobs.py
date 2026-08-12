@@ -105,6 +105,19 @@ _RISK_TAG: dict[firmware.TermsRisk, str] = {
     firmware.TermsRisk.REVERSE_ENGINEERED: "tag-danger",
 }
 
+# The same four, spelled for a reader. A blanket `.replace("_", " ")` stood here and reads as
+# equivalent on today's four members: only `reverse_engineered` carries an underscore. It is
+# not equivalent on the fifth. A member added later would render as prose nobody wrote and
+# nobody chose, which is indistinguishable on screen from a value that was handled, so the
+# omission surfaces as a wrong word rather than as a missing one. An unmapped member falls
+# through to its own spelling here for exactly that reason: it should look unhandled.
+_RISK_LABEL: dict[firmware.TermsRisk, str] = {
+    firmware.TermsRisk.PUBLIC: "public",
+    firmware.TermsRisk.ACKNOWLEDGEMENT: "terms accepted",
+    firmware.TermsRisk.RESTRICTED: "restricted mirror",
+    firmware.TermsRisk.REVERSE_ENGINEERED: "reverse engineered",
+}
+
 # What each named firmware failure means to the operator, in the screen's own voice. The
 # detail beside it is the exception's own message, which already names the setting to change.
 # Ordered most specific first; none of these five is a subclass of another.
@@ -249,7 +262,7 @@ def _terms_rows(settings: Settings) -> tuple[dict[str, Any], ...]:
         rows.append(
             {
                 "name": name,
-                "risk": str(posture.risk).replace("_", " "),
+                "risk": _RISK_LABEL.get(posture.risk, str(posture.risk)),
                 "risk_tag": _RISK_TAG[posture.risk],
                 "summary": posture.summary,
                 "source_url": posture.source_url,
