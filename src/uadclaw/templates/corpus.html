@@ -91,7 +91,7 @@
                 <td class="num-col">{{ row.device_count }}</td>
                 <td>
                   {% if row.floor %}
-                    <span class="tag {{ FLOOR_TAG_CLASS[row.floor] }}">{{ row.floor }}</span>
+                    <span class="tag {{ FLOOR_TAG_CLASS.get(row.floor, "tag-default") }}">{{ row.floor }}</span>
                   {% else %}
                     <span class="tag tag-default">ladder pending</span>
                   {% endif %}

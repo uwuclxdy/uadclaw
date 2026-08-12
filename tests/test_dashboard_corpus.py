@@ -169,6 +169,31 @@ async def test_a_filter_value_that_is_defined_still_narrows_and_warns_about_noth
     assert "com.example.dropped" not in resp.text
 
 
+async def test_a_stored_floor_outside_the_enum_renders_a_tag_rather_than_a_500(
+    db_env, db_session_factory, client
+):
+    """The tag map was indexed directly on two screens and read with a default on a third, so
+    a stored floor outside the four tiers rendered a 500 on the first two under
+    `StrictUndefined` and a plain tag on the third. That value is representable — the store's
+    own floor gate has a test seeding it — so the three have to agree, and the reading that
+    keeps the screen up is the one that shows the value beside a neutral tag."""
+    await _seed(
+        db_session_factory,
+        _fact("com.example.corrupt"),
+        _analysis("com.example.corrupt", floor="Extremely Unsafe", floor_rule="core_app"),
+    )
+    await _login(client)
+
+    listing = await client.get("/corpus")
+    detail = await client.get("/corpus/com.example.corrupt")
+
+    assert listing.status_code == 200
+    assert detail.status_code == 200
+    assert "Extremely Unsafe" in listing.text
+    assert "Extremely Unsafe" in detail.text
+    assert "tag-default" in detail.text
+
+
 # --- error state, distinct from empty --------------------------------------------------------
 
 

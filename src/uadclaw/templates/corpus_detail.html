@@ -88,7 +88,7 @@
         <div class="card-title" style="margin-bottom:var(--space-3)">removal floor</div>
         {% if analysis.floor %}
           <div style="margin-bottom:var(--space-4)">
-            <span class="tag {{ FLOOR_TAG_CLASS[analysis.floor] }}">{{ analysis.floor }}</span>
+            <span class="tag {{ FLOOR_TAG_CLASS.get(analysis.floor, "tag-default") }}">{{ analysis.floor }}</span>
             <span style="color:var(--text-dim);font-size:var(--text-sm)">set by {{ analysis.floor_rule }}</span>
           </div>
           <div class="label" style="margin-bottom:var(--space-2)">every rule that fired, strictest first</div>
