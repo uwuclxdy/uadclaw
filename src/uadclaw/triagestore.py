@@ -276,8 +276,25 @@ async def load_queue(session: AsyncSession, *, view: str = "queue") -> tuple[Que
 async def load_counts(session: AsyncSession) -> dict[str, int]:
     """How many packages sit in each view. The screen shows these on its filters, so a
     reviewer can see that a queue reading empty has 12 deferred behind it."""
-    rows = await load_rows(session)
+    return _counts(await load_rows(session))
+
+
+def _counts(rows: Sequence[QueueRow]) -> dict[str, int]:
     return {view: sum(1 for row in rows if in_view(row, view)) for view in VIEWS}
+
+
+async def load_board(
+    session: AsyncSession, *, view: str
+) -> tuple[tuple[QueueRow, ...], dict[str, int]]:
+    """One view's rows and every view's counts, off ONE read.
+
+    The screen used to call `load_counts` and then `load_queue`, each running the full joined
+    query, in one session with no transaction. A decision landing between them let the screen
+    compute its "cleared" state from counts that no longer described the rows beside them —
+    Postgres reads committed per statement, so two statements are two snapshots.
+    """
+    rows = await load_rows(session)
+    return tuple(row for row in rows if in_view(row, view)), _counts(rows)
 
 
 def _evidence_rows(fact: PackageFact | None) -> tuple[tuple[str, str], ...]:

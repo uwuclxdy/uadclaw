@@ -21,8 +21,13 @@
           <a class="nav-item{% if board.candidate and row.package == board.candidate.package %} active{% endif %}"
              data-queue-row
              data-selected="{{ 'true' if board.candidate and row.package == board.candidate.package else 'false' }}"
-             href="/triage?view={{ board.view }}&package={{ row.package }}"
-             hx-get="/triage?view={{ board.view }}&package={{ row.package }}"
+             {# `urlencode`, not autoescape: escaping turns a literal `&` into `&amp;`, which
+                the browser decodes straight back into a parameter separator, so the link
+                would select a package other than the row it sits on. The record's identity
+                is not the record's path — `board.view` needs none of this because the view
+                is parsed against `VIEWS` at the boundary. #}
+             href="/triage?view={{ board.view }}&package={{ row.package | urlencode }}"
+             hx-get="/triage?view={{ board.view }}&package={{ row.package | urlencode }}"
              hx-target="#triage-board" hx-swap="outerHTML"
              style="display:block;padding:var(--space-2) var(--space-3)">
             <div style="display:flex;justify-content:space-between;gap:var(--space-2);align-items:baseline">

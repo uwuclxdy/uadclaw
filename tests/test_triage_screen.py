@@ -602,6 +602,46 @@ async def test_a_package_name_out_of_firmware_is_escaped(db_env, triage_env, tri
     assert "&lt;script&gt;" in body
 
 
+async def test_a_package_name_in_a_queue_link_is_url_encoded(db_env, triage_env, triage_db, client):
+    """A package name is bytes out of downloaded firmware, and the record's identity is not
+    the record's path — the rule the corpus screen already follows with `| urlencode`.
+
+    Autoescape is not the same defence: it turns a literal `&` into `&amp;`, which the browser
+    decodes straight back into a query-parameter separator, so the link selects a different
+    package than the row it sits on.
+    """
+    await login(client)
+    hostile = "com.example.notes&view=parked"
+    await seed(triage_db, {hostile: 1})
+
+    body = await screen(client)
+
+    assert "package=com.example.notes%26view%3Dparked" in body
+    assert "package=com.example.notes&amp;view=parked" not in body
+
+
+@pytest.mark.parametrize("endpoint", ["/triage/decide", "/triage/edit"])
+async def test_a_view_a_form_made_up_is_an_error_beside_the_queue_rather_than_a_500(
+    db_env, triage_env, triage_db, client, endpoint
+):
+    """`view` is validated on the GET and was taken on trust on both POSTs, where it reaches
+    `load_queue` and raises out of a handler that catches only its own input errors. It also
+    reaches an `href` in the rendered board, which is the second reason it is parsed at the
+    boundary rather than escaped at the end."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+
+    resp = await client.post(
+        endpoint,
+        data={"package": "com.example.one", "action": "approve", "view": "everything"},
+        headers={"accept": "text/html", "HX-Request": "true"},
+    )
+
+    assert resp.status_code == 200, resp.text[:400]
+    assert "is not a list" in resp.text
+    assert "com.example.one" in resp.text
+
+
 async def test_a_database_that_refuses_the_password_is_an_error_state_not_a_500(
     monkeypatch, test_env, triage_env
 ):

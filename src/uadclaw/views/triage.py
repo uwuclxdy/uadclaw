@@ -99,6 +99,20 @@ class Board:
     edit_open: bool = False
 
 
+def _valid_view(view: str) -> tuple[str, str | None]:
+    """The list to render, and the reason it is not the one that was asked for.
+
+    Parsed at the boundary rather than trusted, on all three entry points. The GET validated
+    it and the two POSTs did not, so a form carrying a made-up view raised out of
+    `load_queue` into a handler that catches only its own input errors — a 500 on a write.
+    It also reaches an `href` in the rendered board, and a value drawn from a fixed set never
+    needs encoding, which is the cheaper half of the same rule.
+    """
+    if view in VIEWS:
+        return view, None
+    return "queue", f"{view!r} is not a list. showing the queue."
+
+
 def _upstream(path: Path) -> tuple[UpstreamList | None, str | None]:
     """The operator's `uad_lists.json`, or the reason the card has no neighbours.
 
@@ -138,8 +152,9 @@ async def _board(
 
     try:
         async with session_factory() as session:
-            counts = await triagestore.load_counts(session)
-            rows = await triagestore.load_queue(session, view=view)
+            # One read for both, so the counts on the filters and the rows beside them
+            # describe the same instant. See `triagestore.load_board`.
+            rows, counts = await triagestore.load_board(session, view=view)
             selected = package if any(row.package == package for row in rows) else None
             if selected is None and package is not None and error is None:
                 error = f"{package} is not in the {view} list. showing the top of it instead."
@@ -235,10 +250,7 @@ async def triage_screen(
     done: str | None = None,
     undo: str | None = None,
 ) -> Response:
-    error = None
-    if view not in VIEWS:
-        error = f"{view!r} is not a list. showing the queue."
-        view = "queue"
+    view, error = _valid_view(view)
     notice = f"{PAST_TENSE[done]}." if done in PAST_TENSE else None
     return _render(
         request,
@@ -268,6 +280,7 @@ async def decide(
     package after editing one is how an edit gets left unapproved.
     """
     at = datetime.now(UTC)
+    view, view_error = _valid_view(view)
     session_factory = get_session_factory()
     try:
         async with session_factory() as session, session.begin():
@@ -280,11 +293,14 @@ async def decide(
             await _board(
                 view=view,
                 package=package,
-                error="a rejection needs a reason. one line is enough, and it is kept.",
+                error=view_error
+                or "a rejection needs a reason. one line is enough, and it is kept.",
             ),
         )
     except TriageError as exc:
-        return _render(request, await _board(view=view, package=package, error=str(exc)))
+        return _render(
+            request, await _board(view=view, package=package, error=view_error or str(exc))
+        )
     except web.DB_UNREACHABLE:
         # A verdict is the one thing this screen exists to record, so a failure to record it
         # has to be visible. htmx swaps neither a 4xx nor a 5xx, so a 500 here disabled the
@@ -296,7 +312,7 @@ async def decide(
             await _board(
                 view=view,
                 package=package,
-                error=f"nothing was recorded. {web.DB_UNREACHABLE_MESSAGE}",
+                error=view_error or f"nothing was recorded. {web.DB_UNREACHABLE_MESSAGE}",
             ),
         )
 
@@ -306,6 +322,7 @@ async def decide(
         board = await _board(
             view=view,
             package=package if stay else None,
+            error=view_error,
             notice=f"{PAST_TENSE.get(action, action)} {package}.",
             undo=undo,
         )
@@ -340,6 +357,7 @@ async def edit(
         )
         if value.strip()
     }
+    view, view_error = _valid_view(view)
     session_factory = get_session_factory()
     try:
         async with session_factory() as session, session.begin():
@@ -347,7 +365,7 @@ async def edit(
     except (TriageError, BelowFloorError, ValueError) as exc:
         return _render(
             request,
-            await _board(view=view, package=package, error=str(exc), edit_open=True),
+            await _board(view=view, package=package, error=view_error or str(exc), edit_open=True),
         )
     except web.DB_UNREACHABLE:
         # Same reason as `decide` above, plus one of its own: the form is still open and the
@@ -359,7 +377,7 @@ async def edit(
             await _board(
                 view=view,
                 package=package,
-                error=f"the edit was not saved. {web.DB_UNREACHABLE_MESSAGE}",
+                error=view_error or f"the edit was not saved. {web.DB_UNREACHABLE_MESSAGE}",
                 edit_open=True,
             ),
         )
@@ -370,5 +388,7 @@ async def edit(
             if changed
             else f"nothing changed on {package}."
         )
-        return _render(request, await _board(view=view, package=package, notice=notice))
+        return _render(
+            request, await _board(view=view, package=package, error=view_error, notice=notice)
+        )
     return _redirect(view, package, done="edit" if changed else "", undo=None)

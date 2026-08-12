@@ -415,6 +415,28 @@ async def test_the_queue_and_the_card_agree_when_an_older_bundle_comes_back(db_e
     )
 
 
+async def test_the_counts_and_the_rows_come_off_one_read(db_env, triage_db, monkeypatch):
+    """The screen showed a "cleared" state computed from counts taken by a second query, so a
+    decision landing between the two described rows that were no longer there. Counted rather
+    than raced: one read is the property, and a race is not what a test can pin."""
+    await seed(triage_db, {"com.example.one": 1, "com.example.two": 1})
+    reads = []
+    real = triagestore.load_rows
+
+    async def counting(session):
+        reads.append(1)
+        return await real(session)
+
+    monkeypatch.setattr(triagestore, "load_rows", counting)
+
+    async with triage_db() as session:
+        rows, counts = await triagestore.load_board(session, view="queue")
+
+    assert len(reads) == 1
+    assert [row.package for row in rows] == ["com.example.one", "com.example.two"]
+    assert counts["queue"] == 2
+
+
 async def test_an_unknown_action_is_refused(db_env, triage_db):
     await seed(triage_db, {"com.example.one": 1})
 
