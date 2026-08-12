@@ -1032,14 +1032,22 @@ async def test_a_package_with_an_icon_renders_the_image_at_both_sizes(
 async def test_an_icon_url_encodes_the_package_name_rather_than_escaping_it(
     db_env, triage_env, triage_db, client, has_icons
 ):
-    """The rule the queue link already follows. Escaping turns a literal `&` into `&amp;`,
-    which the browser decodes straight back into a parameter separator — on an icon route the
-    consequence is the wrong package's icon beside a name, which reads as a correct answer."""
+    """The icon src is a PATH SEGMENT, which is a stricter rule than the queue link beside it.
+
+    Two encodings are wrong here and they fail differently. Autoescape turns a literal `&` into
+    `&amp;`, which the browser decodes straight back into a separator, so the card shows another
+    package's icon and reads as a correct answer. Jinja's `urlencode` fixes that and keeps `/`
+    safe, which is right for the `?package=` link and wrong here: a slash spells a segment
+    boundary the record never had, and a browser resolves `..` before the request is sent, so
+    the route is asked for a path nobody named. `web.url_segment` is the one that holds.
+    """
     await login(client)
-    await seed(triage_db, {"com.example.notes&x=1": 1})
+    await seed(triage_db, {"com.example.notes&x=1": 1, "../../secret": 1})
 
     body = await screen(client)
 
+    assert "/icons/..%2F..%2Fsecret" in body
+    assert "/icons/../.." not in body
     assert "/icons/com.example.notes%26x%3D1" in body
     assert "/icons/com.example.notes&amp;x=1" not in body
 
