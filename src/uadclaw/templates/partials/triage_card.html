@@ -31,6 +31,23 @@
     </div>
   </div>
 
+  {# Directly under the badges, because a badge is a non-focusable `<span>` and nothing else
+     on the card says an explanation exists. One `<details>` and one tab stop for the whole
+     set; focusable badges would cost three per card and two per rail row, over a queue as
+     long as the corpus. The stop lands before the verdict buttons, which the keyboard path
+     reaches by `a`/`d`/`r`/`e` rather than by Tab. #}
+  <details id="triage-badge-help" style="margin-bottom:var(--space-3)">
+    <summary class="label" style="cursor:pointer">what the badges mean</summary>
+    <dl style="margin-top:var(--space-3);font-size:var(--text-sm);color:var(--text-dim);display:grid;gap:var(--space-2)">
+      {% for badge, meaning in badge_meanings %}
+        <div style="display:flex;gap:var(--space-2);align-items:baseline">
+          <dt><span class="tag tag-default">{{ badge }}</span></dt>
+          <dd>{{ meaning }}</dd>
+        </div>
+      {% endfor %}
+    </dl>
+  </details>
+
   {% if c.parked %}
     <div class="callout callout-danger" style="margin-bottom:var(--space-4)">
       <div class="callout-body">
@@ -62,9 +79,18 @@
         <input type="hidden" name="view" value="{{ board.view }}">
         {# `hx-disabled-elt` is the whole loading treatment on purpose: these round-trips are
            local and land well inside the 1s band, where a spinner reads as a glitch. The
-           control still answers the click and a second press cannot send the action twice. #}
-        <button class="btn {{ variant }}" type="submit" data-key="{{ key }}" hx-disabled-elt="this">
-          {{ label }} <kbd>{{ key }}</kbd>
+           control still answers the click and a second press cannot send the action twice.
+
+           Reopen gives its key up while an undo banner is up, and the banner takes it. That
+           keeps ONE control per key, which is the invariant
+           `test_no_two_controls_answer_to_the_same_key` exists for, and it puts `u` on the
+           package the reviewer just acted on rather than on the one the board advanced to.
+           The card's button is still there and still clickable; it just is not what `u`
+           means for those few seconds. #}
+        {% set yields_key = board.undo and action == "reopen" %}
+        <button class="btn {{ variant }}" type="submit"
+                {% if not yields_key %}data-key="{{ key }}"{% endif %} hx-disabled-elt="this">
+          {{ label }}{% if not yields_key %} <kbd>{{ key }}</kbd>{% endif %}
         </button>
       </form>
     {% endfor %}
@@ -78,6 +104,10 @@
       <input class="input" type="text" name="reason" id="triage-reject-reason"
              data-key="{{ reject_key }}" data-focus="true"
              {% if board.focus == "reason" %}data-swap-focus{% endif %}
+             {# The message is up in the decide column, so the field carries the pointer to
+                it: focus alone puts a reader IN the field with no statement of the problem,
+                and a reader who tabs back later never had one. #}
+             {% if board.error and board.focus == "reason" %}aria-invalid="true" aria-describedby="triage-error"{% endif %}
              placeholder="why it's wrong (required)"
              aria-label="reason for rejecting">
       <button class="btn btn-danger" type="submit" hx-disabled-elt="this">reject <kbd>{{ reject_key }}</kbd></button>
@@ -94,15 +124,22 @@
       <div class="field">
         <label class="field-label" for="edit-description">description</label>
         <textarea class="input" id="edit-description" name="description"
-                  {% if board.focus == "edit" %}data-swap-focus{% endif %}>{{ c.description or "" }}</textarea>
-        <span class="field-hint">empty leaves it alone. this ships to uad_lists.json.</span>
+                  {% if board.focus == "edit" %}data-swap-focus{% endif %}
+                  {% if board.error and board.focus == "edit" %}aria-invalid="true" aria-describedby="triage-error"{% endif %}
+                  >{% if board.submitted %}{{ board.submitted["description"] }}{% else %}{{ c.description or "" }}{% endif %}</textarea>
+        <span class="field-hint">empty leaves it alone. the word <code>unknown</code> declares it undescribable, same as the box below.</span>
       </div>
       {# The control the description rule's own message asks for. Refusing a short description
          and then offering no way to declare it unknown left the reviewer with a rule they
          could read and not obey. #}
       <label class="checkbox-label" for="edit-unknown">
+        {# Unticked while a draft is on screen. The refusal fires when the box and the text
+           disagree, and the row it fires on is usually one the model declared unknown — so
+           re-rendering the box ticked over their sentence would refuse the same submission
+           again and read as the form fighting them. The text is the newer answer, so the
+           form comes back set to keep it. #}
         <input type="checkbox" id="edit-unknown" name="unknown_description" value="1"
-               {% if "description" in c.unknown_fields %}checked{% endif %}>
+               {% if board.submitted %}{% if board.submitted["unknown"] %}checked{% endif %}{% elif "description" in c.unknown_fields %}checked{% endif %}>
         can't describe it
       </label>
       <span class="field-hint" style="margin-top:calc(-1 * var(--space-2))">
@@ -113,7 +150,7 @@
           <label class="field-label" for="edit-list">list</label>
           <select class="input" id="edit-list" name="list">
             {% for option in ["", "Aosp", "Carrier", "Google", "Misc", "Oem"] %}
-              <option value="{{ option }}"{% if option == c.uad_list %} selected{% endif %}>{{ option or "unchanged" }}</option>
+              <option value="{{ option }}"{% if option == (board.submitted["list"] if board.submitted else c.uad_list) %} selected{% endif %}>{{ option or "unchanged" }}</option>
             {% endfor %}
           </select>
         </div>
@@ -121,7 +158,7 @@
           <label class="field-label" for="edit-removal">removal</label>
           <select class="input" id="edit-removal" name="removal">
             {% for option in ["", "Recommended", "Advanced", "Expert", "Unsafe"] %}
-              <option value="{{ option }}"{% if option == c.removal %} selected{% endif %}>{{ option or "unchanged" }}</option>
+              <option value="{{ option }}"{% if option == (board.submitted["removal"] if board.submitted else c.removal) %} selected{% endif %}>{{ option or "unchanged" }}</option>
             {% endfor %}
           </select>
           <span class="field-hint">never below the minimum. a lower answer is refused, not corrected.</span>
@@ -130,7 +167,7 @@
           <label class="field-label" for="edit-confidence">confidence</label>
           <select class="input" id="edit-confidence" name="confidence">
             {% for option in ["", "low", "medium", "high"] %}
-              <option value="{{ option }}"{% if option == c.confidence %} selected{% endif %}>{{ option or "unchanged" }}</option>
+              <option value="{{ option }}"{% if option == (board.submitted["confidence"] if board.submitted else c.confidence) %} selected{% endif %}>{{ option or "unchanged" }}</option>
             {% endfor %}
           </select>
         </div>
@@ -141,7 +178,7 @@
     </form>
   </details>
 
-  <div style="display:flex;gap:var(--space-4);flex-wrap:wrap">
+  <div>
     <details id="triage-help">
       <summary class="label" style="cursor:pointer">keys <kbd>?</kbd></summary>
       <div style="display:flex;gap:var(--space-4);flex-wrap:wrap;margin-top:var(--space-3);font-size:var(--text-sm);color:var(--text-dim)">
@@ -151,21 +188,6 @@
       </div>
     </details>
 
-    {# One legend for every badge on the screen, rather than a `title` per badge: a `title` on
-       a non-focusable `<span>` is a pointer affordance and this queue is burned by keyboard.
-       One `<summary>` is one tab stop for the whole set, where focusable badges would add
-       three per card and two per rail row. #}
-    <details id="triage-badge-help">
-      <summary class="label" style="cursor:pointer">what the badges mean</summary>
-      <dl style="margin-top:var(--space-3);font-size:var(--text-sm);color:var(--text-dim);display:grid;gap:var(--space-2)">
-        {% for badge, meaning in badge_meanings %}
-          <div style="display:flex;gap:var(--space-2);align-items:baseline">
-            <dt><span class="tag tag-default">{{ badge }}</span></dt>
-            <dd>{{ meaning }}</dd>
-          </div>
-        {% endfor %}
-      </dl>
-    </details>
   </div>
 </article>
 

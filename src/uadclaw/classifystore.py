@@ -236,6 +236,22 @@ async def _preserved(
                 superseded[field] = (f"{SUPERSEDED_BY} {owner} {value}", refusal)
                 continue
         keep[column] = value
+    if "description" in keep:
+        # The declaration travels with the value it describes, because it IS half of that
+        # value: `unknown_fields` is not a field a human owns on its own, so it is not in
+        # `HUMAN_OWNED_CANDIDATES` and a re-run wrote the model's fresh list over it. That
+        # left a row whose description read `unknown` with nothing declaring it — the exact
+        # contradiction `store_human_edit` refuses to write, arriving by the back door, and
+        # `description` is what ships into `uad_lists.json`. Derived from the kept value
+        # rather than copied from the old row, so it is right in both directions: a human who
+        # wrote real words over a model's `unknown` takes that declaration OFF.
+        others = [
+            field
+            for field in (existing.unknown_fields or [])
+            if isinstance(field, str) and field != "description"
+        ]
+        declared = ["description"] if keep["description"] == UNKNOWN else []
+        keep["unknown_fields"] = sorted(others + declared)
     if keep:
         # Only the human-owned entries survive in the map; the rest is rewritten by the
         # caller's fresh provenance, or a stale model id would outlive the model. A superseded

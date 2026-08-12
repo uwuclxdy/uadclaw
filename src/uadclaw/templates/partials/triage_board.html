@@ -34,6 +34,10 @@
              href="/triage?view={{ board.view }}&package={{ row.package | urlencode }}"
              hx-get="/triage?view={{ board.view }}&package={{ row.package | urlencode }}"
              hx-target="#triage-board" hx-swap="outerHTML"
+             {# The row ellipsises a long name, and a corpus of shared prefixes truncates two
+                packages to the same string. The chip's letters come off the LAST segment, which
+                is what actually disambiguates them; this is the pointer's copy of that. #}
+             title="{{ row.package }}"
              style="display:flex;gap:var(--space-2);align-items:center;padding:var(--space-2) var(--space-3)">
             {# The name is rendered as text on the next line, so the icon is decorative. #}
             {{ pkg_icon(row.package, row.has_icon, small=true) }}
@@ -65,7 +69,7 @@
   <div class="triage-decide" tabindex="-1"{% if board.focus == "decide" %} data-swap-focus{% endif %}>
     {% if board.error %}
       {# Inline, beside the control that produced it, and it persists until it is fixed. #}
-      <div class="callout callout-danger" role="alert" style="margin-bottom:var(--space-4)">
+      <div class="callout callout-danger" role="alert" id="triage-error" style="margin-bottom:var(--space-4)">
         <div class="callout-body">{{ board.error }}</div>
       </div>
     {% endif %}
@@ -75,12 +79,20 @@
         <div class="callout-body" style="display:flex;gap:var(--space-4);align-items:center;justify-content:space-between;width:100%">
           <span>{{ board.notice }}</span>
           {% if board.undo %}
+            {# This button owns the reopen key while it is on screen, and the card's own
+               reopen button gives it up for exactly that long. `u` with an undo banner up
+               means "undo what I just did" — it used to reach the card's button instead,
+               which by then belonged to the NEXT package, so one keystroke wrote a decision
+               against a package nobody had read and spent the undo doing it. The key comes
+               from the same table the buttons come from; spelling the letter here is how
+               `reopen` claimed `r` the first time. #}
             <form method="post" action="/triage/decide"
                   hx-post="/triage/decide" hx-target="#triage-board" hx-swap="outerHTML" style="margin:0">
               <input type="hidden" name="package" value="{{ board.undo }}">
               <input type="hidden" name="action" value="reopen">
               <input type="hidden" name="view" value="{{ board.view }}">
-              <button class="btn btn-ghost btn-sm" type="submit" hx-disabled-elt="this">undo</button>
+              <button class="btn btn-ghost btn-sm" type="submit" data-key="{{ undo_key }}"
+                      hx-disabled-elt="this">undo <kbd>{{ undo_key }}</kbd></button>
             </form>
           {% endif %}
         </div>
@@ -114,8 +126,17 @@
         <p style="font-size:var(--text-sm);color:var(--text-dim);margin:var(--space-3) 0 var(--space-4)">
           {% for name in views %}{{ board.counts[name] }} {{ view_labels[name] }}{% if not loop.last %}, {% endif %}{% endfor %}.
         </p>
-        <a class="btn btn-secondary" href="/triage?view=queue"
-           hx-get="/triage?view=queue" hx-target="#triage-board" hx-swap="outerHTML">back to the queue</a>
+        {# The action that RESOLVES the state, not the one that re-renders it. `back to the
+           queue` inside the queue view pointed at the screen the reviewer was already on,
+           which is the empty state's one job undone. #}
+        {% set has_work = [] %}
+        {% for name in views %}{% if name != board.view and board.counts[name] %}{% set _ = has_work.append(name) %}{% endif %}{% endfor %}
+        {% if has_work %}
+          <a class="btn btn-secondary" href="/triage?view={{ has_work[0] }}"
+             hx-get="/triage?view={{ has_work[0] }}" hx-target="#triage-board" hx-swap="outerHTML">go to {{ view_labels[has_work[0]] }}</a>
+        {% else %}
+          <a class="btn btn-primary" href="/jobs">go to jobs</a>
+        {% endif %}
       </div>
     {% elif board.candidate %}
       {% include "partials/triage_card.html" %}

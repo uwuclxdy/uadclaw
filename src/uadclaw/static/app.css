@@ -6,6 +6,18 @@
    not define lives here instead, loaded after it, and stays small enough to re-read.
    ============================================================ */
 
+/* `.table-wrap` exists to clip a border radius and does it with `overflow: hidden`, while
+   `thead th` is `white-space: nowrap` — so at a phone width the table runs past its wrapper
+   and the overflow is UNREACHABLE: no scrollbar, no drag. Measured at 380px: the floor-reasons
+   table is 398px inside a 370px screen, and the column that falls off the end is `why`, the
+   stated justification for the minimum rating. `overflow-x: auto` pairs with a hidden y and
+   keeps the radius clipped on the axis that needed it. Pre-existing and shell-wide; `app.css`
+   is the only file that can fix it, since `ui.css` stays a verbatim extraction. */
+.table-wrap {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 /* cloudy-ui ships no bare `a` rule, because it expects links to be components. A dashboard
    renders links it did not author: corroboration sources, vendor index urls, upstream
    entries. Left alone those render at the user agent's default dark blue on a dark surface,
@@ -221,6 +233,21 @@ a:focus-visible {
   color: var(--monogram-tint, var(--accent));
   background: color-mix(in srgb, var(--monogram-tint, var(--accent)) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--monogram-tint, var(--accent)) 28%, transparent);
+}
+
+/* Light theme takes the letters off the tint and puts them on the text colour, keeping the
+   hue in the fill. MEASURED, because the reasoning that put them on the tint was wrong: the
+   14%/28% mix is cloudy-ui's own tag formula and the `--cat-*` tokens do swap to saturated
+   values on light, but the language never uses that ramp as TEXT at this size, and where its
+   own tags failed on light it patched the foreground by hand (`ui.css`, `[data-theme="light"]
+   .tag-warning`). Composited over the real surface the tinted letters ran 2.08:1 (`--cat-pink`
+   at 12px) to 3.93:1, against a 4.5:1 floor. The fill goes to 22% so the hue survives the
+   swap; `test_every_monogram_tint_clears_the_contrast_floor_in_light_theme` recomputes both
+   numbers from these files. */
+:root[data-theme="light"] .monogram,
+:root[data-theme="light"] .monogram-sm {
+  color: var(--text);
+  background: color-mix(in srgb, var(--monogram-tint, var(--accent)) 22%, transparent);
 }
 
 .pkg-icon,

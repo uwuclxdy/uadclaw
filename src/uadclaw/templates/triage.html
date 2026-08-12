@@ -10,6 +10,13 @@
     </p>
   </header>
 
+  {# Outside `#triage-board` on purpose: the swap that failed is the swap that would have
+     rendered anything inside it. Empty until the script fills it, never on a timer — it is
+     telling the reviewer a verdict did not land, which is the one message that may not
+     disappear on its own. #}
+  <div id="triage-transport-error" role="alert" hidden
+       style="margin-bottom:var(--space-4)"></div>
+
   {% include "partials/triage_board.html" %}
 </section>
 {% endblock %}
@@ -28,7 +35,12 @@
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     var target = event.target;
     if (target && (TYPING.test(target.tagName) || target.isContentEditable)) {
-      if (event.key === 'Escape') target.blur();
+      // Escape leaves the field, but a bare blur() drops focus on <body> — the same hole
+      // `data-swap-focus` exists to close, reached by the ordinary way out of the reason box.
+      if (event.key === 'Escape') {
+        var column = target.closest('.triage-decide');
+        if (column) { column.focus(); } else { target.blur(); }
+      }
       return;
     }
     var key = event.key.toLowerCase();
@@ -64,7 +76,33 @@
   // to <body>, so the next Tab restarts at the top of the document and a refusal the reviewer
   // has to answer is somewhere behind them. The SERVER says where focus belongs, because it
   // is what knows why this render happened; this only moves it.
+  // htmx swaps neither a 5xx nor a transport failure, and every `_render` call in the view
+  // sits OUTSIDE its try blocks — so a template that raises, a store error class nobody has
+  // met yet, or a server restart mid-session all reach the reviewer as a key that quietly
+  // stopped working. Measured: two `d` presses against a 500 changed nothing on screen and
+  // both verdicts were gone.
+  function transportFailed(event) {
+    var box = document.getElementById('triage-transport-error');
+    if (!box) return;
+    var status = (event.detail && event.detail.xhr && event.detail.xhr.status) || 0;
+    box.className = 'callout callout-danger';
+    box.innerHTML = '<div class="callout-body"></div>';
+    // Unhidden BEFORE the text goes in. A live region announces the MUTATION, and a mutation
+    // made inside a `display:none` subtree is one the accessibility tree never saw — the box
+    // would render for a sighted reviewer and say nothing to anyone else, which is the exact
+    // half-fix this whole handler exists to avoid.
+    box.hidden = false;
+    box.firstChild.textContent = status
+      ? 'nothing was recorded (the server answered ' + status + '). reload the page and try again.'
+      : 'nothing was recorded: the server did not answer. reload the page and try again.';
+  }
+  document.body.addEventListener('htmx:responseError', transportFailed);
+  document.body.addEventListener('htmx:sendError', transportFailed);
+
   document.body.addEventListener('htmx:afterSwap', function () {
+    // A swap that lands is the only evidence the previous failure is over.
+    var failed = document.getElementById('triage-transport-error');
+    if (failed) { failed.hidden = true; failed.className = ''; failed.textContent = ''; }
     var target = document.querySelector('[data-swap-focus]');
     if (target) target.focus();
     // The rail scrolls in its own box, so an advance can select a row that is not on screen.

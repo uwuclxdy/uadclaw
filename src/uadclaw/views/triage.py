@@ -30,7 +30,7 @@ from fastapi import APIRouter, Form, Request, Response, status
 from fastapi.responses import RedirectResponse
 
 from uadclaw import triagestore, web
-from uadclaw.classify import UNKNOWN
+from uadclaw.classify import DESCRIPTION_MIN_CHARS, UNKNOWN, ClassificationRejected
 from uadclaw.classifystore import BelowFloorError
 from uadclaw.db import get_session_factory
 from uadclaw.settings import get_settings
@@ -56,6 +56,10 @@ ACTION_BUTTONS: tuple[tuple[str, str, str, str], ...] = (
 # edit form rather than submitting anything.
 REJECT_KEY = "r"
 EDIT_KEY = "e"
+# The undo banner borrows the reopen key rather than inventing one: undoing a verdict IS a
+# reopen, and a second letter for the same action is a second thing to learn. Read off
+# `ACTION_BUTTONS` so the two can never disagree about which letter that is.
+UNDO_KEY = next(key for action, key, _, _ in ACTION_BUTTONS if action == "reopen")
 
 KEYBINDS: tuple[tuple[str, str], ...] = (
     *((key, action) for action, key, _, _ in ACTION_BUTTONS),
@@ -126,6 +130,19 @@ BADGE_MEANINGS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _submitted(
+    description: str, list_: str, removal: str, confidence: str, unknown: str
+) -> dict[str, str]:
+    """One edit submission, as the form sent it, for a refusal to render back."""
+    return {
+        "description": description,
+        "list": list_,
+        "removal": removal,
+        "confidence": confidence,
+        "unknown": unknown,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class Board:
     """Everything one render of the screen needs. Built here so the template branches on
@@ -148,6 +165,12 @@ class Board:
     # reviewer has to answer is somewhere behind them. One of `decide` (the column holding
     # the callouts and the card), `reason`, `edit`.
     focus: str = "decide"
+    # The whole submission a refusal is sending back, or None on any render that is not one.
+    # Every field, not just the description: the expensive case is three careful sentences
+    # typed ALONGSIDE a below-floor rating, where the floor refuses and the sentences die with
+    # it. The card re-read its values from the store, so a refused edit came back holding the
+    # stored answer — worse than an empty box, because it looks legitimately filled in.
+    submitted: dict[str, str] | None = None
 
 
 def _valid_view(view: str) -> tuple[str, str | None]:
@@ -196,6 +219,7 @@ async def _board(
     undo: str | None = None,
     edit_open: bool = False,
     focus: str = "decide",
+    submitted: dict[str, str] | None = None,
 ) -> Board:
     settings = get_settings()
     session_factory = get_session_factory()
@@ -234,6 +258,7 @@ async def _board(
             error=f"the queue could not be read. {web.DB_UNREACHABLE_MESSAGE}",
             upstream_error=upstream_error,
             focus=focus,
+            submitted=submitted,
         )
 
     if rows:
@@ -254,6 +279,7 @@ async def _board(
         upstream_error=upstream_error,
         edit_open=edit_open,
         focus=focus,
+        submitted=submitted,
     )
 
 
@@ -265,6 +291,7 @@ def _context(board: Board) -> dict[str, Any]:
         "action_buttons": ACTION_BUTTONS,
         "reject_key": REJECT_KEY,
         "edit_key": EDIT_KEY,
+        "undo_key": UNDO_KEY,
         "views": VIEWS,
         "view_labels": VIEW_LABELS,
         "badge_meanings": BADGE_MEANINGS,
@@ -410,11 +437,36 @@ async def edit(
     message is shared with the model path deliberately, so it tells a reviewer to declare the
     field in `unknown_fields`, and until this box existed the screen offered no way to do it:
     the only answers were a description long enough to pass a floor the reviewer could not
-    honestly reach, or nothing. The box wins over the text area, because a reviewer who ticks
-    it has said the box above is not an answer.
+    honestly reach, or nothing.
+
+    The box and the text box DISAGREEING is refused rather than resolved, and that is a
+    correctness decision rather than a strictness one. The card renders the box pre-ticked on
+    exactly the rows a reviewer opens in order to replace the model's `unknown` with real
+    words, so "the box wins" silently discarded the sentence they had just typed and answered
+    `nothing changed` — true of the row and false about what they did. A form-level conflict
+    is not a second spelling of the description rule: it says nothing about what a description
+    may be, only that these two controls were handed opposite answers.
     """
     at = datetime.now(UTC)
-    if unknown_description is not None:
+    view, view_error = _valid_view(view)
+    declared = unknown_description is not None
+    if declared and description.strip() and description.strip() != UNKNOWN:
+        return _render(
+            request,
+            await _board(
+                view=view,
+                package=package,
+                error=view_error
+                or "pick one: the box says you can't describe it, the text says otherwise.",
+                edit_open=True,
+                focus="edit",
+                # The tick is dropped on the way back while the text is kept: the row this
+                # fires on is usually one the model declared unknown, so re-rendering the box
+                # ticked over their sentence would refuse the same submission again.
+                submitted=_submitted(description, list_, removal, confidence, ""),
+            ),
+        )
+    if declared:
         description = UNKNOWN
     edits = {
         field: value.strip()
@@ -426,20 +478,36 @@ async def edit(
         )
         if value.strip()
     }
-    view, view_error = _valid_view(view)
     session_factory = get_session_factory()
     try:
         async with session_factory() as session, session.begin():
             changed = await triagestore.apply_edit(session, package=package, edits=edits, at=at)
     except (TriageError, BelowFloorError, ValueError) as exc:
+        # A description refusal is re-worded for the screen, the way `ReasonRequired` already
+        # is. `classify`'s wording is shared with the model path on purpose and it names
+        # `unknown_fields` — a field this form does not have and never will, with the control
+        # that performs it sitting right below the box, unlabelled as such. It also carries the
+        # measurement and the sentinel, which belong in a log. Only the message is rewritten;
+        # the rule stays where both writers meet it.
+        rejected = exc if isinstance(exc, ClassificationRejected) else exc.__cause__
+        described = isinstance(rejected, ClassificationRejected) and rejected.field == "description"
         return _render(
             request,
             await _board(
                 view=view,
                 package=package,
-                error=view_error or str(exc),
+                error=view_error
+                or (
+                    f"a description needs {DESCRIPTION_MIN_CHARS} characters. write one, or "
+                    'tick "can\'t describe it".'
+                    if described
+                    else str(exc)
+                ),
                 edit_open=True,
                 focus="edit",
+                submitted=_submitted(
+                    description, list_, removal, confidence, "1" if declared else ""
+                ),
             ),
         )
     except web.DB_UNREACHABLE:
@@ -455,6 +523,9 @@ async def edit(
                 error=view_error or f"the edit was not saved. {web.DB_UNREACHABLE_MESSAGE}",
                 edit_open=True,
                 focus="edit",
+                submitted=_submitted(
+                    description, list_, removal, confidence, "1" if declared else ""
+                ),
             ),
         )
 
