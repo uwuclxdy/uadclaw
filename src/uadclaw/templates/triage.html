@@ -2,10 +2,63 @@
 {% block title %}triage · uadclaw{% endblock %}
 {% block content %}
 <section>
-  <header style="margin-bottom:var(--space-8);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
-    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">uadclaw</div>
+  <header style="margin-bottom:var(--space-6);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
+    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">human gate</div>
     <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em">triage</h2>
+    <p style="font-size:var(--text-sm);color:var(--text-dim);margin-top:var(--space-2)">
+      ranked by how many devices shipped the package. every entry needs a human before it can reach a pull request.
+    </p>
   </header>
-  <div class="callout callout-info">not built yet.</div>
+
+  {% include "partials/triage_board.html" %}
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Keybinds click the buttons the screen already renders, so the keyboard, the mouse and a
+// browser with no JavaScript at all take one path. Nothing here calls an endpoint.
+(function () {
+  if (window.__uadclawTriageKeys) return;   // hx-boost swaps the body; bind once per document
+  window.__uadclawTriageKeys = true;
+
+  var TYPING = /^(input|textarea|select)$/i;
+
+  document.addEventListener('keydown', function (event) {
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    var target = event.target;
+    if (target && (TYPING.test(target.tagName) || target.isContentEditable)) {
+      if (event.key === 'Escape') target.blur();
+      return;
+    }
+    var key = event.key.toLowerCase();
+    if (key === '?') {
+      var help = document.getElementById('triage-help');
+      if (help) { help.open = !help.open; event.preventDefault(); }
+      return;
+    }
+    if (key === 'j' || key === 'k') {
+      var rows = Array.prototype.slice.call(document.querySelectorAll('[data-queue-row]'));
+      if (!rows.length) return;
+      var at = rows.findIndex(function (row) { return row.dataset.selected === 'true'; });
+      var next = rows[Math.min(Math.max(at + (key === 'j' ? 1 : -1), 0), rows.length - 1)];
+      if (next) { next.click(); event.preventDefault(); }
+      return;
+    }
+    // Looked up by reading each control's own key rather than by interpolating one into a
+    // selector: the interpolated form leaves a key-attribute literal in this file, which reads
+    // exactly like a control to anything scanning the page for the set of bound keys.
+    var control = null;
+    document.querySelectorAll('[data-key]').forEach(function (element) {
+      if (!control && element.dataset.key === key) control = element;
+    });
+    if (!control) return;
+    event.preventDefault();
+    // `r` opens the reason field rather than submitting: a rejection with no reason is
+    // refused, and a keybind that fires a refusal is a keybind that teaches nothing.
+    if (control.dataset.focus === 'true') { control.focus(); control.select(); return; }
+    control.click();
+  });
+})();
+</script>
 {% endblock %}

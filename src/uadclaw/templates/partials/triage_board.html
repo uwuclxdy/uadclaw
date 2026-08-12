@@ -1,0 +1,105 @@
+{# The whole screen below the page header, swapped as one unit.
+
+   One target rather than two: the queue and the card disagree the moment a decision lands
+   (the package leaves one and the other has to move on), so swapping them separately shows a
+   queue that no longer matches the card in front of the reviewer. #}
+<div id="triage-board" style="display:grid;grid-template-columns:minmax(240px,300px) 1fr;gap:var(--space-6);align-items:start">
+
+  <aside>
+    <div class="tabs-boxed-wrap" style="margin-bottom:var(--space-4);flex-wrap:wrap">
+      {% for name in views %}
+        <a class="tab-box{% if name == board.view %} active{% endif %}"
+           href="/triage?view={{ name }}"
+           hx-get="/triage?view={{ name }}" hx-target="#triage-board" hx-swap="outerHTML"
+           style="text-decoration:none">{{ name }} {{ board.counts[name] }}</a>
+      {% endfor %}
+    </div>
+
+    {% if board.rows %}
+      <nav class="nav-group" style="margin:0">
+        {% for row in board.rows %}
+          <a class="nav-item{% if board.candidate and row.package == board.candidate.package %} active{% endif %}"
+             data-queue-row
+             data-selected="{{ 'true' if board.candidate and row.package == board.candidate.package else 'false' }}"
+             href="/triage?view={{ board.view }}&package={{ row.package }}"
+             hx-get="/triage?view={{ board.view }}&package={{ row.package }}"
+             hx-target="#triage-board" hx-swap="outerHTML"
+             style="display:block;padding:var(--space-2) var(--space-3)">
+            <div style="display:flex;justify-content:space-between;gap:var(--space-2);align-items:baseline">
+              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ row.package }}</span>
+              <span class="tag tag-data">{{ row.device_count }}</span>
+            </div>
+            <div style="display:flex;gap:var(--space-1);flex-wrap:wrap;margin-top:var(--space-1)">
+              {% if row.removal %}<span class="tag tag-default">{{ row.removal|lower }}</span>{% endif %}
+              {% if row.corroboration == "corroborated" %}<span class="tag tag-success">corroborated</span>{% endif %}
+              {% if row.unknown %}<span class="tag tag-warning">unknown</span>{% endif %}
+              {% if row.has_conflict %}<span class="tag tag-info">conflict</span>{% endif %}
+              {% if row.parked %}<span class="tag tag-danger">parked</span>{% endif %}
+            </div>
+          </a>
+        {% endfor %}
+      </nav>
+    {% endif %}
+  </aside>
+
+  <div>
+    {% if board.error %}
+      {# Inline, beside the control that produced it, and it persists until it is fixed. #}
+      <div class="callout callout-danger" role="alert" style="margin-bottom:var(--space-4)">
+        <div class="callout-body">{{ board.error }}</div>
+      </div>
+    {% endif %}
+
+    {% if board.notice %}
+      <div class="callout callout-success" role="status" style="margin-bottom:var(--space-4)">
+        <div class="callout-body" style="display:flex;gap:var(--space-4);align-items:center;justify-content:space-between;width:100%">
+          <span>{{ board.notice }}</span>
+          {% if board.undo %}
+            <form method="post" action="/triage/decide"
+                  hx-post="/triage/decide" hx-target="#triage-board" hx-swap="outerHTML" style="margin:0">
+              <input type="hidden" name="package" value="{{ board.undo }}">
+              <input type="hidden" name="action" value="reopen">
+              <input type="hidden" name="view" value="{{ board.view }}">
+              <button class="btn btn-ghost btn-sm" type="submit" hx-disabled-elt="this">undo</button>
+            </form>
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+
+    {% if board.state == "error" %}
+      {# Its own retry, inside its own bounds: the nav, the header and the filters above are
+         all still working, and a full-page failure would have thrown them away too. #}
+      <div class="card">
+        <div class="card-title">the queue is unreadable right now</div>
+        <p style="font-size:var(--text-sm);color:var(--text-dim);margin:var(--space-3) 0 var(--space-4)">
+          nothing was decided and nothing was lost. try again once the database answers.
+        </p>
+        <button class="btn btn-secondary" type="button"
+                hx-get="/triage?view={{ board.view }}" hx-target="#triage-board" hx-swap="outerHTML"
+                hx-disabled-elt="this">try again</button>
+      </div>
+    {% elif board.state == "empty" %}
+      {# Reachable only from a settled read: the counts above are the same query. #}
+      <div class="card">
+        <div class="card-title">nothing to triage yet</div>
+        <p style="font-size:var(--text-sm);color:var(--text-dim);margin:var(--space-3) 0 var(--space-4)">
+          no package has been classified. run a firmware job to build the corpus, then a classification job to propose entries for it.
+        </p>
+        <a class="btn btn-primary" href="/jobs">go to jobs</a>
+      </div>
+    {% elif board.state == "cleared" %}
+      <div class="card">
+        <div class="card-title">{{ board.view }} is clear</div>
+        <p style="font-size:var(--text-sm);color:var(--text-dim);margin:var(--space-3) 0 var(--space-4)">
+          nothing left in this list.
+          {{ board.counts["queue"] }} queued, {{ board.counts["deferred"] }} deferred, {{ board.counts["decided"] }} decided, {{ board.counts["parked"] }} parked.
+        </p>
+        <a class="btn btn-secondary" href="/triage?view=queue"
+           hx-get="/triage?view=queue" hx-target="#triage-board" hx-swap="outerHTML">back to the queue</a>
+      </div>
+    {% elif board.candidate %}
+      {% include "partials/triage_card.html" %}
+    {% endif %}
+  </div>
+</div>
