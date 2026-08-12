@@ -1157,3 +1157,10 @@ async def test_writing_a_real_description_takes_the_unknown_declaration_back_off
     assert row is not None
     assert row.unknown_fields == []
     assert row.description.startswith("Notes application")
+
+
+def test_every_list_the_screen_offers_has_a_display_label():
+    """The rail renders `view_labels[name]` for every name in `VIEWS`, under `StrictUndefined`.
+    A view added to one table and not the other is not a missing label, it is a 500 on the
+    whole screen."""
+    assert set(triage_view.VIEW_LABELS) == set(triagestore.VIEWS)
