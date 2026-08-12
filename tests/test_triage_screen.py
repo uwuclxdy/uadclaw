@@ -205,16 +205,34 @@ async def test_the_card_shows_the_evidence_and_the_nearest_upstream_entry(
     assert "com.example.sibling" in body
 
 
-async def test_no_two_controls_answer_to_the_same_key(db_env, triage_env, triage_db, client):
+async def board_with(client, session_factory, *, undo: bool) -> str:
+    """One render of the board, with or without an undo banner on it.
+
+    The two are different documents and the key table differs between them, which is the
+    whole reason the banner state needs its own leg: `u` moves from the card to the banner
+    and back, so an invariant checked on one render says nothing about the other.
+    """
+    await seed(session_factory, {"com.example.one": 1, "com.example.two": 2})
+    if undo:
+        return await act(client, package="com.example.two", action="approve", view="queue")
+    return await screen(client)
+
+
+@pytest.mark.parametrize("undo", [False, True], ids=["plain", "with-undo"])
+async def test_no_two_controls_answer_to_the_same_key(db_env, triage_env, triage_db, client, undo):
     """Found in a browser, not here: the buttons used to take their key from the action's
     first letter, so `reopen` claimed `r`, the script binds whichever control comes first in
     the document, and pressing `r` to write a rejection reopened the package instead. Two
     controls sharing a key is silent — the wrong one just answers.
+
+    Run over BOTH renders. It only ever ran on the plain one, so the undo banner — the one
+    state where a key deliberately changes owner — was the state nothing checked, and a
+    control added there would have collided undetected. Measured: the mutation that stops the
+    card yielding `u` was invisible to this test until it grew the second leg.
     """
     await login(client)
-    await seed(triage_db, {"com.example.one": 1})
 
-    body = await screen(client)
+    body = await board_with(client, triage_db, undo=undo)
 
     keys = re.findall(r'data-key="([^"]+)"', body)
     assert keys, "no control declares a key at all"
@@ -222,15 +240,19 @@ async def test_no_two_controls_answer_to_the_same_key(db_env, triage_env, triage
     assert set(keys) <= {key for key, _ in triage_view.KEYBINDS}
 
 
+@pytest.mark.parametrize("undo", [False, True], ids=["plain", "with-undo"])
 async def test_every_advertised_keybind_has_a_control_or_moves_the_queue(
-    db_env, triage_env, triage_db, client
+    db_env, triage_env, triage_db, client, undo
 ):
     """The other half. A key in the help list with nothing bound to it is a key that does
-    nothing, and the help is the only place a reviewer learns them from."""
-    await login(client)
-    await seed(triage_db, {"com.example.one": 1})
+    nothing, and the help is the only place a reviewer learns them from.
 
-    body = await screen(client)
+    Both renders again, and this is the leg that catches the opposite mistake to the one
+    above: a key that changes owner has to keep ONE owner, never zero.
+    """
+    await login(client)
+
+    body = await board_with(client, triage_db, undo=undo)
 
     bound = set(re.findall(r'data-key="([^"]+)"', body))
     navigation = {"j", "k"}

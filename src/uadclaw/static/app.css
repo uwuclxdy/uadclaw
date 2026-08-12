@@ -240,10 +240,12 @@ a:focus-visible {
    14%/28% mix is cloudy-ui's own tag formula and the `--cat-*` tokens do swap to saturated
    values on light, but the language never uses that ramp as TEXT at this size, and where its
    own tags failed on light it patched the foreground by hand (`ui.css`, `[data-theme="light"]
-   .tag-warning`). Composited over the real surface the tinted letters ran 2.08:1 (`--cat-pink`
-   at 12px) to 3.93:1, against a 4.5:1 floor. The fill goes to 22% so the hue survives the
-   swap; `test_every_monogram_tint_clears_the_contrast_floor_in_light_theme` recomputes both
-   numbers from these files. */
+   .tag-warning`). Composited over the real surfaces the tinted letters ran 1.95:1 (`--cat-pink`
+   on `--bg-sunken`) to 4.39:1, so the whole ramp missed the 4.5:1 floor rather than the low
+   end of it. Ink on `--text` with the fill at 22% puts the worst case at 9.90:1 and keeps the
+   hue through the swap. Every number here is recomputed by
+   `test_every_monogram_tint_clears_the_contrast_floor`, which reads the tokens and the fill
+   out of the two stylesheets — trust it over this comment. */
 :root[data-theme="light"] .monogram,
 :root[data-theme="light"] .monogram-sm {
   color: var(--text);
