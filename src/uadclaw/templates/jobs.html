@@ -65,10 +65,13 @@
     {% if drivers %}
       {# Reference material a returning operator does not need every visit: collapsed by
          default, the trigger stays visible (progressive disclosure per ux-patterns §8.3),
-         and the terms are still there for the first time a driver is picked below. #}
-      <details>
+         and the terms are still there for the first time a driver is picked below. An
+         unacknowledged or reverse-engineered driver is RISK state rather than reference
+         detail, so it is named in the trigger and the panel opens on its own rather than
+         waiting for a click nobody knows to make. #}
+      <details{% if terms_need_attention %} open{% endif %}>
         <summary style="cursor:pointer;color:var(--accent);font-size:var(--text-sm)">
-          show terms for {{ drivers | length }} driver{{ "" if drivers | length == 1 else "s" }}
+          show terms for {{ drivers | length }} driver{{ "" if drivers | length == 1 else "s" }}{% if unacknowledged_driver_count %} · {{ unacknowledged_driver_count }} not acknowledged{% endif %}
         </summary>
         <div class="table-wrap" style="overflow-x:auto;margin-top:var(--space-3)">
           <table>

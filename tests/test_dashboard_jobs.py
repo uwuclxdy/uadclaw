@@ -198,6 +198,44 @@ async def test_each_driver_shows_the_terms_posture_it_declares(
     assert "not acknowledged" in resp.text
 
 
+async def test_the_firmware_sources_table_collapses_when_nothing_needs_attention(
+    db_env, db_session_factory, client, monkeypatch
+):
+    """The terms table is reference material collapsed behind `<details>` so a returning
+    operator does not scroll past it every visit. A request/response test cannot observe an
+    interactive open/close, but the rendered markup is production-visible and pinnable:
+    `<details>` with no `open` attribute, and a trigger naming the driver count with no
+    attention flag, when every driver is public and acknowledged."""
+    install_drivers(monkeypatch, FakeDriver("pixel"))
+    await _login(client)
+
+    resp = await client.get("/jobs", headers={"accept": "text/html"})
+
+    assert "<details>" in resp.text
+    assert "<details open>" not in resp.text
+    assert "show terms for 1 driver" in resp.text
+    assert "not acknowledged" not in resp.text
+
+
+async def test_the_firmware_sources_table_opens_and_flags_unacknowledged_drivers(
+    db_env, db_session_factory, client, monkeypatch
+):
+    """An unacknowledged or reverse-engineered driver is risk state, not reference detail —
+    progressive disclosure is for reference detail only, so this has to be visible without a
+    click. The panel opens itself and the trigger names how many need a decision."""
+    install_drivers(
+        monkeypatch,
+        FakeDriver("pixel", acknowledged=True, risk=TermsRisk.PUBLIC),
+        FakeDriver("samsung", acknowledged=False, risk=TermsRisk.REVERSE_ENGINEERED),
+    )
+    await _login(client)
+
+    resp = await client.get("/jobs", headers={"accept": "text/html"})
+
+    assert "<details open>" in resp.text
+    assert "show terms for 2 drivers · 1 not acknowledged" in resp.text
+
+
 # --- loading a device list ----------------------------------------------------------------
 
 

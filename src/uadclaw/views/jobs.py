@@ -254,6 +254,13 @@ def _terms_rows(settings: Settings) -> tuple[dict[str, Any], ...]:
                 "summary": posture.summary,
                 "source_url": posture.source_url,
                 "acknowledged": posture.acknowledged,
+                # Whether this row is worth surfacing before the terms table is opened: an
+                # unacknowledged driver or a reverse-engineered one is risk state, not
+                # reference detail, and progressive disclosure is for reference detail only.
+                "needs_attention": (
+                    not posture.acknowledged
+                    or posture.risk is firmware.TermsRisk.REVERSE_ENGINEERED
+                ),
             }
         )
     return tuple(rows)
@@ -404,12 +411,19 @@ async def _screen_context(
         selected_driver = values["driver"]
     if devices is None and selected_driver:
         devices = cached_device_index(selected_driver)
+    drivers = _terms_rows(settings)
     context |= {
         "active_nav": "jobs",
         "filter_warning": filter_warning,
         "states": [str(state) for state in JobState],
         "kinds": [str(kind) for kind in JobKind],
-        "drivers": _terms_rows(settings),
+        "drivers": drivers,
+        # Drives the terms table's `<details>`: open by default and named in its own
+        # always-visible `<summary>` when a driver needs a decision, collapsed otherwise. A
+        # request/response test cannot observe an interactive open/close, but it can and does
+        # pin these two values landing in the rendered markup.
+        "unacknowledged_driver_count": sum(1 for d in drivers if not d["acknowledged"]),
+        "terms_need_attention": any(d["needs_attention"] for d in drivers),
         "selected_driver": selected_driver,
         "devices": devices,
         "device_error": device_error,
