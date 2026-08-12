@@ -10,6 +10,8 @@ place in the repo that fetches attacker-influenceable URLs: a URL that ranks for
 is chosen by whoever can rank for it.
 """
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -23,10 +25,12 @@ from uadclaw.brave import (
     BraveUnavailableError,
     PageFetcher,
     extract_text,
+    is_fetchable_url,
     merge_results,
     require_brave_key,
     source_links,
 )
+from uadclaw.corroborate import FETCH_ERROR_MAX_CHARS, SourceEvidence
 from uadclaw.settings import Settings
 
 TOKEN = "BSA-test-not-a-real-token-0000"
@@ -48,7 +52,7 @@ def envelope(*, web=None, discussions=None, mixed=None):
     return body
 
 
-def brave(responses):
+def brave(responses, **overrides):
     sent: list[httpx.Request] = []
     queue = list(responses)
 
@@ -59,13 +63,15 @@ def brave(responses):
             raise item
         return item
 
-    client = BraveClient(
-        api_key=TOKEN,
-        search_url=SEARCH_URL,
-        result_count=10,
-        request_timeout_seconds=5.0,
-        transport=httpx.MockTransport(handler),
-    )
+    kwargs = {
+        "api_key": TOKEN,
+        "search_url": SEARCH_URL,
+        "result_count": 10,
+        "request_timeout_seconds": 5.0,
+        "max_concurrency": 4,
+    }
+    kwargs.update(overrides)
+    client = BraveClient(transport=httpx.MockTransport(handler), **kwargs)
     return client, sent
 
 
@@ -307,7 +313,13 @@ def test_a_blank_token_is_refused_at_the_point_of_use_not_at_settings_load(monke
 
 def test_the_client_refuses_to_be_built_with_an_empty_token():
     with pytest.raises(BraveConfigError, match="require_brave_key"):
-        BraveClient(api_key="", search_url=SEARCH_URL, result_count=1, request_timeout_seconds=1.0)
+        BraveClient(
+            api_key="",
+            search_url=SEARCH_URL,
+            result_count=1,
+            request_timeout_seconds=1.0,
+            max_concurrency=1,
+        )
 
 
 # --- the page fetcher ---------------------------------------------------------------------
@@ -342,6 +354,7 @@ class CountingStream(httpx.AsyncByteStream):
 def fetcher(handler, **overrides):
     kwargs = {
         "request_timeout_seconds": 5.0,
+        "deadline_seconds": 20.0,
         "max_bytes": 64 * 1024,
         "max_text_chars": 4000,
         "max_concurrency": 4,
@@ -620,7 +633,252 @@ async def test_the_fetcher_never_exceeds_its_concurrency_bound():
     assert state["peak"] == 2, state["peak"]
 
 
+async def test_the_search_client_never_exceeds_its_concurrency_bound():
+    """`BraveClient` was the one client of the three with no bound at all, while the stage
+    creates one task per candidate against a ceiling of 500. Brave's measured policy is 50
+    req/s and `_QueryBudget.take()` decrements BEFORE the request, so every 429 an unbounded
+    fanout earns spends a query out of the job's ceiling for nothing."""
+    state = {"live": 0, "peak": 0}
+
+    async def handler(request):
+        state["live"] += 1
+        state["peak"] = max(state["peak"], state["live"])
+        await asyncio.sleep(0.01)
+        state["live"] -= 1
+        return httpx.Response(200, json=envelope(web=[result("https://a.test/1")]))
+
+    client, _ = brave([httpx.Response(200, json={})], max_concurrency=2)
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        await asyncio.gather(*(client.search(f"pkg{index}", limit=1) for index in range(10)))
+    # Exactly 2, not "at most 2": a client that serialised everything would satisfy an upper
+    # bound while proving nothing about the semaphore.
+    assert state["peak"] == 2, state["peak"]
+
+
+# --- the fetch boundary: nothing may escape into the caller -------------------------------------
+
+
+IDNA_HOSTILE_URLS = (
+    "http://ａｂｃ.com/",  # fullwidth latin
+    "http://──.com/",  # box-drawing characters
+    "https://xn--\xe9-0ga.com/",  # a punycode prefix with a non-ascii tail
+    "http://host\xa0name.com/",  # U+00A0 inside the host
+    "https://xn--a.com/",  # decodes to a codepoint idna refuses
+)
+
+
+@pytest.mark.parametrize("url", IDNA_HOSTILE_URLS)
+def test_a_host_httpx_will_refuse_is_refused_before_it_becomes_a_source(url):
+    """`urlsplit` accepts hostnames httpx's IDNA encoder will not, and the resulting
+    `httpx.InvalidURL` is NOT an `httpx.HTTPError` — so it walked past every handler in the
+    module. Refused here, one step before it can become a request."""
+    assert is_fetchable_url(url) is False
+    assert merge_results(envelope(web=[result(url)]), limit=10) == []
+
+
+@pytest.mark.parametrize("url", IDNA_HOSTILE_URLS)
+async def test_a_url_the_validator_rejects_costs_only_its_own_result(url):
+    """The belt half of the blocker, asserted on the SPECIFIC refusal.
+
+    Constructed by hand rather than through `merge_results`, because `merge_results` drops
+    these before they can become a source. The `refused before any request` text is what makes
+    this discriminating: with the validator switched off the url still costs only itself — the
+    containment below catches the `httpx.InvalidURL` — but the reason changes, and a test that
+    accepted either reason would pin neither half.
+    """
+    sources = [
+        source("https://good1.test/a"),
+        SourceEvidence(url=url, title="t", snippet="s", block="web", position=2),
+        source("https://good2.test/c"),
+    ]
+
+    async with fetcher(lambda request: html_response("<p>a real page body</p>")) as pages:
+        fetched = await pages.fetch_all(sources)
+
+    assert [item.url for item in fetched] == [item.url for item in sources], "order kept"
+    assert [bool(item.text) for item in fetched] == [True, False, True]
+    assert "refused before any request" in fetched[1].fetch_error
+
+
+async def test_an_unexpected_exception_type_from_the_transport_is_this_sources_own_failure():
+    """The control for the class: an exception nothing in this module names, raised where the
+    real one was raised, still becomes one source's `fetch_error` rather than the job's."""
+
+    def handler(request):
+        if "boom" in str(request.url):
+            raise RuntimeError("something nobody predicted")
+        return html_response("<p>a real page body</p>")
+
+    sources = [source("https://ok.test/a"), source("https://boom.test/b")]
+    async with fetcher(handler) as pages:
+        fetched = await pages.fetch_all(sources)
+    assert fetched[0].text
+    assert "RuntimeError" in fetched[1].fetch_error
+    assert "something nobody predicted" in fetched[1].fetch_error
+
+
+async def test_a_fetch_error_is_capped_rather_than_storing_whatever_the_server_sent():
+    """`fetch_error` is built from response data an attacker controls. h11 caps one header
+    near 16 KiB, so uncapped it is ~16 KiB x 10 sources x 500 packages of row growth per job."""
+
+    def handler(request):
+        return httpx.Response(200, headers={"content-type": "x/" + "z" * 8000}, content=b"hi")
+
+    async with fetcher(handler) as pages:
+        fetched = await pages.fetch(source("https://verbose.test/a"))
+    assert len(fetched.fetch_error) == FETCH_ERROR_MAX_CHARS
+
+
+# --- the SSRF gate ------------------------------------------------------------------------------
+
+
+BLOCKED_TARGETS = (
+    ("https://127.0.0.1/x", "loopback"),
+    ("https://[::1]/x", "loopback"),
+    ("https://[::ffff:127.0.0.1]/x", "loopback"),
+    ("http://169.254.169.254/latest/meta-data/", "link-local"),
+    ("http://10.0.0.5/x", "private"),
+    ("http://192.168.1.1/x", "private"),
+    ("http://172.16.0.1/x", "private"),
+    ("http://0.0.0.0/x", "unspecified"),
+)
+
+
+@pytest.mark.parametrize(("url", "label"), BLOCKED_TARGETS)
+async def test_an_internal_address_is_refused_before_any_connection_is_opened(url, label):
+    """A 302 to `http://127.0.0.1:55432` opened a real TCP connection to this box's Postgres,
+    and any internal service answering 200 `text/html` would have 4000 characters of its body
+    stored and handed to DeepSeek."""
+    reached = []
+
+    def handler(request):
+        reached.append(str(request.url))
+        return html_response("<p>an internal service</p>")
+
+    async with fetcher(handler) as pages:
+        fetched = await pages.fetch(
+            SourceEvidence(url=url, title="t", snippet="s", block="web", position=1)
+        )
+    assert reached == [], "no request was made at all"
+    assert label in fetched.fetch_error
+    assert fetched.text is None
+
+
+async def test_a_redirect_into_an_internal_address_is_refused_at_the_hop():
+    """The hop is where an attacker who can rank a page gets to choose the address. Starts on
+    `http` so the answer comes from the address gate rather than from the downgrade rule."""
+    reached = []
+
+    def handler(request):
+        reached.append(str(request.url))
+        if request.url.host == "public.test":
+            return httpx.Response(302, headers={"location": "http://127.0.0.1:55432/"})
+        return html_response("<p>postgres said hello</p>")
+
+    async with fetcher(handler) as pages:
+        fetched = await pages.fetch(source("http://public.test/a"))
+    assert reached == ["http://public.test/a"], "the hop was never taken"
+    assert "loopback" in fetched.fetch_error
+
+
+async def test_a_hostname_that_resolves_to_loopback_is_refused_too():
+    """An IP-literal-only check would be a half fix that reads as complete: an attacker who
+    can rank a page can also point a hostname at 127.0.0.1."""
+    reached = []
+
+    def handler(request):
+        reached.append(str(request.url))
+        return html_response("<p>an internal service</p>")
+
+    async with fetcher(handler) as pages:
+        fetched = await pages.fetch(source("https://localhost/x"))
+    assert reached == []
+    assert "resolves to" in fetched.fetch_error
+    assert "loopback" in fetched.fetch_error
+
+
+async def test_the_control_a_public_address_is_still_fetched():
+    """Without this, "refuse everything" would satisfy every assertion above."""
+    async with fetcher(lambda request: html_response("<p>a public page</p>")) as pages:
+        fetched = await pages.fetch(
+            SourceEvidence(
+                url="https://93.184.216.34/x", title="t", snippet="s", block="web", position=1
+            )
+        )
+    assert fetched.text == "a public page"
+    assert fetched.fetch_error is None
+
+
+# --- the total deadline -------------------------------------------------------------------------
+
+
+async def test_a_server_that_drips_bytes_is_cut_off_by_the_total_deadline():
+    """httpx's timeout is PER OPERATION and restarts on every read, so a server writing one
+    byte per interval never trips it: a review measured a fetch alive past 45s against a
+    configured 5s, and at that rate it runs until the byte ceiling — ~145 days for 4 MiB.
+    Eight of those pin every slot while the heartbeat keeps the job looking healthy.
+    """
+
+    class Drip(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for _ in range(500):
+                await asyncio.sleep(0.02)
+                yield b"<p>x</p>"
+
+    def handler(request):
+        return httpx.Response(
+            200, headers={"content-type": "text/html"}, stream=Drip(), extensions={}
+        )
+
+    # Finite (500 chunks, ~10s) rather than unbounded: a test that HANGS when its subject
+    # regresses is the failure mode this repo already paid for once, and the elapsed
+    # assertion below is what discriminates either way.
+    started = asyncio.get_running_loop().time()
+    async with fetcher(
+        handler, deadline_seconds=0.3, request_timeout_seconds=30.0, max_bytes=4096
+    ) as pages:
+        fetched = await pages.fetch(source("https://drip.test/a"))
+    elapsed = asyncio.get_running_loop().time() - started
+    assert "total deadline" in fetched.fetch_error
+    assert elapsed < 5, f"the per-operation timeout would have allowed this to run on: {elapsed}"
+
+
 # --- text extraction ---------------------------------------------------------------------------
+
+
+def test_a_nul_byte_in_a_text_plain_body_never_reaches_the_text():
+    """Postgres refuses U+0000 in a `text` value and asyncpg raises
+    `CharacterNotInRepertoireError`. A NUL survives `decode(errors="replace")` (it is a valid
+    codepoint) and survives `str.split()` (it is not whitespace), so this path stored it."""
+    text = extract_text(b"hello\x00world here", content_type="text/plain", max_chars=100)
+    assert "\x00" not in text
+    assert text == "helloworld here"
+
+
+def test_the_control_the_html_path_is_scrubbed_too():
+    """lxml already dropped the NUL, which is exactly why the asymmetry read as covered."""
+    body = b"<html><body><p>hello\x00world</p></body></html>"
+    assert "\x00" not in extract_text(body, content_type="text/html", max_chars=100)
+
+
+def test_a_title_and_snippet_are_collapsed_and_scrubbed_like_a_page_body():
+    """Only page text was being normalised, and a snippet is a large share of what the judge
+    reads. A Brave `description` carrying a literal `\\u0000` is a well-formed json answer."""
+    merged = merge_results(
+        envelope(
+            web=[
+                {
+                    "url": "https://a.test/1",
+                    "title": "Line one\nLine\x00 two",
+                    "description": "sum\x00mary\nover   lines",
+                }
+            ]
+        ),
+        limit=1,
+    )
+    assert merged[0].title == "Line one Line two"
+    assert merged[0].snippet == "summary over lines"
 
 
 def test_extraction_caps_the_text_at_the_configured_ceiling():

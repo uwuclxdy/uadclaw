@@ -9,9 +9,16 @@ Two clients, and keeping them apart is a security property rather than tidiness:
   location it refused, never a hop taken with the key attached.
 - **The page fetcher carries no credential of any kind.** It fetches attacker-influenceable
   URLs — anything that can rank for a package name — which nothing else in this repo does. It
-  refuses a non-`http`/`https` scheme before any request, refuses a redirect that would
-  downgrade `https` to `http`, bounds the hop count, gates on `Content-Type`, and enforces a
-  hard byte ceiling WHILE STREAMING so a multi-gigabyte page never reaches memory.
+  refuses a non-`http`/`https` scheme before any request, refuses a loopback/private/
+  link-local/reserved target on the initial url AND on every redirect hop, refuses a redirect
+  that would downgrade `https` to `http`, bounds the hop count, gates on `Content-Type`,
+  enforces a hard byte ceiling WHILE STREAMING so a multi-gigabyte page never reaches memory,
+  and bounds the whole fetch with a wall-clock deadline — httpx's own timeout is PER
+  OPERATION, so a server writing one byte every three seconds kept a fetch alive past 45s
+  against a configured 5s and would have run for months to reach the byte ceiling.
+- **Nothing the fetcher does can raise into its caller.** `fetch_all` returns one
+  `SourceEvidence` per input whatever happens, because it is called from inside a `TaskGroup`
+  where a single escaped exception cancels every other package in the job.
 
 **No retry layer lives here.** The repo rule is one retry layer per concern, and the
 corroboration stage's answer to a failed search is a `search_failed` row rather than a loop:
@@ -31,7 +38,9 @@ uncorroborated in silence; a zero-result answer read as a failure marks one pack
 
 import asyncio
 import html
+import ipaddress
 import logging
+import socket
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
@@ -64,6 +73,18 @@ _CHUNK_BYTES = 64 * 1024
 # is refused or served a challenge page by a good share of the web, and a challenge page is
 # evidence of nothing while still costing the byte budget.
 PAGE_USER_AGENT = "Mozilla/5.0 (compatible; uadclaw/0.1; +https://github.com/uwuclxdy/uadclaw)"
+
+# How long a hostname lookup may take before the address gate gives up on classifying it.
+# Short because a name that will not resolve here will not resolve for httpx either.
+_RESOLVE_TIMEOUT_SECONDS = 2.0
+
+# The one codepoint Postgres refuses inside a `text` value. Stripped where text is EXTRACTED
+# rather than where it is stored, so nothing downstream has to know: a NUL survives
+# `bytes.decode(errors="replace")` (it is a valid codepoint) and survives `str.split()` (it is
+# not whitespace), so a `text/plain` body carrying one reached asyncpg and raised
+# `CharacterNotInRepertoireError` — which, before the containment below, took the whole job
+# down with 8 search queries already spent and 2 rows written.
+_PG_FORBIDDEN = "\x00"
 
 
 class BraveError(RuntimeError):
@@ -111,13 +132,108 @@ def require_brave_key(settings: Settings) -> str:
     return key
 
 
+def clean_text(value: str) -> str:
+    """One untrusted string as a single collapsed line with no Postgres-forbidden codepoint.
+
+    Applied to the title and the snippet as well as to a page body, because all three are
+    stored and all three reach the judge, and only the body was being normalised. A NUL in any
+    of them is a failed INSERT rather than a bad string — a Brave `description` carrying a
+    literal `\\u0000` is a well-formed JSON answer.
+    """
+    return " ".join(value.replace(_PG_FORBIDDEN, "").split())
+
+
 def is_fetchable_url(url: str) -> bool:
-    """Whether a URL out of a search result may become a request at all."""
+    """Whether a URL out of a search result may become a request at all.
+
+    `urlsplit` is not enough on its own and the gap is not cosmetic: it accepts hostnames
+    httpx's IDNA encoder refuses (`http://ａｂｃ.com/`, `http://──.com/`,
+    `https://xn--\xe9-0ga.com/`, a host carrying U+00A0), and the resulting `httpx.InvalidURL`
+    is NOT a subclass of `httpx.HTTPError` — measured on httpx 0.28.1 — so it walked past every
+    handler in this module. `https://xn--a.com/` is worse still: httpx never wraps it and a raw
+    `idna.core.InvalidCodepoint` comes out. Both are contained at the fetch boundary now; this
+    refuses them one step earlier, where the result never becomes a source at all.
+    """
     try:
         parsed = urlsplit(url)
     except ValueError:
         return False
-    return parsed.scheme.lower() in ALLOWED_SCHEMES and bool(parsed.netloc)
+    if parsed.scheme.lower() not in ALLOWED_SCHEMES or not parsed.netloc:
+        return False
+    try:
+        # `raw_host` runs the IDNA encode, `host` runs the punycode decode, and the two refuse
+        # different inputs. `idna`'s errors derive from `UnicodeError`, not from httpx's tree.
+        target = httpx.URL(url)
+        return bool(target.raw_host) and bool(target.host)
+    except (httpx.InvalidURL, UnicodeError, ValueError):
+        return False
+
+
+def _blocked_address(host: str) -> str | None:
+    """Why this literal address must not be requested, or `None` if it is not a literal.
+
+    IPv4-mapped IPv6 (`::ffff:127.0.0.1`) is classified correctly by `ipaddress` itself, so
+    the loopback spelling that most often slips a hand-written check is covered here.
+    """
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    # Ordered most specific first: `0.0.0.0` is unspecified AND private, and `127.0.0.1` is
+    # loopback AND private, so a name-the-broadest-match order would label every one of them
+    # "private" and lose the fact a reader needs.
+    for label, blocked in (
+        ("loopback", address.is_loopback),
+        ("unspecified", address.is_unspecified),
+        ("link-local", address.is_link_local),
+        ("multicast", address.is_multicast),
+        ("private", address.is_private),
+        ("reserved", address.is_reserved),
+    ):
+        if blocked:
+            return label
+    return None
+
+
+async def address_refusal(url: str) -> str | None:
+    """Why this url must not become a request, or `None`.
+
+    The SSRF gate. This module holds the only outbound-request primitive in the repo that is
+    pointed at a host an attacker chooses by ranking for a package name, so a 302 to
+    `http://127.0.0.1:55432` or to `169.254.169.254` is a request this worker would otherwise
+    make — and any internal service answering 200 `text/html` would have 4000 characters of its
+    body stored and sent to DeepSeek. Checked on the initial url and on every redirect hop,
+    because the hop is where the attacker gets to choose.
+
+    Two honest bounds on what this buys, stated rather than inflated. The exposure it closes is
+    real but low value on THIS deployment: the worker runs on a home LAN with no cloud metadata
+    endpoint, so the reachable targets are Postgres and the dashboard rather than a credential
+    service. And a name that resolves clean here can resolve differently when httpx connects a
+    moment later (DNS rebinding), which this cannot close without owning the socket.
+
+    A lookup that FAILS is not a refusal. httpx resolves the same name through the same
+    resolver, so a name this cannot resolve is a name that never connects — and treating a
+    resolver error as a refusal would turn an unrelated DNS blip into a stage-wide outage.
+    """
+    host = (httpx.URL(url).host or "").strip("[]")
+    if not host:
+        return f"refused {url!r}: it carries no host"
+    literal = _blocked_address(host)
+    if literal is not None:
+        return f"refused {url!r}: {host} is a {literal} address"
+    try:
+        async with asyncio.timeout(_RESOLVE_TIMEOUT_SECONDS):
+            answers = await asyncio.get_running_loop().getaddrinfo(
+                host, None, type=socket.SOCK_STREAM
+            )
+    except (OSError, TimeoutError):
+        return None
+    for answer in answers:
+        resolved = str(answer[4][0]).split("%", 1)[0]
+        blocked = _blocked_address(resolved)
+        if blocked is not None:
+            return f"refused {url!r}: {host} resolves to {resolved}, a {blocked} address"
+    return None
 
 
 def _results(block: Any) -> list[Mapping[str, Any]]:
@@ -135,12 +251,14 @@ def _hit(item: Mapping[str, Any], *, block: str, position: int) -> SourceEvidenc
         return None
     title = item.get("title")
     # The snippet field is called `description`, NOT `snippet`, and it arrives HTML-escaped
-    # (`&amp;`). Measured 2026-08-12 against the live API.
+    # (`&amp;`). Measured 2026-08-12 against the live API. Both fields go through
+    # `clean_text` for the reason the page body does: they are stored and they reach the
+    # judge, and only the body was ever being normalised.
     snippet = item.get("description")
     return SourceEvidence(
         url=url,
-        title=html.unescape(title) if isinstance(title, str) else "",
-        snippet=html.unescape(snippet) if isinstance(snippet, str) else "",
+        title=clean_text(html.unescape(title)) if isinstance(title, str) else "",
+        snippet=clean_text(html.unescape(snippet)) if isinstance(snippet, str) else "",
         block=block,
         position=position,
     )
@@ -209,6 +327,14 @@ class BraveClient:
     Holds the token as a plain string rather than the `Settings` object, for the reason
     `DeepSeekClient` does: pydantic renders every field of a `Settings` on `repr()`, so a
     `Settings` in a traceback frame would put the credential in a job's `log_tail`.
+
+    **Concurrency-bounded like the other two clients**, and this one was the exception until a
+    review measured it: `corroborate_stage` creates one task per candidate against a ceiling
+    of 500, so 200 candidates put 200 searches in flight at once where `PageFetcher` and
+    `DeepSeekClient` allowed 8. Brave's measured policy is `50;w=1` — 50 requests per SECOND —
+    and `_QueryBudget.take()` decrements BEFORE the request, so every 429 that fanout earns
+    burns a query out of the job's ceiling for nothing. A live 44-candidate run returned zero
+    `search_failed`; it passed by being smaller than the limit, not by pacing itself.
     """
 
     def __init__(
@@ -218,6 +344,7 @@ class BraveClient:
         search_url: str,
         result_count: int,
         request_timeout_seconds: float,
+        max_concurrency: int,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if not api_key:
@@ -228,6 +355,7 @@ class BraveClient:
         self._api_key = api_key
         self.search_url = search_url
         self.result_count = result_count
+        self._semaphore = asyncio.Semaphore(max_concurrency)
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(request_timeout_seconds),
             transport=transport,
@@ -245,6 +373,7 @@ class BraveClient:
             search_url=settings.brave_search_url,
             result_count=settings.brave_result_count,
             request_timeout_seconds=settings.brave_request_timeout_seconds,
+            max_concurrency=settings.brave_max_concurrency,
             transport=transport,
         )
 
@@ -266,14 +395,15 @@ class BraveClient:
         """One search, merged and ranked. Raises rather than returning a partial answer: the
         caller records `search_failed`, which is a different fact from "found nothing"."""
         try:
-            response = await self._client.get(
-                self.search_url,
-                params={"q": query, "count": self.result_count},
-                headers={
-                    "X-Subscription-Token": self._api_key,
-                    "Accept": "application/json",
-                },
-            )
+            async with self._semaphore:
+                response = await self._client.get(
+                    self.search_url,
+                    params={"q": query, "count": self.result_count},
+                    headers={
+                        "X-Subscription-Token": self._api_key,
+                        "Accept": "application/json",
+                    },
+                )
         except httpx.HTTPError as exc:
             # `exc` carries the request URL, never the headers, so this cannot leak the token.
             raise BraveUnavailableError(
@@ -333,14 +463,18 @@ def extract_text(body: bytes, *, content_type: str, max_chars: int) -> str:
     `no_network=True` on the parser is explicit rather than inherited: this is the only place
     in the repo that parses a document off the open web, and a parser that can be talked into
     a fetch turns a page body into an outbound request.
+
+    Both paths go through `clean_text`, and the `text/plain` one is why: lxml drops a NUL for
+    us, so the HTML path was already safe and the plain path was not — the asymmetry is
+    exactly the shape that reads as covered.
     """
     if content_type.startswith("text/plain"):
-        return " ".join(body.decode("utf-8", errors="replace").split())[:max_chars]
+        return clean_text(body.decode("utf-8", errors="replace"))[:max_chars]
     parser = lxml.html.HTMLParser(no_network=True, remove_comments=True)
     document = lxml.html.fromstring(body, parser=parser)
     for element in document.xpath(_STRIPPED_ELEMENTS):
         element.drop_tree()
-    return " ".join(document.text_content().split())[:max_chars]
+    return clean_text(document.text_content())[:max_chars]
 
 
 class PageFetcher:
@@ -354,12 +488,14 @@ class PageFetcher:
         self,
         *,
         request_timeout_seconds: float,
+        deadline_seconds: float,
         max_bytes: int,
         max_text_chars: int,
         max_concurrency: int,
         max_redirects: int,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        self.deadline_seconds = deadline_seconds
         self.max_bytes = max_bytes
         self.max_text_chars = max_text_chars
         self.max_redirects = max_redirects
@@ -378,6 +514,7 @@ class PageFetcher:
     ) -> "PageFetcher":
         return cls(
             request_timeout_seconds=settings.page_fetch_timeout_seconds,
+            deadline_seconds=settings.page_fetch_deadline_seconds,
             max_bytes=settings.page_fetch_max_bytes,
             max_text_chars=settings.page_text_max_chars,
             max_concurrency=settings.page_fetch_max_concurrency,
@@ -395,21 +532,65 @@ class PageFetcher:
         await self._client.aclose()
 
     async def fetch_all(self, sources: Iterable[SourceEvidence]) -> list[SourceEvidence]:
-        """Every source, concurrency-bounded, in the order it was given.
+        """Every source, concurrency-bounded, in the order it was given. **Never raises.**
 
         A failure is never raised: it becomes `fetch_error` on that one source and the judge
         reads its Brave snippet instead. One dead host must not cost the other nine results,
         and it must not cost the package its verdict.
+
+        That was the intent and it was not what the code did. `asyncio.gather` with no
+        `return_exceptions` propagated the first failure, this is called from inside a
+        `TaskGroup`, and the exception classes it did not catch are not exotic: an
+        `httpx.InvalidURL` from an IDNA-hostile hostname is not an `httpx.HTTPError` at all.
+        One such url in a 10-source batch lost all 10, and in a 6-package group every sibling
+        was cancelled — including judge calls already paid for.
+
+        So the containment is two-layered and deliberately broad. The premise of this module
+        is that these bytes are attacker-influenceable, which makes an unexpected exception
+        TYPE the expected case rather than a bug to let escape. Cancellation is the one thing
+        that still propagates: it is the caller's, never this source's.
         """
-        return list(await asyncio.gather(*(self.fetch(source) for source in sources)))
+        ordered = list(sources)
+        settled = await asyncio.gather(
+            *(self.fetch(source) for source in ordered), return_exceptions=True
+        )
+        fetched: list[SourceEvidence] = []
+        for source, outcome in zip(ordered, settled, strict=True):
+            if isinstance(outcome, BaseException):
+                if not isinstance(outcome, Exception):
+                    raise outcome
+                logger.error(
+                    "page fetch escaped its own boundary for %s", source.url, exc_info=outcome
+                )
+                fetched.append(source.with_error(f"{type(outcome).__name__}: {outcome}"))
+            else:
+                fetched.append(outcome)
+        return fetched
 
     async def fetch(self, source: SourceEvidence) -> SourceEvidence:
+        """One source, or the reason it has no body. Never raises for anything but cancellation.
+
+        The deadline sits INSIDE the semaphore, so a fetch is not charged for the time it spent
+        queued behind seven others.
+        """
         if not is_fetchable_url(source.url):
             return source.with_error(
                 f"refused before any request: {source.url!r} is not an http(s) url"
             )
-        async with self._semaphore:
-            return await self._walk(source)
+        try:
+            async with self._semaphore:
+                refusal = await address_refusal(source.url)
+                if refusal is not None:
+                    return source.with_error(refusal)
+                async with asyncio.timeout(self.deadline_seconds):
+                    return await self._walk(source)
+        except TimeoutError:
+            return source.with_error(
+                f"gave up after the {self.deadline_seconds:g}s total deadline for {source.url}"
+            )
+        except Exception as exc:
+            logger.exception("page fetch failed for %s", source.url)
+            return source.with_error(f"{type(exc).__name__}: {exc}")
 
     async def _walk(self, source: SourceEvidence) -> SourceEvidence:
         url = source.url
@@ -422,6 +603,11 @@ class PageFetcher:
                         following, refusal = self._redirect_target(url, response)
                         if following is None:
                             return source.with_error(refusal)
+                        # Every hop, not just the first: the hop is where an attacker who can
+                        # rank a page gets to choose the address this worker connects to.
+                        hop_refusal = await address_refusal(following)
+                        if hop_refusal is not None:
+                            return source.with_error(hop_refusal)
                         url = following
                         continue
                     if response.status_code != httpx.codes.OK:

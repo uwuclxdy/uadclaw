@@ -210,7 +210,19 @@ async def store_verdict(
 
     `sources` is `[{"url", "title"}]` resolved from the search rows rather than from the model,
     so a citation can never be labelled with a title nobody fetched.
+
+    **The mirror of `record_failure`'s guard, and it was missing.** That one refuses to write a
+    verdict as a failure; this one refuses to write a failure as a verdict. Without it a
+    `search_failed` reached this function with sources attached and `failure_reason=None` —
+    the exact row shape the pair of guards exists to prevent, arriving through the door nobody
+    had locked.
     """
+    if corroboration.status in RETRYABLE:
+        raise CorroborationStoreError(
+            f"store_verdict: {corroboration.status} is a pipeline failure, not a verdict; "
+            "write it with `record_failure` so the row carries its failure_reason and no "
+            "sources"
+        )
     await _upsert(
         session,
         {

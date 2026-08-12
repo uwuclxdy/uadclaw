@@ -294,9 +294,18 @@ class Settings(BaseSettings):
     # `50;w=1, 0;w=2678400` — 50 requests per SECOND, with the monthly component reporting a
     # limit of 0 while still serving, so the monthly quota is UNVERIFIED and no number here is
     # derived from one. This is a job-level ceiling an operator sets against whatever plan they
-    # actually hold; nothing in this stage approaches the per-second limit, because every query
-    # is followed by up to ten page fetches.
+    # actually hold; what keeps a job under the per-SECOND limit is `brave_max_concurrency`
+    # below and nothing else.
     corroboration_max_queries_per_job: int = 500
+    # Searches in flight at once, the way `DeepSeekClient` and `PageFetcher` bound themselves.
+    # The stage creates one task per candidate against a ceiling of 500, so without this a
+    # 200-package job puts 200 queries on the wire simultaneously — measured peak in-flight 200
+    # for Brave against 8 for the other two clients on an identical fanout. 8 rather than a
+    # rate limiter because concurrency is what the other two bound and one mechanism per
+    # concern is the rule here: at a measured search latency around half a second, 8 in flight
+    # is roughly 16 req/s against the policy's 50. The correction this replaces claimed the
+    # page fetches paced the queries; they run AFTER each query returns and pace nothing.
+    brave_max_concurrency: int = 8
     # How long a package's cached search rows stand before the package re-searches. 30 days
     # because these rows exist to keep a re-classification from re-spending the search quota,
     # and the web's answer to "what is com.example.foo" does not turn over inside a month.
@@ -310,12 +319,25 @@ class Settings(BaseSettings):
     # not multiply into a ceiling nine times the number anybody reads.
     corroboration_max_calls_per_package: int = 3
     # Read/connect deadline for one page fetch. Ten seconds because a slow page is not worth a
-    # judge waiting on it: the Brave snippet stands in and the verdict still lands.
+    # judge waiting on it: the Brave snippet stands in and the verdict still lands. PER
+    # OPERATION, which is the trap the setting below exists for.
     page_fetch_timeout_seconds: float = 10.0
+    # Wall-clock ceiling on ONE page fetch, redirects and body read included. httpx's timeout
+    # restarts on every read, so a server trickling one byte per interval never trips it: a
+    # review measured a fetch alive past 45s against a configured 5s, and at that drip rate it
+    # runs until the byte ceiling — roughly 145 days for 4 MiB. Eight of those pin every
+    # `PageFetcher` slot forever while the worker heartbeat keeps the job looking healthy, so
+    # nothing reclaims it. 30s admits the ordinary redirect chain and kills the drip.
+    page_fetch_deadline_seconds: float = 30.0
     # Hard ceiling on one page body, enforced while streaming. 4 MiB is roughly an order of
-    # magnitude above a heavy real article and small enough that ten concurrent fetches cannot
-    # put more than 40 MiB in the worker heap. A body past it is TRUNCATED, not refused: the
-    # head of a long page is still evidence.
+    # magnitude above a heavy real article, and a body past it is TRUNCATED rather than
+    # refused: the head of a long page is still evidence.
+    #
+    # The ceiling is on the BODY and is not a heap budget. Measured here 2026-08-12: a 4 MiB
+    # tag-dense body cost ~63 MiB of peak RSS through lxml's parse plus `text_content`, about
+    # 16x the bytes; a review measured 130 MiB on a denser page and a further 38.6 MiB held
+    # transiently by httpx's gzip decoder. So `page_fetch_max_concurrency` slots at this
+    # ceiling is hundreds of MiB, not the 40 MiB an earlier version of this comment asserted.
     page_fetch_max_bytes: int = 4 * 1024 * 1024
     # Characters of extracted text kept per source, for the judge and for the row. Ten sources
     # at this cap is ~40k characters of evidence per package, roughly 10k input tokens — about
@@ -366,6 +388,7 @@ class Settings(BaseSettings):
         "brave_request_timeout_seconds",
         "corroboration_search_ttl_days",
         "page_fetch_timeout_seconds",
+        "page_fetch_deadline_seconds",
     )
     @classmethod
     def _reject_non_positive_duration(cls, value: float) -> float:
@@ -384,6 +407,7 @@ class Settings(BaseSettings):
         "corroboration_max_queries_per_job",
         "corroboration_max_packages",
         "corroboration_max_calls_per_package",
+        "brave_max_concurrency",
         "page_fetch_max_bytes",
         "page_text_max_chars",
         "page_fetch_max_concurrency",

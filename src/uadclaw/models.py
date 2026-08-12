@@ -582,6 +582,12 @@ class PackageSearchResult(Base):
     # corroboration came off a forum thread or a vendor page is a triage-relevant fact.
     block: Mapped[str] = mapped_column(String(16), nullable=False)
     page_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Capped by `corroborate.FETCH_ERROR_MAX_CHARS` on the way in rather than by the column.
+    # This quotes attacker-controlled response data — a status line, a `Content-Type` — and h11
+    # caps one header near 16 KiB, so uncapped it is ~16 KiB x 10 sources x 500 packages of
+    # growth per job. Held in code because `SourceEvidence.with_error` is the single funnel
+    # every fetch failure passes, while a `varchar(n)` here would turn that growth into a
+    # failed INSERT partway through a job that had already spent its search quota.
     fetch_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

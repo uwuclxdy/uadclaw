@@ -28,9 +28,14 @@ from uadclaw import stages as stages_module
 from uadclaw.brave import BraveClient, PageFetcher
 from uadclaw.classify import UNKNOWN, Classification, Confidence, UadList
 from uadclaw.classifystore import park_package, store_classification
-from uadclaw.corroborate import RULE_PROVENANCE, CorroborationStatus, description_digest
-from uadclaw.corroboratestore import CorroborationStoreError
-from uadclaw.deepseek import DeepSeekClient
+from uadclaw.corroborate import (
+    RULE_PROVENANCE,
+    CorroborationStatus,
+    code_verdict,
+    description_digest,
+)
+from uadclaw.corroboratestore import CorroborationStoreError, record_failure, store_verdict
+from uadclaw.deepseek import DeepSeekBalanceError, DeepSeekClient
 from uadclaw.ladder import Removal
 from uadclaw.models import PackageClassification, PackageCorroboration, PackageSearchResult
 from uadclaw.stages import corroborate_stage
@@ -169,19 +174,18 @@ def fake_apis(monkeypatch):
     return state
 
 
+def prompt_urls(user_prompt: str) -> list[str]:
+    """The urls the judge was actually handed, read out of the prompt the way the judge reads
+    it. The prompt is one json object, so this parses rather than scraping lines."""
+    return [source["url"] for source in json.loads(user_prompt)["sources"]]
+
+
 def verdict_response(status="corroborated", *, sources=None, reasoning="It says so."):
     def answer(user_prompt: str) -> httpx.Response:
         cited = sources
         if cited is None:
-            cited = (
-                [
-                    line.split("url: ", 1)[1].strip()
-                    for line in user_prompt.splitlines()
-                    if line.startswith("url: ")
-                ][:1]
-                if status == "corroborated"
-                else []
-            )
+            handed = prompt_urls(user_prompt)
+            cited = handed[:1] if status == "corroborated" else []
         return httpx.Response(
             200,
             json=judge_envelope({"status": status, "sources": list(cited), "reasoning": reasoning}),
@@ -375,6 +379,155 @@ async def test_a_search_failure_on_one_package_leaves_every_other_verdict_standi
         assert stored[package].status == str(CorroborationStatus.CORROBORATED), package
 
 
+async def test_one_packages_fetch_failure_never_cancels_a_sibling_or_loses_its_paid_search(
+    db_env, corroboration_env, fake_apis, db_session_factory
+):
+    """The blocker, at the stage level and in both halves.
+
+    `fetch_all` used `asyncio.gather` with no `return_exceptions` and `_corroborate_and_store`
+    ran inside a `TaskGroup`, so an exception class nothing caught — `httpx.InvalidURL` is not
+    an `httpx.HTTPError` — cancelled every sibling package including judge calls already paid
+    for. And the search rows were written only AFTER the fetch phase, so the poisoned package
+    cached nothing, recorded nothing, and burned a fresh Brave query on every future run.
+
+    Asserted on the specific outcome rather than on "nothing raised": the siblings hold real
+    verdicts, and the poisoned package holds BOTH a status and its stored search rows.
+    """
+    packages = {
+        f"com.example.p{index}": f"Package {index} does a thing worth describing."
+        for index in range(1, 6)
+    }
+    poisoned = "com.example.p3"
+
+    def search(package):
+        if package == poisoned:
+            return brave_body(package, web=[hit("https://ok.test/a"), hit("https://bad.test/b")])
+        return default_brave(package)
+
+    def pages(request):
+        if request.url.host == "bad.test":
+            raise httpx.InvalidURL("Invalid IDNA hostname: 'ａｂｃ.com'")
+        return httpx.Response(
+            200, headers={"content-type": "text/html"}, content=b"<p>a real page body</p>"
+        )
+
+    fake_apis["search"] = search
+    fake_apis["pages"] = pages
+    fake_apis["judge"] = verdict_response("corroborated")
+    job_id = await seed(db_session_factory, packages)
+
+    await corroborate_stage(context(job_id, db_session_factory))
+
+    stored = await rows(db_session_factory)
+    assert sorted(stored) == sorted(packages), "every package reached a row"
+    for package in packages:
+        assert stored[package].status == str(CorroborationStatus.CORROBORATED), package
+    # The paid query landed: a re-run reads these rows and spends nothing.
+    cached = {row.url: row for row in await search_rows(db_session_factory, poisoned)}
+    assert sorted(cached) == ["https://bad.test/b", "https://ok.test/a"]
+    assert cached["https://ok.test/a"].page_text == "a real page body"
+    assert "InvalidURL" in cached["https://bad.test/b"].fetch_error
+
+
+async def test_a_nul_byte_in_a_page_body_is_one_packages_problem_and_not_the_jobs(
+    db_env, corroboration_env, fake_apis, db_session_factory
+):
+    """The second trigger for the same abort. A NUL survives `decode(errors="replace")` and
+    `str.split()`, so a `text/plain` body carrying one reached asyncpg and raised
+    `CharacterNotInRepertoireError` at the store — killing the whole job with queries already
+    spent. Stripped at extraction now, so the row is written and the text is clean."""
+    packages = {NOTES: NOTES_DESCRIPTION, LAUNCHER: LAUNCHER_DESCRIPTION}
+
+    def pages(request):
+        if "notes" in str(request.url):
+            return httpx.Response(
+                200, headers={"content-type": "text/plain"}, content=b"notes\x00 app body"
+            )
+        return httpx.Response(
+            200, headers={"content-type": "text/html"}, content=b"<p>the launcher body</p>"
+        )
+
+    fake_apis["pages"] = pages
+    fake_apis["judge"] = verdict_response("corroborated")
+    job_id = await seed(db_session_factory, packages)
+
+    await corroborate_stage(context(job_id, db_session_factory))
+
+    stored = await rows(db_session_factory)
+    assert stored[NOTES].status == str(CorroborationStatus.CORROBORATED)
+    assert stored[LAUNCHER].status == str(CorroborationStatus.CORROBORATED)
+    texts = [row.page_text for row in await search_rows(db_session_factory, NOTES)]
+    assert texts == ["notes app body", "notes app body"]
+
+
+async def test_an_unexpected_failure_after_the_search_is_recorded_as_this_packages_own(
+    db_env, corroboration_env, fake_apis, db_session_factory, monkeypatch
+):
+    """The general containment, with the phase it lands in. The sources were already stored,
+    so the retry is free and the row says `judge_failed` rather than `search_failed`."""
+    packages = {NOTES: NOTES_DESCRIPTION, LAUNCHER: LAUNCHER_DESCRIPTION}
+    real_judge = stages_module._judge_one
+
+    async def judge_one(client, *, package, **kwargs):
+        if package == NOTES:
+            raise RuntimeError("something nobody predicted")
+        return await real_judge(client, package=package, **kwargs)
+
+    monkeypatch.setattr(stages_module, "_judge_one", judge_one)
+    fake_apis["judge"] = verdict_response("corroborated")
+    job_id = await seed(db_session_factory, packages)
+
+    await corroborate_stage(context(job_id, db_session_factory))
+
+    stored = await rows(db_session_factory)
+    assert stored[LAUNCHER].status == str(CorroborationStatus.CORROBORATED), "sibling survived"
+    assert stored[NOTES].status == str(CorroborationStatus.JUDGE_FAILED)
+    assert "RuntimeError" in stored[NOTES].failure_reason
+    assert stored[NOTES].sources == []
+    assert await search_rows(db_session_factory, NOTES), "the paid search is cached for the retry"
+
+
+async def test_an_account_level_deepseek_failure_still_aborts_the_whole_job(
+    db_env, corroboration_env, fake_apis, db_session_factory
+):
+    """The control for the containment above. `DeepSeekBalanceError` is about the ACCOUNT, not
+    about this package, so burning 499 more packages' budgets against it is not a diagnosis —
+    a boundary that swallowed everything would turn this into 500 quiet `judge_failed` rows."""
+    fake_apis["judge"] = lambda _prompt: httpx.Response(402, text="Insufficient Balance")
+    job_id = await seed(
+        db_session_factory, {NOTES: NOTES_DESCRIPTION, LAUNCHER: LAUNCHER_DESCRIPTION}
+    )
+
+    with pytest.raises(BaseExceptionGroup) as caught:
+        await corroborate_stage(context(job_id, db_session_factory))
+
+    assert caught.group_contains(DeepSeekBalanceError)
+    assert await rows(db_session_factory) == {}, "no package was recorded as its own failure"
+
+
+async def test_a_paid_search_reaches_the_database_whatever_the_fetch_phase_does(
+    db_env, corroboration_env, fake_apis, db_session_factory, monkeypatch
+):
+    """`fetch_all` no longer raises; this is the second half of the guarantee at the site that
+    spent the query. A search that has been PAID FOR must never be lost to the phase after it,
+    or the package re-poisons itself and burns a fresh query on every future run."""
+
+    async def exploding_fetch_all(self, sources):
+        raise RuntimeError("the fetch phase blew up in a way nobody predicted")
+
+    monkeypatch.setattr(PageFetcher, "fetch_all", exploding_fetch_all)
+    fake_apis["judge"] = verdict_response("corroborated")
+    job_id = await seed(db_session_factory, {NOTES: NOTES_DESCRIPTION})
+
+    await corroborate_stage(context(job_id, db_session_factory))
+
+    cached = await search_rows(db_session_factory, NOTES)
+    assert [row.url for row in cached] == ["https://docs.test/notes", "https://forum.test/notes"]
+    assert all(row.page_text is None for row in cached)
+    assert all("the fetch phase failed" in row.fetch_error for row in cached)
+    assert len(fake_apis["searches"]) == 1
+
+
 # --- the fabricated-citation gate, end to end ---------------------------------------------------
 
 
@@ -450,9 +603,11 @@ async def test_a_source_whose_page_failed_reaches_the_judge_as_its_snippet(
 
     await corroborate_stage(context(job_id, db_session_factory))
 
-    prompt = fake_apis["judgements"][0]
-    assert "forum summary" in prompt, "the snippet stands in rather than the result being dropped"
-    assert "page body not fetched" in prompt
+    handed = {source["url"]: source for source in json.loads(fake_apis["judgements"][0])["sources"]}
+    forum = handed["https://forum.test/notes"]
+    assert forum["text"] == "forum summary", "the snippet stands in rather than the result dropped"
+    assert forum["evidence_kind"] == "search_snippet"
+    assert handed["https://docs.test/notes"]["evidence_kind"] == "page_text"
     stored = {row.url: row for row in await search_rows(db_session_factory, NOTES)}
     assert stored["https://forum.test/notes"].page_text is None
     assert "ReadTimeout" in stored["https://forum.test/notes"].fetch_error
@@ -573,10 +728,14 @@ async def test_a_re_search_that_finds_nothing_removes_the_rows_it_replaces(
 async def test_the_two_retry_layers_do_not_multiply_and_the_row_reports_true_spend(
     db_env, corroboration_env, fake_apis, db_session_factory
 ):
-    """The judge's budget is counted in REQUESTS, and the mixed shape is the only one that
-    separates a per-call decrement from a per-request one: a `503, 503, rejected-verdict` cycle
-    costs three requests inside ONE re-prompt, so charging one per `complete_json` would let the
-    package spend three times its ceiling while the row reported a third of it."""
+    """The judge's budget is counted in REQUESTS: a `503, 503, rejected-verdict` cycle costs
+    three requests inside ONE re-prompt, so charging one per `complete_json` would let the
+    package spend three times its ceiling while the row reported a third of it.
+
+    This shape does not exercise the HAND-OFF, because the first `complete_json` consumes the
+    whole budget and there is no second call to hand a remainder to. The test below is the one
+    that separates `max_calls - calls` from `max_calls`.
+    """
     cycle = [
         httpx.Response(503, text="busy"),
         httpx.Response(503, text="busy"),
@@ -603,6 +762,52 @@ async def test_the_two_retry_layers_do_not_multiply_and_the_row_reports_true_spe
     assert row.status == str(CorroborationStatus.JUDGE_FAILED)
     # The row's own count IS the transport's count, and both are the single named budget.
     assert row.attempts == len(fake_apis["judgements"]) == 3
+
+
+async def test_the_second_call_is_handed_only_what_the_first_one_left(
+    db_env, corroboration_env, fake_apis, db_session_factory
+):
+    """The budget hand-off itself: `complete_json(max_calls=max_calls - calls)`.
+
+    A `503, rejected, 503, 503, rejected` cycle against a ceiling of 3 is the shape that
+    separates it. Handing the remainder, the first call spends two requests (a 503 and a
+    parsable-but-rejected answer) and the second is allowed exactly one; handing the FULL
+    ceiling again, the second call retries its own way through three more, so the package makes
+    five wire requests against a documented ceiling of three and the row still reports three.
+    """
+    cycle = [
+        httpx.Response(503, text="busy"),
+        httpx.Response(
+            200,
+            json=judge_envelope(
+                {"status": "corroborated", "sources": ["https://invented.test/x"], "reasoning": ""}
+            ),
+        ),
+        httpx.Response(503, text="busy"),
+        httpx.Response(503, text="busy"),
+        httpx.Response(
+            200,
+            json=judge_envelope(
+                {"status": "corroborated", "sources": ["https://invented.test/y"], "reasoning": ""}
+            ),
+        ),
+    ]
+    state = {"index": 0}
+
+    def judge(_prompt):
+        response = cycle[min(state["index"], len(cycle) - 1)]
+        state["index"] += 1
+        return response
+
+    fake_apis["judge"] = judge
+    job_id = await seed(db_session_factory, {NOTES: NOTES_DESCRIPTION})
+
+    await corroborate_stage(context(job_id, db_session_factory))
+
+    assert len(fake_apis["judgements"]) == 3, "five requests means the remainder was not handed on"
+    row = (await rows(db_session_factory))[NOTES]
+    assert row.status == str(CorroborationStatus.JUDGE_FAILED)
+    assert row.attempts == 3
 
 
 async def test_a_re_search_replaces_the_previous_rows_rather_than_accumulating(
@@ -889,6 +1094,82 @@ async def test_a_missing_brave_key_fails_before_any_request_is_made(
     assert fake_apis["searches"] == []
     assert fake_apis["judgements"] == []
     assert await rows(db_session_factory) == {}
+
+
+# --- the two writers refuse each other's rows ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "status", [CorroborationStatus.CORROBORATED, CorroborationStatus.UNCORROBORATED]
+)
+async def test_record_failure_refuses_to_write_a_verdict_as_a_failure(
+    db_env, db_session_factory, status
+):
+    """The guard survived a mutation across the whole suite because nothing called it with a
+    verdict. `record_failure` always clears the sources, so a verdict written through it would
+    lose them while the row still claimed to be an answer."""
+    async with db_session_factory() as session, session.begin():
+        with pytest.raises(CorroborationStoreError, match="is a verdict, not a failure"):
+            await record_failure(
+                session,
+                NOTES,
+                description=NOTES_DESCRIPTION,
+                status=status,
+                reason="whatever",
+                at=NOW,
+            )
+    assert await rows(db_session_factory) == {}
+
+
+@pytest.mark.parametrize(
+    "status", [CorroborationStatus.SEARCH_FAILED, CorroborationStatus.JUDGE_FAILED]
+)
+async def test_store_verdict_refuses_to_write_a_failure_as_a_verdict(
+    db_env, db_session_factory, status
+):
+    """The missing mirror. Without it a `search_failed` went in through `store_verdict` WITH
+    sources and `failure_reason=None` — the exact row shape the pair of guards exists to
+    prevent, arriving through the door nobody had locked."""
+    failure = code_verdict(NOTES, NOTES_DESCRIPTION, status=status, reasoning="")
+    async with db_session_factory() as session, session.begin():
+        with pytest.raises(CorroborationStoreError, match="is a pipeline failure, not a verdict"):
+            await store_verdict(
+                session,
+                failure,
+                model="deepseek-v4-flash",
+                thinking=True,
+                sources=[{"url": "https://docs.test/notes", "title": "notes docs"}],
+                usage={},
+                attempts=1,
+                at=NOW,
+            )
+    assert await rows(db_session_factory) == {}
+
+
+async def test_the_control_both_writers_still_write_the_rows_they_own(db_env, db_session_factory):
+    """Without this, "raise on every call" would satisfy both assertions above."""
+    async with db_session_factory() as session, session.begin():
+        await store_verdict(
+            session,
+            code_verdict(NOTES, NOTES_DESCRIPTION, status=CorroborationStatus.UNCORROBORATED),
+            model=None,
+            thinking=None,
+            sources=[],
+            usage={},
+            attempts=0,
+            at=NOW,
+        )
+        await record_failure(
+            session,
+            LAUNCHER,
+            description=LAUNCHER_DESCRIPTION,
+            status=CorroborationStatus.SEARCH_FAILED,
+            reason="the search never happened",
+            at=NOW,
+        )
+    stored = await rows(db_session_factory)
+    assert stored[NOTES].status == str(CorroborationStatus.UNCORROBORATED)
+    assert stored[LAUNCHER].status == str(CorroborationStatus.SEARCH_FAILED)
 
 
 async def test_the_corroborate_handler_is_registered_for_the_classification_kind_only():

@@ -80,6 +80,9 @@ from uadclaw.corroboratestore import (
 from uadclaw.corroboratestore import select_candidates as select_corroboration_candidates
 from uadclaw.deepseek import (
     ChatResult,
+    DeepSeekAuthError,
+    DeepSeekBalanceError,
+    DeepSeekBudgetError,
     DeepSeekClient,
     DeepSeekMalformedError,
     DeepSeekUnavailableError,
@@ -860,6 +863,13 @@ async def _search_sources(
     The search rows are committed BEFORE the judge is asked anything. That ordering is what
     makes `judge_failed` free to retry: a re-run finds them inside the TTL and spends no
     search quota at all.
+
+    **A query that was PAID FOR reaches the database whatever the fetch phase then does.** The
+    rows used to be written only after `fetch_all` returned, so a package that died in the
+    fetch phase cached nothing and recorded no status — and then re-poisoned itself and burned
+    a fresh Brave query on every future run, permanently. `fetch_all` no longer raises, and
+    this is the second half of that guarantee: if it ever does again, the hits are still stored
+    with the failure recorded per source, and the retry costs zero quota.
     """
     fresh_after = datetime.now(UTC) - timedelta(days=settings.corroboration_search_ttl_days)
     async with ctx.session_factory() as session:
@@ -879,7 +889,12 @@ async def _search_sources(
         # Full traceback before it is reduced to a row, never swallowed.
         logger.exception("corroboration search failed for %s", package)
         return None, f"{type(exc).__name__}: {exc}"
-    sources = await fetcher.fetch_all(hits)
+    try:
+        sources = await fetcher.fetch_all(hits)
+    except Exception as exc:
+        logger.exception("corroboration fetch phase failed for %s", package)
+        detail = f"the fetch phase failed: {type(exc).__name__}: {exc}"
+        sources = [hit.with_error(detail) for hit in hits]
     async with ctx.session_factory() as session, session.begin():
         await store_search_results(session, package, sources, at=datetime.now(UTC))
     return sources, ""
@@ -897,11 +912,71 @@ async def _corroborate_and_store(
     budget: _QueryBudget,
     counts: dict[str, int],
 ) -> None:
-    """One package end to end, in its own transactions.
+    """One package end to end, in its own transactions. **Raises only for a job-level abort.**
 
     Per package rather than one transaction for the batch, for `_classify_and_store`'s reason:
     a database error on package 30 must not discard 29 verdicts that were already paid for.
+
+    This runs inside a `TaskGroup`, so anything that escapes here cancels every sibling — and a
+    measured run lost all six packages in a group, judge calls already paid for included, to a
+    single unhandled exception from one package's fetch phase. So every failure that is ABOUT
+    THIS PACKAGE becomes this package's own recorded status, at the phase it reached: before
+    the sources are in hand it is `search_failed` (a retry re-searches and spends a query),
+    after them it is `judge_failed` (a retry re-reads the cached rows and spends none).
+
+    Three exceptions still take the whole job down, unchanged and deliberately: `DeepSeekAuth`,
+    `DeepSeekBalance` and `DeepSeekBudget` are facts about the ACCOUNT rather than about this
+    package, exactly as `llm_stage` documents, and letting 499 more packages burn their budgets
+    against a dead account is not a diagnosis. A failure of the recovery write itself also
+    propagates: a database nothing can be written to is job-level too.
     """
+    # One element rather than a return value, because the phase has to survive the exception
+    # that ends the call.
+    phase = [CorroborationStatus.SEARCH_FAILED]
+    try:
+        await _corroborate_one(
+            ctx,
+            brave=brave,
+            fetcher=fetcher,
+            judge=judge,
+            package=package,
+            description=description,
+            settings=settings,
+            budget=budget,
+            counts=counts,
+            phase=phase,
+        )
+    except (DeepSeekAuthError, DeepSeekBalanceError, DeepSeekBudgetError):
+        raise
+    except Exception as exc:
+        logger.exception("corroboration failed for %s", package)
+        async with ctx.session_factory() as session, session.begin():
+            await record_failure(
+                session,
+                package,
+                description=description,
+                status=phase[0],
+                reason=f"{type(exc).__name__}: {exc}",
+                at=datetime.now(UTC),
+            )
+        counts[str(phase[0])] += 1
+
+
+async def _corroborate_one(
+    ctx: StageContext,
+    *,
+    brave: BraveClient,
+    fetcher: PageFetcher,
+    judge: DeepSeekClient,
+    package: str,
+    description: str,
+    settings: Settings,
+    budget: _QueryBudget,
+    counts: dict[str, int],
+    phase: list[CorroborationStatus],
+) -> None:
+    """The work `_corroborate_and_store` wraps. Every failure it does not turn into a value is
+    contained by that wrapper, which reads `phase` to decide what this package is recorded as."""
     sources, failure = await _search_sources(
         ctx, brave=brave, fetcher=fetcher, package=package, settings=settings, budget=budget
     )
@@ -918,6 +993,10 @@ async def _corroborate_and_store(
             )
         counts[str(CorroborationStatus.SEARCH_FAILED)] += 1
         return
+
+    # The sources are in hand and stored, so a failure past this line is free to retry: the
+    # cached rows answer the same query for `corroboration_search_ttl_days` at zero quota.
+    phase[0] = CorroborationStatus.JUDGE_FAILED
 
     if not sources:
         # Nothing to judge, so nothing is asked. Not a failure and not a model call: with zero
