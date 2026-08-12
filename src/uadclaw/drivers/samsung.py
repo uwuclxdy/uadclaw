@@ -46,13 +46,13 @@ every ciphertext byte, and a Samsung archive comes back `integrity_verified=True
 trusting bytes nobody vouched for. It is a CRC rather than a cryptographic digest — it catches
 a corrupt transfer, not a hostile one — which is the same standing Xiaomi's md5 has here.
 
-**What lands on disk is a Samsung factory zip, which `uadclaw.unpack` cannot yet open.** Its
-six members are `.tar.md5` archives (a tar with an md5 line appended) holding LZ4-framed
+**What lands on disk is a Samsung factory zip, and `uadclaw.unpack` opens it on magic alone.**
+Its six members are `.tar.md5` archives (a tar with an md5 line appended) holding LZ4-framed
 images — measured on `SM-S911U/XAA`: the AP member is 11,465,093,243 bytes of tar whose first
-entry is `boot.img.lz4`, magic `04 22 4d 18`. Neither tar nor LZ4 is in the dispatch table, so
-`acquire` succeeds and `unpack` refuses. That is a separate task against `uadclaw.unpack`, not
-something a driver may work around: dispatch is on the bytes, and inventing a Samsung-shaped
-path through the unpacker is exactly what the module forbids.
+entry is `boot.img.lz4`, magic `04 22 4d 18`. Both steps are in the dispatch table, taken from
+`ustar` at 257 and `04 22 4d 18` at 0, and this driver hands over a plain zip with no hint of
+what is inside it. Nothing here may grow a shortcut for that chain: dispatch is on the bytes,
+and a Samsung-shaped path through the unpacker is exactly what that module forbids.
 """
 
 import asyncio
