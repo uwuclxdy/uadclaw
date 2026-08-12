@@ -5,26 +5,23 @@
       UADCLAW_HEAVY_WORKDIR=/mnt/ssd-1/scratch/uadclaw-heavy \\
       uv run pytest -n0 -m heavy tests/test_samsung_fetch_heavy.py
 
-Separate from `test_driver_chain_heavy.py`, which drives one device per OEM all the way to
-merged facts, because Samsung **cannot get that far today** and the difference is the point:
+Separate from `test_driver_chain_heavy.py`, which drives one device per OEM against a real
+`uad_lists.json`, because Samsung's chain is two steps deeper than any of those and that
+difference is what this file is for:
 
     zip -> AP_*.tar.md5 (tar) -> *.img.lz4 (LZ4 frame) -> super.img -> lpunpack -> partitions
 
-`uadclaw.unpack` dispatches on magic and has no handler for tar or for an LZ4 frame, so the
-chain stops at the first step with `UnsupportedContainerError`. That is asserted below rather
-than described, so the day `unpack` learns those two formats this file goes RED and is the
-thing that tells the next task its seam moved.
+Proven here: everything `acquire` owns — the whole FUS handshake, an 11.5 GB streamed
+download, an in-place AES-128-ECB decrypt of every one of those bytes, the PKCS#7 strip — and
+then the whole way down to merged facts in Postgres. Only the transport is replaced: the
+local `.enc4` is streamed back as the response body, so the driver's own download loop,
+decryptor and rename all run over multi-GB bytes rather than over a buffer no production path
+ever produces.
 
-What IS proven here is everything `acquire` owns: the whole FUS handshake, an 11.5 GB
-streamed download, an in-place AES-128-ECB decrypt of every one of those bytes, the PKCS#7
-strip, and a plaintext that Python's own zip reader opens and walks. Only the transport is
-replaced — the local `.enc4` is streamed back as the response body, so the driver's own
-download loop, decryptor and rename all run over multi-GB bytes rather than over a buffer no
-production path ever produces.
-
-Every figure is measured (2026-08-11, `SM-S911U`/`XAA`, build `S911USQS8FZG1`) and asserted
-exactly. A decrypt that silently produced garbage yields a different digest, never an
-exception.
+Every figure is measured (`SM-S911U`/`XAA`, build `S911USQS8FZG1`: the archive 2026-08-11,
+the chain 2026-08-12) and asserted exactly. Neither half fails loudly on its own — a decrypt
+that produced garbage yields a different digest rather than an exception, and a chain that
+quietly stops extracting yields a smaller count rather than one.
 """
 
 import os
@@ -34,11 +31,22 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy import func, select
 
+from uadclaw import firmware as firmware_module
+from uadclaw import jobs as jobs_module
 from uadclaw.drivers.samsung import SamsungDriver
 from uadclaw.firmware import FirmwareRef
-from uadclaw.settings import Settings
-from uadclaw.unpack import UnsupportedContainerError, unpack_to_partitions
+from uadclaw.models import JobKind, PackageFact, PackageObservation
+from uadclaw.settings import Settings, get_settings
+from uadclaw.stages import (
+    ARTIFACTS_DIRNAME,
+    acquire_stage,
+    extract_facts_stage,
+    read_state,
+    unpack_stage,
+)
+from uadclaw.worker import StageContext
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -54,6 +62,26 @@ pytestmark = [
 MODEL = "SM-S911U"
 REGION = "XAA"
 BUILD = "S911USQS8FZG1_XAA"
+
+# What the whole chain yields, measured 2026-08-12 and asserted exactly. Every partition the
+# super carries is EROFS on this build, which is why `fsck.erofs` and not 7z is on the path,
+# and the last two come out of `HOME_CSC_` rather than the super at all — `CSC_` ships the
+# same two images and they are dropped as byte-identical duplicates.
+PARTITIONS = [
+    "odm",
+    "product",
+    "system",
+    "system_dlkm",
+    "system_ext",
+    "vendor",
+    "vendor_dlkm",
+    "prism",
+    "optics",
+]
+# Five of the nine yield no APK: `odm` is a 10-file stub here, `prism` and `optics` hold 397
+# and 72 entries of CSC data, and the two `_dlkm` partitions are kernel modules.
+APKS_BY_PARTITION = {"product": 79, "system": 407, "system_ext": 13, "vendor": 10}
+CHAIN = {"apks": 509, "artifacts": 1143, "packages": 491, "parse_failures": 0}
 
 # The encrypted archive FUS serves, and the plaintext it decrypts to. The two differ by the
 # 14 bytes of PKCS#7 padding stripped off the end.
@@ -78,7 +106,20 @@ MEMBERS = {
     ".tar.md5": 1847439483,
 }
 
-REQUIRED_FREE_BYTES = 24 * 1024**3
+# Measured 2026-08-12 on the run below, `du -sb` every 3 s: this scratch tree peaks at
+# 35,422,204,778 bytes, when the 11.57 GB decrypted archive, the LZ4-decoded `super.img`
+# (11.37 GB, still sparse) and the raw image `simg2img` writes from it (12.66 GB) are all on
+# disk at once. Deepest-peaking chain in the project by some way, and the reason the old 24 GB
+# figure — sized for the download and the decrypt alone — could not have run it.
+REQUIRED_FREE_BYTES = 44 * 1024**3
+
+TOOLCHAIN = ("7z", "fsck.erofs", "simg2img", "lpunpack")
+
+
+def _require_toolchain() -> None:
+    missing = [tool for tool in TOOLCHAIN if shutil.which(tool) is None]
+    if missing:
+        pytest.skip(f"needs the unpacking toolchain on PATH: {', '.join(missing)}")
 
 
 def _settings() -> Settings:
@@ -192,24 +233,64 @@ async def test_the_real_archive_decrypts_to_a_zip_the_stdlib_walks(tmp_path):
         assert zf.testzip() is None
 
 
-async def test_the_unpack_chain_stops_at_the_tar_members_this_repo_cannot_open(tmp_path):
-    """The task-11 verify line ("one full device end to end producing merged facts") is NOT
-    met for Samsung, and this is where it stops. Delete this test when `unpack` learns tar and
-    LZ4; until then it is the pin that keeps the gap from being reported as closed.
+async def test_samsung_sm_s911u_end_to_end(db_env, db_session_factory, monkeypatch, tmp_path):
+    """The task-11 verify line for Samsung: one full device to merged facts, through the same
+    stage handlers the worker runs, with only the transport replaced.
+
+    `filter` and `rule_ladder` are deliberately not here — they need a real `uad_lists.json`,
+    which `test_driver_chain_heavy.py` owns for the three OEMs that have one on this box.
+    What this pins is everything Samsung alone reaches: the FUS handshake, the decrypt, and
+    the two container steps no other OEM takes.
     """
+    _require_toolchain()
     enc4 = _local_enc4()
     work = _workdir()
-    driver = SamsungDriver(_settings(), client=_client(enc4))
-    ref = FirmwareRef(
-        driver="samsung",
-        device=MODEL,
-        build=BUILD,
-        url=f"https://fota-cloud-dn.ospserver.net/firmware/{REGION}/{MODEL}/version.xml",
+    monkeypatch.setenv("SAMSUNG_MODELS", MODEL)
+    monkeypatch.setenv("SAMSUNG_REGIONS", REGION)
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        firmware_module,
+        "_driver_factories",
+        lambda: {"samsung": lambda settings: SamsungDriver(settings, client=_client(enc4))},
     )
-    archive = await driver.fetch(ref, work)
 
-    with pytest.raises(UnsupportedContainerError) as excinfo:
-        await unpack_to_partitions(archive.path, work / "unpack", settings=_settings())
+    async with db_session_factory() as session, session.begin():
+        job = await jobs_module.create_job(
+            session,
+            kind=JobKind.FIRMWARE_ANALYSIS.value,
+            params={"driver": "samsung", "device": MODEL, "build": BUILD},
+        )
+        job_id = job.id
+    ctx = StageContext(
+        job_id=job_id, attempt=1, scratch_dir=work, session_factory=db_session_factory
+    )
 
-    assert "no readable .img member" in str(excinfo.value)
-    assert all(name.endswith(".tar.md5") for name in MEMBERS)
+    await acquire_stage(ctx)
+    await unpack_stage(ctx)
+    await extract_facts_stage(ctx)
+
+    state = read_state(work)
+    assert state.integrity_verified is True
+    assert state.archive_sha256 == PLAINTEXT_SHA256
+    assert state.partitions == PARTITIONS
+    assert {
+        "apks": state.apk_count,
+        "artifacts": state.artifact_count,
+        "packages": state.package_count,
+        "parse_failures": state.parse_failed_count,
+    } == CHAIN
+    async with db_session_factory() as session:
+        rows = (
+            await session.execute(
+                select(PackageObservation.partition, func.count()).group_by(
+                    PackageObservation.partition
+                )
+            )
+        ).all()
+        merged = (await session.execute(select(func.count()).select_from(PackageFact))).scalar()
+    assert {partition: count for partition, count in rows} == APKS_BY_PARTITION
+    assert merged == CHAIN["packages"]
+    # Facts-only retention: 23 GB of archive, super and partition images, all gone.
+    assert state.archive_path is None
+    assert not list((work / "unpack").rglob("*.img"))
+    assert not list((work / ARTIFACTS_DIRNAME).rglob("*.apk"))

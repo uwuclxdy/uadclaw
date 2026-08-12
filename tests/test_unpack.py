@@ -6,12 +6,15 @@ multi-GB image in `test_unpack_chain_heavy.py`.
 """
 
 import asyncio
+import io
 import shutil
 import struct
 import subprocess
+import tarfile
 import zipfile
 from pathlib import Path
 
+import lz4.frame
 import pytest
 
 from uadclaw import unpack as unpack_module
@@ -19,9 +22,11 @@ from uadclaw.settings import Settings
 from uadclaw.unpack import (
     ContainerFormat,
     DuplicatePartitionError,
+    NothingExtractedError,
     PartitionImage,
     UnpackError,
     UnsafePathError,
+    _extract_tar_partitions,
     _extract_zip_member,
     _harvest_erofs_staging,
     _sparsechunk_sets,
@@ -65,6 +70,15 @@ def write_at(path, *placements: tuple[int, bytes], size: int = 8192):
     return path
 
 
+def write_bytes(path: Path, payload: bytes) -> Path:
+    path.write_bytes(payload)
+    return path
+
+
+def write_tar(path: Path, entries: list[tuple[str, bytes]]) -> Path:
+    return write_bytes(path, tar_bytes(entries))
+
+
 def test_detects_every_container_by_magic_not_by_extension(tmp_path):
     zip_path = tmp_path / "factory.bin"
     with zipfile.ZipFile(zip_path, "w") as zf:
@@ -89,6 +103,15 @@ def test_detects_every_container_by_magic_not_by_extension(tmp_path):
             ContainerFormat.PAYLOAD_BIN,
         ),
         "factory.bin": (zip_path, ContainerFormat.ZIP),
+        # Samsung's two, both named to say the opposite of what they hold.
+        "AP_S911USQS8FZG1.md5": (
+            write_tar(tmp_path / "AP_S911USQS8FZG1.md5", [("super.img.lz4", b"\x00" * 32)]),
+            ContainerFormat.TAR,
+        ),
+        "vendor.img": (
+            write_bytes(tmp_path / "vendor.img", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT))),
+            ContainerFormat.LZ4_FRAME,
+        ),
         "logical.bin": (
             write_at(tmp_path / "logical.bin", (0, b"7z\xbc\xaf\x27\x1c")),
             ContainerFormat.SEVEN_ZIP,
@@ -220,6 +243,273 @@ async def test_pixel_factory_layout_unpacks_without_lpunpack(tmp_path):
 
     assert sorted(p.name for p in partitions) == ["product", "system"]
     assert {p.fmt for p in partitions} == {ContainerFormat.EXT4}
+
+
+# --- Samsung's two extra steps: zip -> tar -> LZ4 frame -> sparse -> super -> partition.
+# Every fixture below is named to LIE about what it holds, because the whole point is that
+# nothing in the chain reads a name to decide a format. ---------------------------------------
+
+
+# Spelled out rather than imported: a fixture built by iterating the set under test shrinks
+# with it, so dropping a name would silently stop being tested. The equality assertion below
+# is what makes a name added to the module fail here until it is pinned too.
+NO_APP_PARTITIONS = (
+    "userdata",
+    "cache",
+    "metadata",
+    "persist",
+    "omr",
+    "misc",
+    "vm-bootsys",
+    "dspso",
+)
+
+
+def test_the_no_app_partition_set_is_exactly_what_the_fixtures_below_pin():
+    assert set(NO_APP_PARTITIONS) == unpack_module._NO_APP_PARTITIONS
+
+
+def tar_bytes(entries: list[tuple[str, bytes]]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name, payload in entries:
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+    return buffer.getvalue()
+
+
+def samsung_shaped_zip(path: Path, members: list[tuple[str, bytes]]) -> Path:
+    """Deflated, like the real decrypted archive: not one member ends in `.img` or `.zip`, so
+    the name-shaped scan claims nothing and every member has to be opened on its magic."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, payload in members:
+            zf.writestr(name, payload)
+    return path
+
+
+def test_a_tar_and_an_lz4_frame_are_detected_from_their_magic(tmp_path):
+    """`.tar.md5` is a plain tar with an md5 line appended, so its magic is `ustar` at 257 —
+    257 bytes in, where no extension can be seen."""
+    tar_path = tmp_path / "AP_S911USQS8FZG1_meta_OS16.tar.md5"
+    tar_path.write_bytes(tar_bytes([("boot.img.lz4", b"\x00" * 32)]))
+    frame = tmp_path / "super.img"
+    frame.write_bytes(lz4.frame.compress(magic_blob(EXT4_MAGIC_AT)))
+
+    assert detect_format(tar_path) is ContainerFormat.TAR
+    assert detect_format(frame) is ContainerFormat.LZ4_FRAME
+
+
+async def test_a_samsung_shaped_zip_of_tars_reaches_the_partition_images(tmp_path):
+    """The measured layout (`SM-S911U`/`XAA`, 2026-08-12): six `.tar.md5` members, every image
+    inside them `.img.lz4`, and a 1.2 GB `meta-data/fota.zip` sitting next to the partitions
+    in the `AP_` tar. Recursing into that zip would unpack a whole second OTA package."""
+    ext4 = magic_blob(EXT4_MAGIC_AT)
+    erofs = magic_blob(EROFS_MAGIC_AT)
+    archive = samsung_shaped_zip(
+        tmp_path / "samsung-SM-S911U-S911USQS8FZG1_XAA.zip",
+        [
+            (
+                "AP_S911USQS8FZG1_meta_OS16.tar.md5",
+                tar_bytes(
+                    [
+                        ("boot.img.lz4", lz4.frame.compress(magic_blob())),
+                        ("system.img.lz4", lz4.frame.compress(ext4)),
+                        ("odm.img.lz4", lz4.frame.compress(erofs)),
+                        ("meta-data/fota.zip", b"PK\x03\x04" + b"\x00" * 256),
+                        # Every member of `_NO_APP_PARTITIONS`, each a real ext4 image, so the
+                        # set is pinned as a set rather than at the one name a fixture needed.
+                        *(
+                            (f"{skipped}.img.lz4", lz4.frame.compress(ext4))
+                            for skipped in NO_APP_PARTITIONS
+                        ),
+                    ]
+                ),
+            ),
+            (
+                "USERDATA_VZW_S911USQS8FZG1.tar.md5",
+                tar_bytes([("userdata.img.lz4", lz4.frame.compress(ext4))]),
+            ),
+        ],
+    )
+
+    partitions = await unpack_to_partitions(archive, tmp_path / "work", settings=make_settings())
+
+    assert sorted((p.name, str(p.fmt)) for p in partitions) == [
+        ("odm", "erofs"),
+        ("system", "ext4"),
+    ]
+    # `boot` is a skipped non-filesystem, every name in `NO_APP_PARTITIONS` is a real ext4
+    # image with no app on it, and the nested zip is not a partition image at all.
+    assert not (tmp_path / "work" / "tar" / "fota.zip").exists()
+
+
+async def test_a_zip_member_that_is_an_lz4_frame_is_decoded_on_its_own(tmp_path):
+    """The chain's other entry into LZ4: a member the name-shaped scan claims as an `.img`,
+    whose bytes turn out to be a frame. It reaches `_unpack` directly rather than through the
+    tar walk, so the dispatch table needs the format as well as the tar reader."""
+    archive = tmp_path / "firmware.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("system.img", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT)))
+
+    partitions = await unpack_to_partitions(archive, tmp_path / "work", settings=make_settings())
+
+    assert [(p.name, str(p.fmt)) for p in partitions] == [("system", "ext4")]
+
+
+def test_neither_the_lz4_suffix_nor_its_absence_decides_anything(tmp_path):
+    """Both directions of the same rule. `vendor.img` wears no `.lz4` and is decoded because
+    its bytes are a frame; `system.img.lz4` wears one and is taken verbatim because its bytes
+    are not. The second keeps `.img` in its partition name, which is the honest outcome of
+    never consulting the suffix: the name is a label, the magic is the decision.
+    """
+    framed = magic_blob(EXT4_MAGIC_AT)
+    verbatim = magic_blob(EXT4_MAGIC_AT, size=9000)
+    stream = io.BytesIO(
+        tar_bytes([("vendor.img", lz4.frame.compress(framed)), ("system.img.lz4", verbatim)])
+    )
+
+    found = _extract_tar_partitions(
+        stream,
+        tmp_path / "out",
+        root=tmp_path,
+        context="test",
+        max_bytes=1 << 20,
+        seen={},
+    )
+
+    assert [name for name, _path in found] == ["vendor", "system.img"]
+    assert [path.read_bytes() for _name, path in found] == [framed, verbatim]
+
+
+async def test_one_image_shipped_in_two_tars_resolves_instead_of_colliding(tmp_path):
+    """`CSC_` and `HOME_CSC_` both carry `prism` and `optics`, byte-identical on the measured
+    build. Two partitions claiming one identity is normally refused, and rightly — but there
+    is nothing to guess between two copies of the same bytes."""
+    prism = magic_blob(EXT4_MAGIC_AT)
+    csc = tar_bytes([("prism.img.lz4", lz4.frame.compress(prism))])
+    archive = samsung_shaped_zip(
+        tmp_path / "fw.zip",
+        [("CSC_OYN_S911UOYN8FZG1.tar.md5", csc), ("HOME_CSC_OYN_S911UOYN8FZG1.tar.md5", csc)],
+    )
+
+    partitions = await unpack_to_partitions(archive, tmp_path / "work", settings=make_settings())
+
+    assert [p.name for p in partitions] == ["prism"]
+
+
+async def test_two_tars_carrying_DIFFERENT_images_under_one_name_are_still_refused(tmp_path):
+    """The dedupe above must not become "the second copy is always droppable": two partitions
+    that really disagree are the case `DuplicatePartitionError` exists for."""
+    archive = samsung_shaped_zip(
+        tmp_path / "fw.zip",
+        [
+            (
+                "CSC_OYN.tar.md5",
+                tar_bytes([("prism.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT)))]),
+            ),
+            (
+                "HOME_CSC_OYN.tar.md5",
+                tar_bytes(
+                    [("prism.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT, size=9000)))]
+                ),
+            ),
+        ],
+    )
+
+    with pytest.raises(DuplicatePartitionError):
+        await unpack_to_partitions(archive, tmp_path / "work", settings=make_settings())
+
+
+def test_two_entries_with_one_name_in_a_tar_do_not_overwrite_each_other(tmp_path):
+    stream = io.BytesIO(
+        tar_bytes(
+            [
+                ("a/system.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT))),
+                ("b/system.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT, size=9000))),
+            ]
+        )
+    )
+
+    found = _extract_tar_partitions(
+        stream, tmp_path / "out", root=tmp_path, context="test", max_bytes=1 << 20, seen={}
+    )
+
+    assert len({path for _name, path in found}) == 2
+    assert all(path.is_file() for _name, path in found)
+
+
+def test_two_different_partitions_holding_the_same_bytes_stay_two_partitions(tmp_path):
+    """The dedupe is keyed on the partition AND its content, not content alone: two
+    near-empty images of one size hashing the same is not an exotic shape, and collapsing
+    them would lose a partition with nothing raised."""
+    same = lz4.frame.compress(magic_blob(EXT4_MAGIC_AT))
+    stream = io.BytesIO(tar_bytes([("optics.img.lz4", same), ("prism.img.lz4", same)]))
+
+    found = _extract_tar_partitions(
+        stream, tmp_path / "out", root=tmp_path, context="test", max_bytes=1 << 20, seen={}
+    )
+
+    assert [name for name, _path in found] == ["optics", "prism"]
+
+
+@pytest.mark.parametrize("entry", ["../../pwned.img", "/etc/passwd.img"])
+def test_a_tar_entry_name_that_would_escape_is_refused(tmp_path, entry):
+    """Entry names come out of an archive downloaded off the internet, exactly like a zip
+    member's or a GPT partition's, and get the same treatment."""
+    stream = io.BytesIO(tar_bytes([(entry, lz4.frame.compress(magic_blob(EXT4_MAGIC_AT)))]))
+
+    with pytest.raises(UnsafePathError):
+        _extract_tar_partitions(
+            stream, tmp_path / "out", root=tmp_path, context="test", max_bytes=1 << 20, seen={}
+        )
+
+
+def test_an_lz4_entry_that_decodes_past_the_ceiling_is_a_named_error(tmp_path):
+    """An LZ4 frame declares no output size anywhere in its header, so the only bound on what
+    a hostile entry expands to is what is counted on the way out."""
+    stream = io.BytesIO(
+        tar_bytes([("system.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT, size=1 << 20)))])
+    )
+
+    with pytest.raises(UnpackError, match="ceiling"):
+        _extract_tar_partitions(
+            stream, tmp_path / "out", root=tmp_path, context="test", max_bytes=4096, seen={}
+        )
+
+
+async def test_a_tar_holding_no_partition_image_is_a_named_error(tmp_path):
+    """`NON-HLOS.bin` is on no skip list, so this reaches the gate that classifies what an
+    entry DECODED to rather than the one that reads its name."""
+    path = tmp_path / "CP_S911USQS8FZG1.tar.md5"
+    path.write_bytes(tar_bytes([("NON-HLOS.bin.lz4", lz4.frame.compress(magic_blob()))]))
+
+    with pytest.raises(NothingExtractedError):
+        await unpack_to_partitions(path, tmp_path / "work", settings=make_settings())
+
+
+def test_an_entry_that_decodes_to_an_archive_is_not_a_partition_image(tmp_path):
+    """The measured trap: the `AP_` tar carries a 1.2 GB `meta-data/fota.zip` beside the
+    partitions. Its raw bytes give it away here, but an OEM compressing the same thing would
+    pass the first gate, so what an entry decodes TO is checked as well as what it arrives as.
+    """
+    nested = io.BytesIO()
+    with zipfile.ZipFile(nested, "w") as zf:
+        zf.writestr("payload.bin", b"CrAU" + b"\x00" * 64)
+    stream = io.BytesIO(
+        tar_bytes(
+            [
+                ("meta-data/fota.zip.lz4", lz4.frame.compress(nested.getvalue())),
+                ("system.img.lz4", lz4.frame.compress(magic_blob(EXT4_MAGIC_AT))),
+            ]
+        )
+    )
+
+    found = _extract_tar_partitions(
+        stream, tmp_path / "out", root=tmp_path, context="test", max_bytes=1 << 20, seen={}
+    )
+
+    assert [name for name, _path in found] == ["system"]
 
 
 needs_7z = pytest.mark.skipif(shutil.which("7z") is None, reason="needs 7-Zip >= 24 on PATH")
@@ -575,6 +865,34 @@ async def test_a_partition_that_never_carries_apps_may_be_empty(tmp_path, monkey
         {"system": ["system/priv-app/A/A.apk"], "vendor_dlkm": ["lib/modules/x.ko"]},
     )
     partitions = [_image(tmp_path, "system"), _image(tmp_path, "vendor_dlkm")]
+
+    artifacts = await extract_artifacts(partitions, tmp_path / "out")
+
+    assert [artifact.image_path for artifact in artifacts] == ["system/priv-app/A/A.apk"]
+
+
+# Spelled out rather than imported, for the same reason `NO_APP_PARTITIONS` above is: a
+# fixture derived from the set under test shrinks with it.
+ALLOWED_EMPTY = ("system_other", "cache", "metadata", "userdata", "prism", "optics", "odm")
+
+
+def test_the_allowed_empty_set_is_exactly_what_the_test_below_pins():
+    assert set(ALLOWED_EMPTY) == unpack_module.PARTITIONS_ALLOWED_EMPTY
+
+
+@pytest.mark.parametrize("partition", ALLOWED_EMPTY)
+async def test_every_allowed_empty_partition_really_is_allowed_to_be_empty(
+    tmp_path, monkeypatch, partition
+):
+    """`odm` is the entry that costs something: it holds 4 APKs on Nothing's FroggerPro and is
+    a 10-file stub on Samsung's SM-S911U, so listing it buys Samsung a job that finishes and
+    gives up the guard on Nothing's odm. Pinned here so the trade is visible rather than
+    reachable only through a multi-GB heavy run."""
+    _stub_extraction(
+        monkeypatch,
+        {"system": ["system/priv-app/A/A.apk"], partition: ["etc/build.prop", "etc/passwd"]},
+    )
+    partitions = [_image(tmp_path, "system"), _image(tmp_path, partition)]
 
     artifacts = await extract_artifacts(partitions, tmp_path / "out")
 
