@@ -21,7 +21,12 @@ from sqlalchemy import select, text
 
 from uadclaw import triagestore
 from uadclaw.classify import UNKNOWN, Classification, Confidence, UadList
-from uadclaw.classifystore import BelowFloorError, store_classification
+from uadclaw.classifystore import (
+    BelowFloorError,
+    park_package,
+    store_classification,
+    store_human_edit,
+)
 from uadclaw.facts import ApkFacts
 from uadclaw.factstore import store_device_facts
 from uadclaw.ladder import Removal
@@ -789,7 +794,24 @@ async def test_the_card_names_the_evidence_that_is_missing(db_env, triage_db):
     async with triage_db() as session:
         card = await triagestore.load_candidate(session, "com.example.one", upstream=UPSTREAM)
 
-    assert "corroboration" in card.missing
+    assert "sources" in card.missing
+
+
+# --- icons -----------------------------------------------
+
+
+async def test_a_package_with_no_stored_icon_says_so_on_the_row_and_on_the_card(db_env, triage_db):
+    """`has_icon` is what the templates branch on, so the screen never probes the icon route
+    to find out whether there is anything behind it. Measured here against the column being
+    absent, which is this checkout's state: the answer is False and nothing raises."""
+    await seed(triage_db, {"com.example.one": 1})
+
+    async with triage_db() as session:
+        rows = await triagestore.load_rows(session)
+        card = await triagestore.load_candidate(session, "com.example.one", upstream=UPSTREAM)
+
+    assert [row.has_icon for row in rows] == [False]
+    assert card.has_icon is False
 
 
 async def test_the_card_refuses_a_package_with_no_proposal(db_env, triage_db):
@@ -801,3 +823,128 @@ async def test_the_card_refuses_a_package_with_no_proposal(db_env, triage_db):
 async def _rows(session_factory):
     async with session_factory() as session:
         return await triagestore.load_queue(session, view="queue")
+
+
+# --- a declaration and the value it describes ------------------------------------------------
+
+
+async def declare_unknown(session_factory, package: str) -> None:
+    async with session_factory() as session, session.begin():
+        await store_human_edit(session, package, edits={"description": UNKNOWN}, at=NOW)
+
+
+def assert_declaration_matches_description(row: PackageClassification) -> None:
+    """`description == "unknown"` iff `"description" in unknown_fields`, on every row.
+
+    One assertion rather than one per writer: the two halves say the same thing about the same
+    field, and a row carrying one without the other asserts a contradiction in whichever
+    direction it is missing. A description reading `unknown` with nothing declaring it is the
+    expensive direction — that string ships into `uad_lists.json` as if a reviewer wrote it.
+    """
+    declared = "description" in (row.unknown_fields or [])
+    assert declared == (row.description == UNKNOWN), (
+        f"description={row.description!r} but unknown_fields={row.unknown_fields!r}"
+    )
+
+
+async def test_a_declared_unknown_description_keeps_its_declaration_across_a_model_re_run(
+    db_env, triage_db
+):
+    """The declaration is half of a `human:` value and has to travel with the other half.
+
+    `_preserved` carries `description` because provenance says `human:`, and `unknown_fields`
+    is not in `HUMAN_OWNED_CANDIDATES` — so the model's fresh list overwrote it and the row
+    was left reading `unknown` with nothing saying it was declared.
+    """
+    await seed(triage_db, {"com.example.one": 1})
+    await declare_unknown(triage_db, "com.example.one")
+
+    async with triage_db() as session, session.begin():
+        await store_classification(
+            session,
+            proposal("com.example.one", bundle="c" * 64),
+            model=MODEL,
+            thinking=True,
+            usage={},
+            attempts=1,
+            at=NOW,
+        )
+
+    async with triage_db() as session:
+        row = await session.get(PackageClassification, "com.example.one")
+    assert row is not None
+    assert row.description == UNKNOWN, "the human value itself is supposed to survive"
+    assert row.unknown_fields == ["description"]
+    assert_declaration_matches_description(row)
+
+
+async def test_a_declared_unknown_description_keeps_its_declaration_across_a_park(
+    db_env, triage_db
+):
+    """The second writer. A park against a NEW bundle clears the answer and then puts the
+    preserved human half back, so it takes the same route and drops the same declaration."""
+    await seed(triage_db, {"com.example.one": 1})
+    await declare_unknown(triage_db, "com.example.one")
+
+    async with triage_db() as session, session.begin():
+        await park_package(
+            session,
+            "com.example.one",
+            bundle_sha256="d" * 64,
+            model=MODEL,
+            thinking=True,
+            reason="removal: answered below the floor three times",
+            usage={},
+            attempts=3,
+            at=NOW,
+        )
+
+    async with triage_db() as session:
+        row = await session.get(PackageClassification, "com.example.one")
+    assert row is not None
+    assert row.description == UNKNOWN
+    assert row.unknown_fields == ["description"]
+    assert_declaration_matches_description(row)
+
+
+async def test_a_human_description_takes_the_model_s_declaration_off_the_row(db_env, triage_db):
+    """The other direction, and the one nobody would think to look for: a reviewer writes a
+    real description over a model answer that declared the field unknown. Preserving their
+    words while keeping the model's declaration asserts the same contradiction backwards."""
+    await seed(triage_db, {"com.example.one": 1})
+    async with triage_db() as session, session.begin():
+        await store_human_edit(
+            session,
+            "com.example.one",
+            edits={"description": "Notes application. Removing it loses locally stored notes."},
+            at=NOW,
+        )
+
+    async with triage_db() as session, session.begin():
+        declared = proposal("com.example.one", bundle="e" * 64)
+        await store_classification(
+            session,
+            Classification(
+                package=declared.package,
+                bundle_sha256=declared.bundle_sha256,
+                description=UNKNOWN,
+                list=declared.list,
+                removal=declared.removal,
+                confidence=declared.confidence,
+                unknown_fields=("description",),
+                reasoning_brief=declared.reasoning_brief,
+                provenance=declared.provenance,
+            ),
+            model=MODEL,
+            thinking=True,
+            usage={},
+            attempts=1,
+            at=NOW,
+        )
+
+    async with triage_db() as session:
+        row = await session.get(PackageClassification, "com.example.one")
+    assert row is not None
+    assert row.description is not None and row.description.startswith("Notes application")
+    assert row.unknown_fields == []
+    assert_declaration_matches_description(row)

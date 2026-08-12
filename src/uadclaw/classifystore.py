@@ -41,7 +41,7 @@ from uadclaw.bundle import PackageIdentity
 # literal upstream maintainer request on PR #1180 — so both writers meet the same description
 # rules, and a second spelling of a rule somebody else's reviewer enforces is worse than the
 # underscore. Making it public belongs to `classify.py`, which this task does not own.
-from uadclaw.classify import Classification, Confidence, UadList, _check_description
+from uadclaw.classify import UNKNOWN, Classification, Confidence, UadList, _check_description
 from uadclaw.ladder import Removal, danger_rank
 from uadclaw.models import PackageAnalysis, PackageClassification, PackageFact
 
@@ -236,6 +236,22 @@ async def _preserved(
                 superseded[field] = (f"{SUPERSEDED_BY} {owner} {value}", refusal)
                 continue
         keep[column] = value
+    if "description" in keep:
+        # The declaration travels with the value it describes, because it IS half of that
+        # value: `unknown_fields` is not a field a human owns on its own, so it is not in
+        # `HUMAN_OWNED_CANDIDATES` and a re-run wrote the model's fresh list over it. That
+        # left a row whose description read `unknown` with nothing declaring it — the exact
+        # contradiction `store_human_edit` refuses to write, arriving by the back door, and
+        # `description` is what ships into `uad_lists.json`. Derived from the kept value
+        # rather than copied from the old row, so it is right in both directions: a human who
+        # wrote real words over a model's `unknown` takes that declaration OFF.
+        others = [
+            field
+            for field in (existing.unknown_fields or [])
+            if isinstance(field, str) and field != "description"
+        ]
+        declared = ["description"] if keep["description"] == UNKNOWN else []
+        keep["unknown_fields"] = sorted(others + declared)
     if keep:
         # Only the human-owned entries survive in the map; the rest is rewritten by the
         # caller's fresh provenance, or a stale model id would outlive the model. A superseded
@@ -385,7 +401,12 @@ def _validated_edit(field: str, value: str) -> str:
     through the same checks a model answer does — see the import comment at the top.
     """
     if field == "description":
-        _check_description(value, unknown_fields=())
+        # The sentinel is handed to the SAME check rather than skipping it, so what a
+        # declared-unknown description may be is decided in one place for both writers: the
+        # check refuses `unknown` as a hedge attached to an invented description, and the
+        # message a reviewer gets for a too-short one names this declaration as the way out.
+        declared = ("description",) if value == UNKNOWN else ()
+        _check_description(value, unknown_fields=declared)
         return value
     if field == "list":
         return str(UadList(value))
@@ -466,10 +487,12 @@ async def store_human_edit(
     values["provenance"] = provenance
     if "description" in changed:
         # A row carrying a written description while still declaring it unknown asserts two
-        # contradictory things, and the `unknown` one is the model's, not the reviewer's.
-        values["unknown_fields"] = [
-            field for field in (existing.unknown_fields or []) if field != "description"
-        ]
+        # contradictory things, and the `unknown` one is the model's, not the reviewer's. A
+        # reviewer writing the sentinel is that same statement the other way round, and the
+        # declaration is the one `_check_description` names when it refuses a short one.
+        kept = [field for field in (existing.unknown_fields or []) if field != "description"]
+        declared = changed["description"]["to"] == UNKNOWN
+        values["unknown_fields"] = sorted({*kept, "description"}) if declared else kept
     # The NOT NULL columns the INSERT half of the upsert needs. The row exists — this function
     # refuses above when it does not — so the UPDATE half is what runs and these write back
     # what is already there.

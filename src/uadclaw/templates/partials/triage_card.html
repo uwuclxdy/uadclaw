@@ -1,37 +1,57 @@
-{# One candidate. Everything a reviewer needs to answer "does this ship", in the order they
-   need it: what it is, what the model said, what pins it, what backs it up, what it looks
-   like next to entries upstream already carries.
+{# The decide column: what the reviewer acts on, in the order they act. What it is, what
+   needs a different decision, the verdict controls, the edit form, then the answer being
+   voted on and the floor under it. Everything that only BACKS a decision is the evidence
+   column beside this one.
 
    Nothing here is `|safe`. Package names, labels and manifest strings come out of downloaded
    firmware and titles come off the open web. #}
+{% from "partials/pkg_icon.html" import pkg_icon %}
 {% set c = board.candidate %}
 
 <article class="card" style="margin-bottom:var(--space-4)">
-  <div class="card-header" style="align-items:flex-start">
-    <div style="min-width:0">
-      <div class="card-title" style="word-break:break-all">{{ c.package }}</div>
+  {# Wraps rather than squeezing: on a phone the badges and the name shared one row, the name
+     column collapsed to about a character wide, and `overflow-wrap` then broke the package
+     name one letter per line. #}
+  <div class="card-header" style="align-items:flex-start;gap:var(--space-3);flex-wrap:wrap">
+    {# The card title beside it is the package name, so the icon is decorative. #}
+    {{ pkg_icon(c.package, c.has_icon, small=false) }}
+    <div style="min-width:180px;flex:1">
+      {# `anywhere` rather than `break-all`: a package name is dotted, and breaking only when
+         the line runs out puts the split at a dot instead of mid-word. #}
+      <div class="card-title" style="overflow-wrap:anywhere">{{ c.package }}</div>
       <div class="card-subtitle">{{ c.device_count }} device{{ "" if c.device_count == 1 else "s" }} · {{ c.model }} · bundle {{ c.bundle_sha256[:12] }}</div>
     </div>
-    <div style="display:flex;gap:var(--space-1);flex-wrap:wrap;justify-content:flex-end">
-      {% if c.floor %}<span class="tag tag-accent">floor {{ c.floor|lower }}</span>{% endif %}
-      {% if c.removal %}<span class="tag tag-default">removal {{ c.removal|lower }}</span>{% endif %}
-      {% if c.confidence %}<span class="tag tag-default">{{ c.confidence }} confidence</span>{% endif %}
-      {% if c.corroboration == "corroborated" %}
-        <span class="tag tag-success">corroborated</span>
-      {% elif c.corroboration %}
-        <span class="tag tag-warning">{{ c.corroboration.replace("_", " ") }}</span>
-      {% else %}
-        <span class="tag tag-warning">not corroborated</span>
-      {% endif %}
-      {% if c.has_conflict %}<span class="tag tag-info">conflict</span>{% endif %}
-      {% if c.parked %}<span class="tag tag-danger">parked</span>{% endif %}
+    {# Three at most, and each one either IS the decision or asks for a different one. The
+       floor is a row in `minimum rating` below, the confidence a row in the answer table,
+       and the source count a badge on the section that lists the sources. #}
+    <div class="badge-row" style="justify-content:flex-end">
+      {% if c.removal %}<span class="tag tag-default" title="the rating this entry would ship with">removal {{ c.removal|lower }}</span>{% endif %}
+      {% if c.parked %}<span class="tag tag-danger" title="deepseek could not answer this one">no answer</span>{% endif %}
+      {% if c.has_conflict %}<span class="tag tag-info" title="devices disagree on a fact">conflict</span>{% endif %}
     </div>
   </div>
+
+  {# Directly under the badges, because a badge is a non-focusable `<span>` and nothing else
+     on the card says an explanation exists. One `<details>` and one tab stop for the whole
+     set; focusable badges would cost three per card and two per rail row, over a queue as
+     long as the corpus. The stop lands before the verdict buttons, which the keyboard path
+     reaches by `a`/`d`/`r`/`e` rather than by Tab. #}
+  <details id="triage-badge-help" style="margin-bottom:var(--space-3)">
+    <summary class="label" style="cursor:pointer">what the badges mean</summary>
+    <dl style="margin-top:var(--space-3);font-size:var(--text-sm);color:var(--text-dim);display:grid;gap:var(--space-2)">
+      {% for badge, meaning in badge_meanings %}
+        <div style="display:flex;gap:var(--space-2);align-items:baseline">
+          <dt><span class="tag tag-default">{{ badge }}</span></dt>
+          <dd>{{ meaning }}</dd>
+        </div>
+      {% endfor %}
+    </dl>
+  </details>
 
   {% if c.parked %}
     <div class="callout callout-danger" style="margin-bottom:var(--space-4)">
       <div class="callout-body">
-        <span class="callout-title">the model could not answer this one</span>
+        <span class="callout-title">deepseek gave no answer</span>
         {{ c.parked_reason }}
       </div>
     </div>
@@ -43,15 +63,9 @@
        says nothing about the package. #}
     <div class="callout callout-warning" style="margin-bottom:var(--space-4)">
       <div class="callout-body">
-        <span class="callout-title">deciding without</span>
-        {{ c.missing|join(", ") }}. that is common rather than broken, and it is what you are deciding without.
+        <span class="callout-title">missing</span>
+        {{ c.missing|join(", ") }}. common rather than broken.
       </div>
-    </div>
-  {% endif %}
-
-  {% if board.upstream_error %}
-    <div class="callout callout-warning" style="margin-bottom:var(--space-4)">
-      <div class="callout-body">{{ board.upstream_error }}</div>
     </div>
   {% endif %}
 
@@ -65,29 +79,43 @@
         <input type="hidden" name="view" value="{{ board.view }}">
         {# `hx-disabled-elt` is the whole loading treatment on purpose: these round-trips are
            local and land well inside the 1s band, where a spinner reads as a glitch. The
-           control still answers the click and a second press cannot send the action twice. #}
-        <button class="btn {{ variant }}" type="submit" data-key="{{ key }}" hx-disabled-elt="this">
-          {{ label }} <kbd>{{ key }}</kbd>
+           control still answers the click and a second press cannot send the action twice.
+
+           Reopen gives its key up while an undo banner is up, and the banner takes it. That
+           keeps ONE control per key, which is the invariant
+           `test_no_two_controls_answer_to_the_same_key` exists for, and it puts `u` on the
+           package the reviewer just acted on rather than on the one the board advanced to.
+           The card's button is still there and still clickable; it just is not what `u`
+           means for those few seconds. #}
+        {% set yields_key = board.undo and action == "reopen" %}
+        <button class="btn {{ variant }}" type="submit"
+                {% if not yields_key %}data-key="{{ key }}"{% endif %} hx-disabled-elt="this">
+          {{ label }}{% if not yields_key %} <kbd>{{ key }}</kbd>{% endif %}
         </button>
       </form>
     {% endfor %}
 
     <form method="post" action="/triage/decide"
           hx-post="/triage/decide" hx-target="#triage-board" hx-swap="outerHTML"
-          style="margin:0;display:flex;gap:var(--space-2);align-items:center;flex:1;min-width:280px">
+          style="margin:0;display:flex;gap:var(--space-2);align-items:center;flex:1;min-width:240px">
       <input type="hidden" name="package" value="{{ c.package }}">
       <input type="hidden" name="action" value="reject">
       <input type="hidden" name="view" value="{{ board.view }}">
       <input class="input" type="text" name="reason" id="triage-reject-reason"
              data-key="{{ reject_key }}" data-focus="true"
-             placeholder="why this one is wrong (required to reject)"
+             {% if board.focus == "reason" %}data-swap-focus{% endif %}
+             {# The message is up in the decide column, so the field carries the pointer to
+                it: focus alone puts a reader IN the field with no statement of the problem,
+                and a reader who tabs back later never had one. #}
+             {% if board.error and board.focus == "reason" %}aria-invalid="true" aria-describedby="triage-error"{% endif %}
+             placeholder="why it's wrong (required)"
              aria-label="reason for rejecting">
       <button class="btn btn-danger" type="submit" hx-disabled-elt="this">reject <kbd>{{ reject_key }}</kbd></button>
     </form>
   </div>
 
   <details id="triage-edit" {% if board.edit_open %}open{% endif %} style="margin-bottom:var(--space-2)">
-    <summary class="label" data-key="{{ edit_key }}" style="cursor:pointer;margin-bottom:var(--space-3)">edit the proposal <kbd>{{ edit_key }}</kbd></summary>
+    <summary class="label" data-key="{{ edit_key }}" style="cursor:pointer;margin-bottom:var(--space-3)">edit <kbd>{{ edit_key }}</kbd></summary>
     <form method="post" action="/triage/edit"
           hx-post="/triage/edit" hx-target="#triage-board" hx-swap="outerHTML"
           style="display:grid;gap:var(--space-3)">
@@ -95,15 +123,34 @@
       <input type="hidden" name="view" value="{{ board.view }}">
       <div class="field">
         <label class="field-label" for="edit-description">description</label>
-        <textarea class="input" id="edit-description" name="description">{{ c.description or "" }}</textarea>
-        <span class="field-hint">an empty box leaves the field alone. what you write here ships to uad_lists.json.</span>
+        <textarea class="input" id="edit-description" name="description"
+                  {% if board.focus == "edit" %}data-swap-focus{% endif %}
+                  {% if board.error and board.focus == "edit" %}aria-invalid="true" aria-describedby="triage-error"{% endif %}
+                  >{% if board.submitted %}{{ board.submitted["description"] }}{% else %}{{ c.description or "" }}{% endif %}</textarea>
+        <span class="field-hint">empty leaves it alone. the word <code>unknown</code> declares it undescribable, same as the box below.</span>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-3)">
+      {# The control the description rule's own message asks for. Refusing a short description
+         and then offering no way to declare it unknown left the reviewer with a rule they
+         could read and not obey. #}
+      <label class="checkbox-label" for="edit-unknown">
+        {# Unticked while a draft is on screen. The refusal fires when the box and the text
+           disagree, and the row it fires on is usually one the model declared unknown — so
+           re-rendering the box ticked over their sentence would refuse the same submission
+           again and read as the form fighting them. The text is the newer answer, so the
+           form comes back set to keep it. #}
+        <input type="checkbox" id="edit-unknown" name="unknown_description" value="1"
+               {% if board.submitted %}{% if board.submitted["unknown"] %}checked{% endif %}{% elif "description" in c.unknown_fields %}checked{% endif %}>
+        can't describe it
+      </label>
+      <span class="field-hint" style="margin-top:calc(-1 * var(--space-2))">
+        ships as <code>{{ unknown_value }}</code> and ignores the box above.
+      </span>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:var(--space-3)">
         <div class="field">
           <label class="field-label" for="edit-list">list</label>
           <select class="input" id="edit-list" name="list">
             {% for option in ["", "Aosp", "Carrier", "Google", "Misc", "Oem"] %}
-              <option value="{{ option }}"{% if option == c.uad_list %} selected{% endif %}>{{ option or "unchanged" }}</option>
+              <option value="{{ option }}"{% if option == (board.submitted["list"] if board.submitted else c.uad_list) %} selected{% endif %}>{{ option or "unchanged" }}</option>
             {% endfor %}
           </select>
         </div>
@@ -111,16 +158,16 @@
           <label class="field-label" for="edit-removal">removal</label>
           <select class="input" id="edit-removal" name="removal">
             {% for option in ["", "Recommended", "Advanced", "Expert", "Unsafe"] %}
-              <option value="{{ option }}"{% if option == c.removal %} selected{% endif %}>{{ option or "unchanged" }}</option>
+              <option value="{{ option }}"{% if option == (board.submitted["removal"] if board.submitted else c.removal) %} selected{% endif %}>{{ option or "unchanged" }}</option>
             {% endfor %}
           </select>
-          <span class="field-hint">never below the floor. a lower answer is refused, not corrected.</span>
+          <span class="field-hint">never below the minimum. a lower answer is refused, not corrected.</span>
         </div>
         <div class="field">
           <label class="field-label" for="edit-confidence">confidence</label>
           <select class="input" id="edit-confidence" name="confidence">
             {% for option in ["", "low", "medium", "high"] %}
-              <option value="{{ option }}"{% if option == c.confidence %} selected{% endif %}>{{ option or "unchanged" }}</option>
+              <option value="{{ option }}"{% if option == (board.submitted["confidence"] if board.submitted else c.confidence) %} selected{% endif %}>{{ option or "unchanged" }}</option>
             {% endfor %}
           </select>
         </div>
@@ -131,19 +178,22 @@
     </form>
   </details>
 
-  <details id="triage-help">
-    <summary class="label" style="cursor:pointer">keys <kbd>?</kbd></summary>
-    <div style="display:flex;gap:var(--space-4);flex-wrap:wrap;margin-top:var(--space-3);font-size:var(--text-sm);color:var(--text-dim)">
-      {% for key, label in keybinds %}
-        <span><kbd>{{ key }}</kbd> {{ label }}</span>
-      {% endfor %}
-    </div>
-  </details>
+  <div>
+    <details id="triage-help">
+      <summary class="label" style="cursor:pointer">keys <kbd>?</kbd></summary>
+      <div style="display:flex;gap:var(--space-4);flex-wrap:wrap;margin-top:var(--space-3);font-size:var(--text-sm);color:var(--text-dim)">
+        {% for key, label in keybinds %}
+          <span><kbd>{{ key }}</kbd> {{ label }}</span>
+        {% endfor %}
+      </div>
+    </details>
+
+  </div>
 </article>
 
-{# --- the proposal ------------------------------------------------------------------------ #}
+{# --- deepseek's answer -------------------------------------------------------------------- #}
 <article class="card" style="margin-bottom:var(--space-4)">
-  <div class="label" style="margin-bottom:var(--space-3)">the model's proposal</div>
+  <div class="label" style="margin-bottom:var(--space-3)">deepseek's answer</div>
   {% if c.description %}
     <p style="color:var(--text);margin-bottom:var(--space-4)">{{ c.description }}</p>
   {% else %}
@@ -164,12 +214,12 @@
   </table>
 </article>
 
-{# --- the floor --------------------------------------------------------------------------- #}
-<article class="card" style="margin-bottom:var(--space-4)">
-  <div class="label" style="margin-bottom:var(--space-3)">the removal floor</div>
+{# --- the floor, under the answer it binds ------------------------------------------------- #}
+<article class="card">
+  <div class="label" style="margin-bottom:var(--space-3)">minimum rating</div>
   {% if c.floor %}
     <p style="font-size:var(--text-sm);color:var(--text-dim);margin-bottom:var(--space-3)">
-      pinned at <strong style="color:var(--text)">{{ c.floor }}</strong> by <code>{{ c.floor_rule }}</code>. it may be raised and never lowered.
+      floor <strong style="color:var(--text)">{{ c.floor }}</strong>, set by <code>{{ c.floor_rule }}</code>. can be raised, never lowered.
     </p>
     <div class="table-wrap">
       <table>
@@ -183,110 +233,7 @@
     </div>
   {% else %}
     <div class="callout callout-warning">
-      <div class="callout-body">no floor has been computed for this package. the rule ladder has not run for it, so an edited rating cannot be checked against anything and will be refused.</div>
+      <div class="callout-body">no floor computed. the rule ladder has not run for this package, so an edited rating is refused rather than checked.</div>
     </div>
   {% endif %}
 </article>
-
-{# --- corroboration ----------------------------------------------------------------------- #}
-<article class="card" style="margin-bottom:var(--space-4)">
-  <div class="label" style="margin-bottom:var(--space-3)">corroboration</div>
-  {% if c.corroboration %}
-    <p style="font-size:var(--text-sm);color:var(--text-dim);margin-bottom:var(--space-3)">
-      {{ c.corroboration.replace("_", " ") }}{% if c.corroboration_reasoning %}: {{ c.corroboration_reasoning }}{% endif %}
-      {% if c.corroboration_failure %} ({{ c.corroboration_failure }}){% endif %}
-    </p>
-  {% else %}
-    <p style="font-size:var(--text-sm);color:var(--text-dim);margin-bottom:var(--space-3)">
-      nothing looked at this package yet.
-    </p>
-  {% endif %}
-  {% if c.sources %}
-    <ul style="list-style:none;display:grid;gap:var(--space-2)">
-      {% for url, title, linkable in c.sources %}
-        <li>
-          {% if linkable %}
-            {# The stylesheet styles no bare anchor, and a browser-default blue link is
-               unreadable on this surface. #}
-            <a href="{{ url }}" target="_blank" rel="noopener noreferrer nofollow"
-               style="color:var(--accent)">{{ title or url }}</a>
-          {% else %}
-            {{ title or url }} <span class="tag tag-warning">not a web link</span>
-          {% endif %}
-          <div style="font-size:var(--text-xs);color:var(--text-faint);word-break:break-all">{{ url }}</div>
-        </li>
-      {% endfor %}
-    </ul>
-  {% endif %}
-</article>
-
-{# --- the evidence ------------------------------------------------------------------------ #}
-<article class="card" style="margin-bottom:var(--space-4)">
-  <div class="label" style="margin-bottom:var(--space-3)">what the firmware declared</div>
-  {% if c.evidence %}
-    <table class="info-table">
-      {% for name, value in c.evidence %}
-        <tr><td>{{ name }}</td><td style="word-break:break-word">{{ value }}</td></tr>
-      {% endfor %}
-    </table>
-  {% else %}
-    <p style="font-size:var(--text-sm);color:var(--text-faint)">no merged facts row for this package.</p>
-  {% endif %}
-  {% if c.conflicts %}
-    <div class="callout callout-info" style="margin-top:var(--space-4)">
-      <div class="callout-body">
-        <span class="callout-title">devices disagree on {{ c.conflicts|length }} field{{ "" if c.conflicts|length == 1 else "s" }}</span>
-        {% for line in c.conflicts %}<div style="word-break:break-word">{{ line }}</div>{% endfor %}
-        every measured disagreement so far has been ordinary signing-key rotation. shown, never filtered on.
-      </div>
-    </div>
-  {% endif %}
-</article>
-
-{# --- what upstream already carries --------------------------------------------------------- #}
-<article class="card" style="margin-bottom:var(--space-4)">
-  <div class="label" style="margin-bottom:var(--space-3)">nearest entries upstream</div>
-  {% if c.anchors %}
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>package</th><th>list</th><th>removal</th><th>description</th></tr></thead>
-        <tbody>
-          {% for entry in c.anchors %}
-            <tr>
-              <td class="table-name" style="word-break:break-all">{{ entry.package }}</td>
-              <td>{{ entry.list or "-" }}</td>
-              <td>{{ entry.removal or "-" }}</td>
-              <td>{{ entry.description }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  {% else %}
-    <p style="font-size:var(--text-sm);color:var(--text-faint)">
-      nothing upstream shares this namespace, so there is no house style to match against.
-    </p>
-  {% endif %}
-</article>
-
-{# --- the log ------------------------------------------------------------------------------- #}
-{% if c.history %}
-  <article class="card">
-    <div class="label" style="margin-bottom:var(--space-3)">decisions on this package</div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>when</th><th>action</th><th>about this proposal</th><th>reason</th></tr></thead>
-        <tbody>
-          {% for item in c.history %}
-            <tr>
-              <td class="num">{{ item.decided_at.strftime("%Y-%m-%d %H:%M") }}</td>
-              <td class="table-name">{{ item.action }}</td>
-              <td>{{ "yes" if item.current else "an earlier one" }}</td>
-              <td>{{ item.reason or "-" }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </article>
-{% endif %}
