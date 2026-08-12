@@ -7,17 +7,30 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request, status
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from starlette.middleware.sessions import SessionMiddleware
 
 from uadclaw import jobs as jobs_module
-from uadclaw.auth import AuthMiddleware, log_in, log_out, verify_password
+from uadclaw import web
+from uadclaw.auth import (
+    SESSION_KEY,
+    AuthMiddleware,
+    log_in,
+    log_out,
+    safe_next,
+    verify_password,
+)
 from uadclaw.db import get_engine, get_session_factory
 from uadclaw.models import Job
 from uadclaw.settings import get_settings
 from uadclaw.stats import StatsResponse, compute_stats
+from uadclaw.views import corpus as corpus_view
+from uadclaw.views import jobs as jobs_view
+from uadclaw.views import telemetry as telemetry_view
+from uadclaw.views import triage as triage_view
 
 logger = logging.getLogger(__name__)
 
@@ -97,17 +110,65 @@ async def health() -> HealthResponse:
     return HealthResponse(web="ok", db=db_status)
 
 
-@router.post("/login", status_code=status.HTTP_204_NO_CONTENT)
-async def login(payload: LoginRequest, request: Request) -> None:
+@router.get("/login")
+async def login_form(request: Request, next: str = "/") -> Response:
+    """The login page. Already authenticated, so it goes straight where it was headed —
+    a login form shown to someone who is logged in is a dead end that looks like a bug."""
+    if request.session.get(SESSION_KEY):
+        return RedirectResponse(safe_next(next), status_code=status.HTTP_303_SEE_OTHER)
+    return web.page(request, "login.html", {"next": safe_next(next)})
+
+
+@router.post("/login")
+async def login(request: Request) -> Response:
+    """One path, two callers, and the JSON contract is unchanged.
+
+    A form post comes from the login page and wants a redirect; a JSON post comes from a
+    test or a script and wants the 204 this route has always returned. Dispatching on the
+    request's own content type rather than adding a second path keeps `PUBLIC_PATHS` at one
+    login entry: a second public path is a second thing to get wrong.
+    """
+    is_form = request.headers.get("content-type", "").startswith(
+        ("application/x-www-form-urlencoded", "multipart/form-data")
+    )
+    if is_form:
+        form = await request.form()
+        password = str(form.get("password") or "")
+        destination = safe_next(str(form.get("next") or "/"))
+    else:
+        payload = LoginRequest.model_validate(await request.json())
+        password = payload.password
+        destination = "/"
+
     settings = get_settings()
-    if not verify_password(payload.password, settings.auth_password.get_secret_value()):
+    if not verify_password(password, settings.auth_password.get_secret_value()):
+        if is_form:
+            # Deliberately vague and deliberately not a 401: a wrong password on a form is
+            # a re-render of the form, and naming which half was wrong tells an attacker
+            # something the single-user model never wants to confirm.
+            return web.page(
+                request,
+                "login.html",
+                {"next": destination, "error": "wrong password."},
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="bad credentials")
+
     log_in(request)
+    if is_form:
+        return RedirectResponse(destination, status_code=status.HTTP_303_SEE_OTHER)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(request: Request) -> None:
+@router.post("/logout")
+async def logout(request: Request) -> Response:
+    """204 for a JSON caller, a redirect to the login page for the dashboard's form."""
     log_out(request)
+    if request.headers.get("content-type", "").startswith(
+        ("application/x-www-form-urlencoded", "multipart/form-data")
+    ):
+        return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/stats")
@@ -151,9 +212,16 @@ async def get_job_route(job_id: uuid.UUID) -> JobResponse:
 
 
 @router.get("/")
-async def index() -> dict[str, str]:
-    """Dashboard root placeholder; real UI lands in task 9."""
-    return {"app": "uadclaw"}
+async def index(request: Request) -> Response:
+    """The dashboard root. Triage is the landing screen because it is the pipeline's
+    throughput bottleneck by design: everything else runs unattended, that queue does not.
+
+    A JSON caller still gets the identity payload this route has always returned, so the
+    health-style probes that poll it keep working.
+    """
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse("/triage", status_code=status.HTTP_303_SEE_OTHER)
+    return JSONResponse({"app": "uadclaw"})
 
 
 @asynccontextmanager
@@ -176,4 +244,11 @@ def create_app() -> FastAPI:
         https_only=settings.cookie_secure,
     )
     app.include_router(router)
+    # One router per screen, so two screens can never collide in one file. Every one of
+    # these is behind the default-deny middleware by existing; none needs an exemption.
+    app.include_router(triage_view.router)
+    app.include_router(jobs_view.router)
+    app.include_router(corpus_view.router)
+    app.include_router(telemetry_view.router)
+    web.mount_static(app)
     return app

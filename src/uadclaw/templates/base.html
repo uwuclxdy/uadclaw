@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}uadclaw{% endblock %}</title>
+  <link rel="stylesheet" href="/static/ui.css">
+  {# Vendored deps load before any first-party script, so a compromised app bundle cannot
+     shadow a pinned dependency. Pinned by filename; the digest lives in `web.py`. #}
+  <script src="/static/vendor/{{ htmx_filename }}" defer></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+<div style="min-height:100vh;display:flex;flex-direction:column">
+  <nav class="navbar">
+    <a class="navbar-brand" href="/" style="text-decoration:none">
+      <span class="logo-name">uadclaw</span>
+      <span class="logo-version">debloat triage</span>
+    </a>
+
+    {# hx-boost swaps the body and pushes the url, so navigation keeps the page alive
+       without any route having to know it. A no-JS browser follows the same hrefs. #}
+    <div class="navbar-nav" hx-boost="true">
+      {% for item in nav_items %}
+        <a class="navbar-link{% if item.key == active_nav %} active{% endif %}"
+           href="{{ item.href }}">{{ item.label }}</a>
+      {% endfor %}
+      <span class="navbar-ink" id="navbar-ink"></span>
+    </div>
+
+    <div class="navbar-actions">
+      <form method="post" action="/logout" style="margin:0">
+        <button class="btn btn-ghost btn-sm" type="submit">log out</button>
+      </form>
+    </div>
+  </nav>
+
+  <main id="main" style="padding:var(--space-10) var(--space-12);max-width:1400px;margin:0 auto;width:100%">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+
+{% block scripts %}{% endblock %}
+</body>
+</html>

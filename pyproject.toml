@@ -22,12 +22,18 @@ dependencies = [
   # androguard's transitive dependency, which it already is — the same call `cryptography` and
   # `pyyaml` get above, and for the same reason: a dependency this code imports directly is
   # this project's to pin, not something to inherit from a library that could drop it.
+  # The dashboard is server-rendered with htmx rather than a JSON API plus a client app, so
+  # templates are a runtime dependency and not a dev convenience.
+  "jinja2>=3.1.6",
   "lxml>=6.1.1",
   "lz4>=4.4.5",
   "pydantic>=2.13.4",
   "pydantic-settings>=2.15.0",
   # Xiaomi publishes no index; the community tracker's is YAML. Declared rather than leaned
   # on as androguard's and uvicorn[standard]'s transitive dependency, which it already is.
+  # Starlette parses `request.form()` through this and raises at runtime without it, so the
+  # login form and every dashboard action would fail on a box that only happened to lack it.
+  "python-multipart>=0.0.32",
   "pyyaml>=6.0.3",
   "sqlalchemy[asyncio]>=2.0.51",
   "uvicorn[standard]>=0.52.1",
