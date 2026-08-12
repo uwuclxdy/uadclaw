@@ -16,9 +16,10 @@ import hashlib
 MONOGRAM_COLOURS = 8
 """How many chip colours exist.
 
-`static/app.css` defines `.monogram-c0` through `.monogram-c7`. A colour index with no class
-renders an unstyled chip rather than raising, so the two numbers have to agree and a test
-asserts the stylesheet covers the whole range.
+The stylesheet owes `.monogram-c0` through `.monogram-c7` to match. Nothing here can enforce
+that: a colour index with no class renders an unstyled chip rather than raising, so the
+failure is silent and looks like a design choice. The pin lives beside the stylesheet, in the
+triage lane's own suite, because that is the file that can drift.
 """
 
 
