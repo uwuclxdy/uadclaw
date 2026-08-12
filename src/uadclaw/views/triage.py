@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import asyncpg
 from fastapi import APIRouter, Form, Request, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import SQLAlchemyError
@@ -151,10 +152,18 @@ async def _board(
                 if selected
                 else None
             )
-    except (SQLAlchemyError, OSError):
+    except (SQLAlchemyError, OSError, asyncpg.PostgresError):
         # The read failed rather than settling empty, and those are different screens: an
         # empty state rendered from a failed read tells the reviewer their queue is done. The
         # traceback goes to the log; what reaches the screen is what to do about it.
+        #
+        # Three classes rather than one, and the third was measured rather than guessed: a
+        # wrong password raises `asyncpg.InvalidPasswordError`, which is a `PostgresError` and
+        # NOT a `SQLAlchemyError`, so it escaped this handler and 500'd the screen — the exact
+        # shape a wrongly-mounted secret produces in production. `OSError` is the refused
+        # connection and the DNS failure. Deliberately not a bare `Exception`: a bug in the
+        # store would then reach the reviewer as "the database is not answering", which is a
+        # lie a screen tells and a health probe does not.
         logger.exception("triage: the queue could not be read")
         return Board(
             view=view,

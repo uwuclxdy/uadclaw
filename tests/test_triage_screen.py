@@ -602,6 +602,37 @@ async def test_a_package_name_out_of_firmware_is_escaped(db_env, triage_env, tri
     assert "&lt;script&gt;" in body
 
 
+async def test_a_database_that_refuses_the_password_is_an_error_state_not_a_500(
+    monkeypatch, test_env, triage_env
+):
+    """Measured, not imagined: `asyncpg.InvalidPasswordError` is a `PostgresError` and not a
+    `SQLAlchemyError`, so it escaped the handler and 500'd the screen. That is what a
+    wrongly-mounted secret produces, and a 500 hides both the cause and the rest of the page.
+
+    The client is built here rather than taken from the `client` fixture so the environment
+    is wrong BEFORE the app resolves its settings.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from conftest import PG_HOST, PG_PORT
+    from uadclaw.app import create_app
+
+    monkeypatch.setenv("POSTGRES_HOST", PG_HOST)
+    monkeypatch.setenv("POSTGRES_PORT", str(PG_PORT))
+    monkeypatch.setenv("POSTGRES_PASSWORD", "not-the-password")
+
+    transport = ASGITransport(app=create_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await login(client)
+        resp = await client.get("/triage", headers={"accept": "text/html"})
+
+    assert resp.status_code == 200
+    assert "the queue could not be read" in resp.text
+    assert "try again" in resp.text
+    # The rest of the page survived its own failure.
+    assert 'class="navbar-link active"' in resp.text
+
+
 async def test_the_screen_is_behind_auth_like_every_other_route(db_env, triage_env, client):
     resp = await client.post("/triage/decide", data={"package": "x", "action": "approve"})
     assert resp.status_code == 401
