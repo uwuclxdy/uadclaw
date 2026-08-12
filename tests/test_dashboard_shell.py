@@ -7,6 +7,8 @@ assertions and are written as pairs on purpose: an exemption test that only prov
 allowed case passes is a test that would stay green if the rule allowed everything.
 """
 
+import asyncio
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -230,13 +232,54 @@ async def test_every_screen_degrades_when_the_database_is_unreachable(client, it
     swallowed the failure and rendered its EMPTY state would answer 200 and be lying, and
     "no packages yet" is the most expensive lie this dashboard could tell a reviewer.
 
-    Note what this does NOT cover, because it is worth knowing: a database host that is
-    routable but dead makes asyncpg hang rather than raise, since nothing sets a connect
-    timeout. Measured against a blackhole address, all four screens hang instead of
-    degrading. This test reaches the DNS-failure case only.
+    This test reaches the DNS-failure case only; the two other shapes have their own tests
+    below, because neither is an `OSError` on the way in and one of them does not raise at all.
     """
     await _login(client)
     resp = await client.get(item.href, headers={"accept": "text/html"})
+    assert resp.status_code == 200, f"{item.key} 500ed instead of degrading"
+    assert "callout-danger" in resp.text, f"{item.key} hid the failure instead of showing it"
+
+
+@pytest.fixture
+async def dead_postgres(test_env, monkeypatch):
+    """A socket that accepts a connection and then says nothing, ever.
+
+    "Routable but dead" is its own failure shape and the only one a connect timeout answers: a
+    refused connection and an unresolvable name both raise immediately, so every test above
+    passes with no timeout set anywhere. This one hung for asyncpg's own 60-second default,
+    which the suite's 30-second per-test ceiling would have killed as a timeout rather than
+    reported as a screen that never rendered.
+    """
+
+    # The stall ends on teardown rather than never: `Server.wait_closed` waits for every
+    # handler task, so a handler that blocks forever hangs the fixture instead of the test.
+    teardown = asyncio.Event()
+
+    async def accept_and_stall(reader, writer):
+        await teardown.wait()
+        writer.close()
+
+    server = await asyncio.start_server(accept_and_stall, "127.0.0.1", 0)
+    monkeypatch.setenv("POSTGRES_HOST", "127.0.0.1")
+    monkeypatch.setenv("POSTGRES_PORT", str(server.sockets[0].getsockname()[1]))
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_SECONDS", "0.5")
+    yield
+    teardown.set()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.parametrize("item", web.NAV_ITEMS)
+async def test_a_routable_but_dead_database_degrades_rather_than_hanging(
+    dead_postgres, client, item
+):
+    """The bound, asserted rather than noted. Five seconds against a half-second timeout is a
+    wide margin on purpose: what fails here is a screen that waits a minute, not one that
+    waits a little longer than expected."""
+    await _login(client)
+    async with asyncio.timeout(5):
+        resp = await client.get(item.href, headers={"accept": "text/html"})
     assert resp.status_code == 200, f"{item.key} 500ed instead of degrading"
     assert "callout-danger" in resp.text, f"{item.key} hid the failure instead of showing it"
 

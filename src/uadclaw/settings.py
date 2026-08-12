@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     postgres_user: str = "uadclaw"
     postgres_password: SecretStr
     postgres_db: str = "uadclaw"
+    # How long one connection attempt may take before it gives up. asyncpg's own default is
+    # 60 seconds, and a host that is ROUTABLE BUT DEAD does not refuse — it accepts nothing and
+    # answers nothing, so every dashboard request hangs for the whole minute instead of
+    # rendering its error state. Measured against a socket that accepts and never speaks: all
+    # four screens hang. Ten seconds is well past a healthy connect on this LAN and well
+    # inside a reader's patience.
+    postgres_connect_timeout_seconds: float = 10.0
 
     # Auth: single credential, single-user login (LAN-only deployment).
     auth_password: SecretStr
@@ -386,6 +393,7 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
+        "postgres_connect_timeout_seconds",
         "lease_stale_after_seconds",
         "heartbeat_interval_seconds",
         "lease_poll_interval_seconds",
