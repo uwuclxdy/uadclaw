@@ -5,7 +5,133 @@
   <header style="margin-bottom:var(--space-8);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
     <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">uadclaw</div>
     <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em">corpus</h2>
+    <p style="font-size:var(--text-base);color:var(--text-dim);max-width:540px;margin-top:var(--space-2)">
+      every package the deterministic core has seen, with its floor, its queue state and whether it disagrees across devices.
+    </p>
   </header>
-  <div class="callout callout-info">not built yet.</div>
+
+  {% if error is defined and error %}
+    <div class="callout callout-danger">
+      <div class="callout-body">could not load the corpus. the database query failed; check the worker logs and try again.</div>
+    </div>
+  {% else %}
+    <div hx-boost="true">
+      <form method="get" action="/corpus" style="display:flex;flex-wrap:wrap;gap:var(--space-3);align-items:flex-end;margin-bottom:var(--space-6)">
+        <input type="hidden" name="sort" value="{{ sort }}">
+        <input type="hidden" name="dir" value="{{ dir }}">
+        <div class="field" style="min-width:220px;flex:1">
+          <label class="field-label" for="corpus-q">search</label>
+          <input class="input" id="corpus-q" type="text" name="q" value="{{ q }}" placeholder="package name contains…">
+        </div>
+        <div class="field">
+          <label class="field-label" for="corpus-floor">floor</label>
+          <select class="input" id="corpus-floor" name="floor">
+            <option value="">all</option>
+            {% for f in floors %}
+              <option value="{{ f }}"{% if floor_filter == f %} selected{% endif %}>{{ f }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label" for="corpus-queued">queued</label>
+          <select class="input" id="corpus-queued" name="queued">
+            <option value="">all</option>
+            <option value="true"{% if queued_filter == "true" %} selected{% endif %}>queued</option>
+            <option value="false"{% if queued_filter == "false" %} selected{% endif %}>not queued</option>
+            <option value="null"{% if queued_filter == "null" %} selected{% endif %}>filter pending</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label" for="corpus-upstream">upstream</label>
+          <select class="input" id="corpus-upstream" name="upstream">
+            <option value="">all</option>
+            <option value="true"{% if upstream_filter == "true" %} selected{% endif %}>already upstream</option>
+            <option value="false"{% if upstream_filter == "false" %} selected{% endif %}>not upstream</option>
+            <option value="null"{% if upstream_filter == "null" %} selected{% endif %}>filter pending</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" type="submit">filter</button>
+        {% if filters_active %}
+          <a class="btn btn-ghost" href="/corpus">clear</a>
+        {% endif %}
+      </form>
+
+      {% if total == 0 and not filters_active %}
+        <div class="callout callout-info">
+          <div class="callout-body">no packages yet. run a firmware job to populate the corpus.</div>
+        </div>
+      {% elif total == 0 %}
+        <div class="callout callout-info">
+          <div class="callout-body">no packages match these filters. <a href="/corpus">clear filters</a> to see the whole corpus.</div>
+        </div>
+      {% else %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><a href="{{ sort_links.package }}" style="color:inherit;text-decoration:none">package{% if sort == "package" %} {{ "↓" if dir == "desc" else "↑" }}{% endif %}</a></th>
+                <th class="num-col"><a href="{{ sort_links.device_count }}" style="color:inherit;text-decoration:none">devices{% if sort == "device_count" %} {{ "↓" if dir == "desc" else "↑" }}{% endif %}</a></th>
+                <th><a href="{{ sort_links.floor }}" style="color:inherit;text-decoration:none">floor{% if sort == "floor" %} {{ "↓" if dir == "desc" else "↑" }}{% endif %}</a></th>
+                <th>queued</th>
+                <th>upstream</th>
+                <th>conflict</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in rows %}
+              <tr>
+                <td><a class="table-name" href="/corpus/{{ row.package | urlencode }}" style="text-decoration:none">{{ row.package }}</a></td>
+                <td class="num-col">{{ row.device_count }}</td>
+                <td>
+                  {% if row.floor %}
+                    <span class="tag {{ FLOOR_TAG_CLASS[row.floor] }}">{{ row.floor }}</span>
+                  {% else %}
+                    <span class="tag tag-default">ladder pending</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if row.queued is none %}
+                    <span class="tag tag-default">filter pending</span>
+                  {% elif row.queued %}
+                    <span class="tag tag-success">queued</span>
+                  {% else %}
+                    <span class="tag tag-default">not queued</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if row.upstream_present is none %}
+                    <span class="tag tag-default">filter pending</span>
+                  {% elif row.upstream_present %}
+                    <span class="tag tag-info">upstream</span>
+                  {% else %}
+                    <span class="tag tag-default">not upstream</span>
+                  {% endif %}
+                </td>
+                <td>{% if row.has_conflict %}<span class="tag tag-warning">conflict</span>{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:var(--space-4)">
+          <div class="label">showing {{ range_start }}-{{ range_end }} of {{ total }}</div>
+          <div style="display:flex;gap:var(--space-2);align-items:center">
+            {% if prev_href %}
+              <a class="btn btn-secondary btn-sm" href="{{ prev_href }}">prev</a>
+            {% else %}
+              <span class="btn btn-secondary btn-sm" style="opacity:.4;pointer-events:none">prev</span>
+            {% endif %}
+            <span class="label">page {{ page }} of {{ total_pages }}</span>
+            {% if next_href %}
+              <a class="btn btn-secondary btn-sm" href="{{ next_href }}">next</a>
+            {% else %}
+              <span class="btn btn-secondary btn-sm" style="opacity:.4;pointer-events:none">next</span>
+            {% endif %}
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  {% endif %}
 </section>
 {% endblock %}

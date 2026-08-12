@@ -1,0 +1,443 @@
+"""The corpus screen: `package_facts` joined to `package_analysis`, read-only.
+
+Real Postgres throughout — the tri-state NULL/false/true distinction, the floor's
+danger-rank ordering, and ILIKE substring search all need real query behavior, not a mock.
+`db_session_factory` truncates every table per test, so a test's seeded rows are the entire
+corpus that test sees; nothing here depends on what the app's own `uadclaw` database holds.
+"""
+
+from conftest import utcnow
+from uadclaw.models import PackageAnalysis, PackageFact
+from uadclaw.views import corpus as corpus_view
+
+PASSWORD = "test-only-admin-password"
+
+
+async def _login(client) -> None:
+    resp = await client.post("/login", json={"password": PASSWORD})
+    assert resp.status_code == 204
+
+
+def _fact(
+    package: str,
+    *,
+    device_count: int = 1,
+    devices: list[str] | None = None,
+    label: str | None = None,
+    has_conflict: bool = False,
+    conflicts: list | None = None,
+) -> PackageFact:
+    now = utcnow()
+    return PackageFact(
+        package=package,
+        device_count=device_count,
+        devices=devices or ["pixel:oriole"],
+        first_seen_at=now,
+        last_seen_at=now,
+        label=label or package,
+        has_conflict=has_conflict,
+        conflicts=conflicts or [],
+    )
+
+
+def _analysis(
+    package: str,
+    *,
+    floor: str | None = None,
+    floor_rule: str | None = None,
+    floor_reasons: list | None = None,
+    queued: bool | None = None,
+    upstream_present: bool | None = None,
+    filter_verdict: str | None = None,
+    edges: list | None = None,
+    dependencies: list | None = None,
+    needed_by: list | None = None,
+    evidence: dict | None = None,
+    privapp_allowlisted: bool | None = None,
+    privapp_permission_count: int | None = None,
+) -> PackageAnalysis:
+    return PackageAnalysis(
+        package=package,
+        updated_at=utcnow(),
+        floor=floor,
+        floor_rule=floor_rule,
+        floor_reasons=floor_reasons or [],
+        queued=queued,
+        upstream_present=upstream_present,
+        filter_verdict=filter_verdict,
+        edges=edges or [],
+        dependencies=dependencies or [],
+        needed_by=needed_by or [],
+        evidence=evidence or {},
+        privapp_allowlisted=privapp_allowlisted,
+        privapp_permission_count=privapp_permission_count,
+    )
+
+
+async def _seed(session_factory, *rows) -> None:
+    async with session_factory() as session, session.begin():
+        session.add_all(rows)
+
+
+# --- auth ---------------------------------------------------------------------------------
+
+
+async def test_corpus_list_requires_auth(db_env, client):
+    resp = await client.get("/corpus")
+    assert resp.status_code == 401
+
+
+async def test_corpus_detail_requires_auth(db_env, client):
+    resp = await client.get("/corpus/com.example.app")
+    assert resp.status_code == 401
+
+
+# --- empty state ----------------------------------------------------------------------------
+
+
+async def test_a_fresh_database_reads_as_empty_not_broken(db_env, db_session_factory, client):
+    await _login(client)
+    resp = await client.get("/corpus", headers={"accept": "text/html"})
+    assert resp.status_code == 200
+    assert "no packages yet" in resp.text
+    # The empty state must not carry the error wording, or a reviewer cannot tell "nothing
+    # scanned yet" from "the query broke" by reading the page.
+    assert "could not load" not in resp.text
+
+
+async def test_filtering_to_nothing_offers_a_way_back_rather_than_a_bare_no_results(
+    db_env, db_session_factory, client
+):
+    await _seed(db_session_factory, _fact("com.example.only"), _analysis("com.example.only"))
+    await _login(client)
+    resp = await client.get("/corpus?q=zzz-does-not-exist")
+    assert resp.status_code == 200
+    assert "no packages match these filters" in resp.text
+    assert "clear filters" in resp.text
+
+
+# --- error state, distinct from empty --------------------------------------------------------
+
+
+async def test_a_db_failure_reads_as_an_error_never_as_an_empty_corpus(client):
+    """No `db_env`: `POSTGRES_HOST` defaults to `postgres`, unreachable outside docker (see
+    `test_health.py`), so the query fails for real rather than being mocked."""
+    await _login(client)
+    resp = await client.get("/corpus", headers={"accept": "text/html"})
+    assert resp.status_code == 200
+    assert "could not load" in resp.text
+    assert "no packages yet" not in resp.text
+
+
+async def test_a_db_failure_on_the_detail_page_also_reads_as_an_error(client):
+    await _login(client)
+    resp = await client.get("/corpus/com.example.app", headers={"accept": "text/html"})
+    assert resp.status_code == 200
+    assert "could not load" in resp.text
+    assert "no package named" not in resp.text
+
+
+# --- list: default sort, filters, search -----------------------------------------------------
+
+
+async def test_default_sort_is_device_count_descending(db_env, db_session_factory, client):
+    await _seed(
+        db_session_factory,
+        _fact("com.example.low", device_count=1),
+        _analysis("com.example.low"),
+        _fact("com.example.high", device_count=9),
+        _analysis("com.example.high"),
+        _fact("com.example.mid", device_count=5),
+        _analysis("com.example.mid"),
+    )
+    await _login(client)
+    resp = await client.get("/corpus")
+    text = resp.text
+    assert (
+        text.index("com.example.high")
+        < text.index("com.example.mid")
+        < text.index("com.example.low")
+    )
+
+
+async def test_floor_filter_narrows_to_the_selected_tier(db_env, db_session_factory, client):
+    await _seed(
+        db_session_factory,
+        _fact("com.example.unsafe"),
+        _analysis("com.example.unsafe", floor="Unsafe", floor_rule="core_app"),
+        _fact("com.example.rec"),
+        _analysis("com.example.rec", floor="Recommended", floor_rule="default"),
+    )
+    await _login(client)
+    resp = await client.get("/corpus?floor=Unsafe")
+    assert "com.example.unsafe" in resp.text
+    assert "com.example.rec" not in resp.text
+
+
+async def test_search_matches_a_package_name_substring(db_env, db_session_factory, client):
+    await _seed(
+        db_session_factory,
+        _fact("com.example.needle.thing"),
+        _analysis("com.example.needle.thing"),
+        _fact("com.other.hay"),
+        _analysis("com.other.hay"),
+    )
+    await _login(client)
+    resp = await client.get("/corpus?q=needle")
+    assert "com.example.needle.thing" in resp.text
+    assert "com.other.hay" not in resp.text
+
+
+# --- NULL vs false, the tri-state contract ----------------------------------------------------
+
+
+async def test_queued_null_false_and_true_are_three_distinct_states(
+    db_env, db_session_factory, client
+):
+    await _seed(
+        db_session_factory,
+        _fact("com.example.pending"),
+        # No PackageAnalysis row at all: the filter stage has not touched this package.
+        _fact("com.example.rejected"),
+        _analysis("com.example.rejected", queued=False),
+        _fact("com.example.queued"),
+        _analysis("com.example.queued", queued=True),
+    )
+    await _login(client)
+    resp = await client.get("/corpus")
+    text = resp.text
+
+    # Each of the three renders with wording that does not collide with either of the others.
+    # Column order is package, devices, floor, queued, upstream, conflict — the queued badge
+    # is column index 3, found by walking the row's own `<td>` cells rather than by proximity
+    # to the package name, which the floor column's badge sits closer to.
+    import re
+
+    def queued_badge(package: str) -> str:
+        idx = text.index(package)
+        row_start = text.rindex("<tr>", 0, idx)
+        row_end = text.index("</tr>", idx)
+        row = text[row_start:row_end]
+        cells = row.split("<td")[1:]
+        queued_cell = cells[3]
+        match = re.search(r">([^<]*)</span>", queued_cell)
+        assert match, f"no tag span in the queued cell for {package}: {queued_cell!r}"
+        return match.group(1).strip()
+
+    assert queued_badge("com.example.pending") == "filter pending"
+    assert queued_badge("com.example.rejected") == "not queued"
+    assert queued_badge("com.example.queued") == "queued"
+
+
+async def test_queued_filter_null_returns_only_the_unfiltered_packages(
+    db_env, db_session_factory, client
+):
+    await _seed(
+        db_session_factory,
+        _fact("com.example.pending"),
+        _fact("com.example.rejected"),
+        _analysis("com.example.rejected", queued=False),
+        _fact("com.example.queued"),
+        _analysis("com.example.queued", queued=True),
+    )
+    await _login(client)
+    resp = await client.get("/corpus?queued=null")
+    assert "com.example.pending" in resp.text
+    assert "com.example.rejected" not in resp.text
+    assert "com.example.queued" not in resp.text
+
+
+async def test_queued_filter_false_excludes_both_null_and_true(db_env, db_session_factory, client):
+    await _seed(
+        db_session_factory,
+        _fact("com.example.pending"),
+        _fact("com.example.rejected"),
+        _analysis("com.example.rejected", queued=False),
+        _fact("com.example.queued"),
+        _analysis("com.example.queued", queued=True),
+    )
+    await _login(client)
+    resp = await client.get("/corpus?queued=false")
+    assert "com.example.rejected" in resp.text
+    assert "com.example.pending" not in resp.text
+    assert "com.example.queued" not in resp.text
+
+
+# --- floor sort must use danger_rank, never string comparison --------------------------------
+
+
+async def test_floor_sort_ascending_orders_by_danger_rank_not_by_string(
+    db_env, db_session_factory, client
+):
+    """`danger_rank(Recommended) == 0 < danger_rank(Expert) == 2`, but the strings sort the
+    other way (`"Expert" < "Recommended"` lexicographically). A sort that compares the raw
+    column would put Expert first under `dir=asc`; a correct one puts Recommended first."""
+    await _seed(
+        db_session_factory,
+        _fact("com.example.expert"),
+        _analysis("com.example.expert", floor="Expert", floor_rule="persistent"),
+        _fact("com.example.recommended"),
+        _analysis("com.example.recommended", floor="Recommended", floor_rule="default"),
+    )
+    await _login(client)
+    resp = await client.get("/corpus?sort=floor&dir=asc")
+    text = resp.text
+    assert text.index("com.example.recommended") < text.index("com.example.expert"), (
+        "floor=asc must rank Recommended before Expert; a raw string sort would invert this"
+    )
+
+
+# --- pagination -------------------------------------------------------------------------------
+
+
+async def test_pagination_is_bounded_and_clamps_an_out_of_range_page(
+    db_env, db_session_factory, client, monkeypatch
+):
+    monkeypatch.setattr(corpus_view, "PAGE_SIZE", 2)
+    await _seed(
+        db_session_factory,
+        *[
+            row
+            for i in range(5)
+            for row in (_fact(f"com.example.p{i}", device_count=i), _analysis(f"com.example.p{i}"))
+        ],
+    )
+    await _login(client)
+
+    resp = await client.get("/corpus")
+    assert "page 1 of 3" in resp.text  # ceil(5/2)
+
+    resp_out = await client.get("/corpus?page=999")
+    assert "page 3 of 3" in resp_out.text
+    assert "showing 5-5 of 5" in resp_out.text
+
+
+# --- detail view --------------------------------------------------------------------------
+
+
+async def test_detail_renders_facts_floor_edges_and_evidence(db_env, db_session_factory, client):
+    await _seed(
+        db_session_factory,
+        _fact("com.example.detailed", device_count=2),
+        _analysis(
+            "com.example.detailed",
+            floor="Unsafe",
+            floor_rule="core_app",
+            floor_reasons=[
+                {
+                    "rule": "core_app",
+                    "floor": "Unsafe",
+                    "detail": 'coreApp="true": AOSP puts it in the minimalist boot environment',
+                }
+            ],
+            queued=False,
+            upstream_present=True,
+            filter_verdict="already_upstream",
+            edges=[
+                {
+                    "kind": "overlay",
+                    "dependent": "com.example.detailed",
+                    "provider": "com.example.target",
+                    "detail": "com.example.target",
+                }
+            ],
+            dependencies=["com.example.target"],
+            evidence={"queries_packages_in_corpus": ["com.example.target"]},
+        ),
+    )
+    await _login(client)
+    resp = await client.get("/corpus/com.example.detailed", headers={"accept": "text/html"})
+    assert resp.status_code == 200
+    assert "Unsafe" in resp.text
+    assert "core_app" in resp.text
+    assert "com.example.target" in resp.text
+    assert "already upstream" in resp.text
+
+
+async def test_detail_for_a_package_with_no_analysis_row_shows_the_facts_and_says_pending(
+    db_env, db_session_factory, client
+):
+    await _seed(db_session_factory, _fact("com.example.unanalyzed"))
+    await _login(client)
+    resp = await client.get("/corpus/com.example.unanalyzed")
+    assert resp.status_code == 200
+    assert "has not analyzed this package yet" in resp.text
+
+
+async def test_detail_for_a_missing_package_reads_as_not_found_not_as_an_error(
+    db_env, db_session_factory, client
+):
+    await _login(client)
+    resp = await client.get("/corpus/does.not.exist")
+    # 200, not 404: htmx 2.0.10 does not swap a non-2xx response by default, so a boosted
+    # link into a missing package must still render visible content.
+    assert resp.status_code == 200
+    assert "no package named" in resp.text
+    assert "could not load" not in resp.text
+
+
+async def test_a_zero_library_edge_count_is_not_rendered_as_an_error(
+    db_env, db_session_factory, client
+):
+    """Measured on the real corpus: the library edge class yields zero edges, and that is
+    the data, not a broken lookup (see `corpus.py`'s module docstring). The empty section
+    must read as neutral, never as a warning or a danger callout."""
+    await _seed(
+        db_session_factory,
+        _fact("com.example.noedges"),
+        _analysis("com.example.noedges", floor="Recommended", floor_rule="default", edges=[]),
+    )
+    await _login(client)
+    resp = await client.get("/corpus/com.example.noedges")
+    assert "no edges recorded" in resp.text
+    assert "callout-danger" not in resp.text
+    assert "callout-warning" not in resp.text
+
+
+# --- has_conflict is rendered, never filtered out by default ---------------------------------
+
+
+async def test_conflicts_render_with_both_values_and_are_not_hidden_by_default(
+    db_env, db_session_factory, client
+):
+    await _seed(
+        db_session_factory,
+        _fact(
+            "com.example.conflicted",
+            has_conflict=True,
+            conflicts=[
+                {
+                    "field": "cert_issuer",
+                    "values": [
+                        {"value": "issuer-a", "devices": ["pixel:oriole"]},
+                        {"value": "issuer-b", "devices": ["google:emulator-a16"]},
+                    ],
+                }
+            ],
+        ),
+        _analysis("com.example.conflicted"),
+    )
+    await _login(client)
+
+    list_resp = await client.get("/corpus")
+    assert "com.example.conflicted" in list_resp.text
+    assert "conflict" in list_resp.text
+
+    detail_resp = await client.get("/corpus/com.example.conflicted")
+    assert "cert_issuer" in detail_resp.text
+    assert "issuer-a" in detail_resp.text
+    assert "issuer-b" in detail_resp.text
+    assert "pixel:oriole" in detail_resp.text
+    assert "google:emulator-a16" in detail_resp.text
+
+
+# --- untrusted bytes: package names are firmware data, never |safe -----------------------------
+
+
+async def test_a_hostile_package_name_is_escaped_not_executed(db_env, db_session_factory, client):
+    hostile = "com.example.<script>alert(1)</script>"
+    await _seed(db_session_factory, _fact(hostile), _analysis(hostile))
+    await _login(client)
+    resp = await client.get("/corpus")
+    assert "<script>alert(1)</script>" not in resp.text
+    assert "&lt;script&gt;" in resp.text

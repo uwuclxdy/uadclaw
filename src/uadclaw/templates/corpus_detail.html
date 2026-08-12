@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}{{ package }} · corpus · uadclaw{% endblock %}
+{% block content %}
+<section hx-boost="true">
+  <header style="margin-bottom:var(--space-6);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
+    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">
+      <a href="/corpus" style="color:inherit;text-decoration:none">corpus</a>
+    </div>
+    <h2 class="num" style="font:550 var(--text-xl)/1.3 var(--font-mono);color:var(--text);word-break:break-all">{{ package }}</h2>
+  </header>
+
+  {% if error is defined and error %}
+    <div class="callout callout-danger">
+      <div class="callout-body">could not load this package. the database query failed; check the worker logs and try again.</div>
+    </div>
+  {% elif not_found is defined and not_found %}
+    <div class="callout callout-warning">
+      <div class="callout-body">no package named <code>{{ package }}</code> in the corpus. <a href="/corpus">back to corpus</a>.</div>
+    </div>
+  {% else %}
+    <div class="card" style="margin-bottom:var(--space-5)">
+      <div class="card-header">
+        <div>
+          <div class="card-title">{{ fact.label }}</div>
+          <div class="card-subtitle">{{ fact.device_count }} device(s) · first seen {{ fact.first_seen_at }} · last seen {{ fact.last_seen_at }}</div>
+        </div>
+        {% if fact.has_conflict %}<span class="tag tag-warning">conflict across devices</span>{% endif %}
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:var(--space-2);margin-bottom:var(--space-4)">
+        {% for d in fact.devices %}<span class="tag tag-data">{{ d }}</span>{% endfor %}
+      </div>
+      <table class="info-table">
+        <tr><td>partitions</td><td>{{ (fact.partitions | join(", ")) or "none recorded" }}</td></tr>
+        <tr><td>priv-app</td><td>{{ "yes" if fact.priv_app else "no" }}</td></tr>
+        <tr><td>core app</td><td>{{ "yes" if fact.core_app else "no" }}</td></tr>
+        <tr><td>persistent</td><td>{{ "yes" if fact.persistent else "no" }}</td></tr>
+        <tr><td>has code</td><td>{{ "yes" if fact.has_code else "no" }}</td></tr>
+        <tr><td>shared uid</td><td>{{ fact.shared_user_id or "none" }}</td></tr>
+        <tr><td>overlay target</td><td>{{ fact.overlay_target or "none" }}</td></tr>
+        <tr><td>cert issuer</td><td>{{ fact.cert_issuer or "unknown" }}</td></tr>
+        <tr><td>cert subject</td><td>{{ fact.cert_subject or "unknown" }}</td></tr>
+        <tr><td>version code</td><td class="num">{{ fact.version_code if fact.version_code is not none else "unknown" }}</td></tr>
+        <tr>
+          <td>roles</td>
+          <td>
+            {%- set role_bits = [] -%}
+            {%- if fact.is_input_method %}{% set _ = role_bits.append("IME") %}{% endif -%}
+            {%- if fact.is_device_admin %}{% set _ = role_bits.append("device admin") %}{% endif -%}
+            {%- if fact.is_accessibility_service %}{% set _ = role_bits.append("accessibility") %}{% endif -%}
+            {%- if fact.is_carrier_service %}{% set _ = role_bits.append("carrier") %}{% endif -%}
+            {{ (role_bits | join(", ")) or "none" }}
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    {% if fact.has_conflict %}
+    <div class="card" style="margin-bottom:var(--space-5)">
+      <div class="card-title" style="margin-bottom:var(--space-2)">conflicts</div>
+      <div class="card-subtitle" style="margin-bottom:var(--space-4)">
+        devices disagree on these fields. this is a review signal, not a verdict — most conflicts on this corpus are ordinary signing-key rotation or a test key facing a production key.
+      </div>
+      {% for c in fact.conflicts %}
+        <div style="margin-bottom:var(--space-4)">
+          {# Bracket notation, not `c.values`: `c` is a plain dict out of JSONB and "values" is
+             also a `dict` builtin method, so `c.values` resolves to the bound method rather
+             than the key — Jinja tries `getattr` before `__getitem__`. #}
+          <div class="label" style="margin-bottom:var(--space-2)">{{ c["field"] }}</div>
+          <table class="info-table">
+            {% for v in c["values"] %}
+              <tr>
+                <td>{{ v.devices | join(", ") }}</td>
+                <td>{% if v.value is boolean %}{{ "yes" if v.value else "no" }}{% else %}{{ v.value }}{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </table>
+        </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if analysis is none %}
+      <div class="callout callout-info">
+        <div class="callout-body">the deterministic core has not analyzed this package yet (corpus graph, filter and rule ladder have not run for it).</div>
+      </div>
+    {% else %}
+      <div class="card" style="margin-bottom:var(--space-5)">
+        <div class="card-title" style="margin-bottom:var(--space-3)">removal floor</div>
+        {% if analysis.floor %}
+          <div style="margin-bottom:var(--space-4)">
+            <span class="tag {{ FLOOR_TAG_CLASS[analysis.floor] }}">{{ analysis.floor }}</span>
+            <span style="color:var(--text-dim);font-size:var(--text-sm)">set by {{ analysis.floor_rule }}</span>
+          </div>
+          <div class="label" style="margin-bottom:var(--space-2)">every rule that fired, strictest first</div>
+          <table class="info-table">
+            {% for r in analysis.floor_reasons %}
+              <tr>
+                <td>{{ r.rule }}<br><span class="tag {{ FLOOR_TAG_CLASS.get(r.floor, "tag-default") }}" style="margin-top:4px">{{ r.floor }}</span></td>
+                <td>{{ r.detail }}</td>
+              </tr>
+            {% endfor %}
+          </table>
+          {% if analysis.privapp_allowlisted %}
+            <div class="callout callout-info" style="margin-top:var(--space-4)">
+              <div class="callout-body">allowlisted in a privapp-permissions xml, {{ analysis.privapp_permission_count }} permission(s). integration score, not a boot-risk flag — the app is still present.</div>
+            </div>
+          {% endif %}
+        {% else %}
+          <div class="callout callout-info">
+            <div class="callout-body">the rule ladder has not run for this package yet.</div>
+          </div>
+        {% endif %}
+      </div>
+
+      <div class="card" style="margin-bottom:var(--space-5)">
+        <div class="card-title" style="margin-bottom:var(--space-3)">filter</div>
+        {% if analysis.queued is none %}
+          <div class="callout callout-info">
+            <div class="callout-body">the filter stage has not run for this package yet.</div>
+          </div>
+        {% else %}
+          <table class="info-table">
+            <tr><td>queued</td><td>{{ "yes" if analysis.queued else "no" }}</td></tr>
+            <tr><td>already upstream</td><td>{{ "yes" if analysis.upstream_present else "no" }}</td></tr>
+            <tr><td>verdict</td><td>{{ analysis.filter_verdict or "unknown" }}</td></tr>
+          </table>
+        {% endif %}
+      </div>
+
+      <div class="card" style="margin-bottom:var(--space-5)">
+        <div class="card-title" style="margin-bottom:var(--space-3)">graph edges</div>
+        {% if analysis.edges %}
+          <table class="info-table">
+            {% for e in analysis.edges %}
+              <tr><td>{{ e.kind }}</td><td>{{ e.dependent }} → {{ e.provider }} ({{ e.detail }})</td></tr>
+            {% endfor %}
+          </table>
+        {% else %}
+          {# Zero library edges is a measured property of this corpus, not a broken lookup —
+             see corpus.py's module docstring. A plain muted line, never a warning/danger
+             callout, so an empty result here does not read as a failure. #}
+          <div style="color:var(--text-dim);font-size:var(--text-sm)">no edges recorded for this package.</div>
+        {% endif %}
+        {% if analysis.dependencies %}
+          <div class="label" style="margin-top:var(--space-4);margin-bottom:var(--space-2)">dependencies</div>
+          <div style="display:flex;flex-wrap:wrap;gap:var(--space-2)">
+            {% for d in analysis.dependencies %}<a class="tag tag-accent" href="/corpus/{{ d | urlencode }}" style="text-decoration:none">{{ d }}</a>{% endfor %}
+          </div>
+        {% endif %}
+        {% if analysis.needed_by %}
+          <div class="label" style="margin-top:var(--space-4);margin-bottom:var(--space-2)">needed by</div>
+          <div style="display:flex;flex-wrap:wrap;gap:var(--space-2)">
+            {% for d in analysis.needed_by %}<a class="tag tag-accent" href="/corpus/{{ d | urlencode }}" style="text-decoration:none">{{ d }}</a>{% endfor %}
+          </div>
+        {% endif %}
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="margin-bottom:var(--space-3)">evidence</div>
+        <table class="info-table">
+          <tr><td>queries (in corpus)</td><td>{{ (analysis.evidence.get("queries_packages_in_corpus", []) | join(", ")) or "none" }}</td></tr>
+          <tr><td>queries (absent)</td><td>{{ (analysis.evidence.get("queries_packages_absent", []) | join(", ")) or "none" }}</td></tr>
+          <tr><td>required libs (platform)</td><td>{{ (analysis.evidence.get("required_libraries_from_platform", []) | join(", ")) or "none" }}</td></tr>
+          <tr><td>required libs (unresolved)</td><td>{{ (analysis.evidence.get("required_libraries_unresolved", []) | join(", ")) or "none" }}</td></tr>
+          <tr><td>shared authorities</td><td>{{ (analysis.evidence.get("shared_provider_authorities", []) | join(", ")) or "none" }}</td></tr>
+          {% if analysis.evidence.get("overlay_target_absent") %}
+            <tr><td>overlay target</td><td>{{ analysis.evidence.get("overlay_target_absent") }} (not in corpus)</td></tr>
+          {% endif %}
+        </table>
+      </div>
+    {% endif %}
+  {% endif %}
+</section>
+{% endblock %}
