@@ -502,10 +502,45 @@ async def test_a_limit_that_is_not_a_number_is_refused_by_the_params_model(
 
 def test_poll_trigger_is_dropped_only_when_every_state_is_terminal():
     assert jobs_view.poll_trigger([JobState.SUCCEEDED, JobState.FAILED]) is None
-    assert jobs_view.poll_trigger([]) is None
+    # An empty list has no terminal state, so it cannot satisfy "every state is terminal".
+    # This line asserted the opposite of the name above it, and the behaviour matched: the
+    # loop body never ran, so the fragment came back with no trigger at all.
+    assert jobs_view.poll_trigger([]) == "every 3s"
     assert jobs_view.poll_trigger([JobState.SUCCEEDED, JobState.RUNNING]) == "every 3s"
     assert jobs_view.poll_trigger([JobState.QUEUED]) == "every 3s"
     assert jobs_view.poll_trigger([JobState.CLAIMED]) == "every 3s"
+
+
+async def test_a_filtered_list_with_nothing_in_it_keeps_asking_for_itself(
+    db_env, db_session_factory, client, monkeypatch
+):
+    """`_list_context` feeds `poll_trigger` the FILTERED rows, so an operator sitting on
+    `?state=running` with nothing running got a fragment carrying no trigger and never saw a
+    job queued afterwards until they reloaded by hand. An empty list is not a finished one."""
+    install_drivers(monkeypatch, FakeDriver("pixel"))
+    await _seed_job(db_session_factory, state=JobState.SUCCEEDED)
+    await _login(client)
+
+    resp = await client.get("/jobs/list/rows?state=running&kind=")
+
+    assert resp.status_code == 200
+    assert 'hx-trigger="every 3s"' in resp.text
+
+
+async def test_a_list_whose_every_job_is_finished_stops_asking(
+    db_env, db_session_factory, client, monkeypatch
+):
+    """The other leg, and the one the trigger exists for: a fragment that keeps polling after
+    the last job finished re-queries Postgres for the rest of the tab's life over rows that
+    cannot change again."""
+    install_drivers(monkeypatch, FakeDriver("pixel"))
+    await _seed_job(db_session_factory, state=JobState.SUCCEEDED)
+    await _login(client)
+
+    resp = await client.get("/jobs/list/rows?state=succeeded&kind=")
+
+    assert resp.status_code == 200
+    assert "hx-trigger" not in resp.text
 
 
 async def test_a_live_run_panel_asks_for_itself_again(db_env, db_session_factory, client):

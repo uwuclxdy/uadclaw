@@ -127,11 +127,18 @@ def poll_trigger(states: Iterable[JobState | str]) -> str | None:
     None is the load-bearing half. A fragment that keeps its trigger after the last job
     finished re-queries Postgres every few seconds for the rest of the browser tab's life,
     over a row that cannot change again, and nothing on screen ever looks wrong.
+
+    **An EMPTY list keeps its trigger.** It has no terminal state, so it cannot satisfy the
+    rule above, and the list this reads is the FILTERED one: an operator sitting on
+    `?state=running` with nothing running got a fragment with no trigger, and no job queued
+    afterwards ever appeared until they reloaded by hand. A dead database is the other empty
+    case and is deliberately not this one — `_unreadable_list` drops the trigger itself, so a
+    database that is down is asked once rather than every three seconds.
     """
-    for state in states:
-        if JobState(state) not in TERMINAL_STATES:
-            return f"every {POLL_INTERVAL_SECONDS}s"
-    return None
+    listed = [JobState(state) for state in states]
+    if listed and all(state in TERMINAL_STATES for state in listed):
+        return None
+    return f"every {POLL_INTERVAL_SECONDS}s"
 
 
 def _stamp(value: Any) -> str:
