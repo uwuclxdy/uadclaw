@@ -1,0 +1,21 @@
+{# One package's visual identity, in one place.
+
+   Every screen imports this rather than spelling it out, because two screens spelling it
+   separately produced two different sets of letters for the same package before it existed.
+
+   Both branches are decorative: every call site renders the package name as text right
+   beside the icon, so announcing it again here would make a screen reader read every queue
+   row twice. #}
+{% macro pkg_icon(package, has_icon, small=false) %}
+  {%- set mono = monogram_for(package) -%}
+  {%- if has_icon -%}
+    {# `urlencode`, not autoescape: escaping turns a literal `&` into `&amp;`, which the
+       browser decodes straight back into a parameter separator. #}
+    <img class="pkg-icon{% if small %} pkg-icon-sm{% endif %}"
+         src="/icons/{{ package|urlencode }}" alt="" loading="lazy"
+         width="{{ 32 if small else 48 }}" height="{{ 32 if small else 48 }}">
+  {%- else -%}
+    <span class="monogram monogram-c{{ mono[1] }}{% if small %} monogram-sm{% endif %}"
+          aria-hidden="true">{{ mono[0] }}</span>
+  {%- endif -%}
+{% endmacro %}
