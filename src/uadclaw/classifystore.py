@@ -13,6 +13,11 @@ Two properties this module owes the rest of the pipeline:
 - **A re-run replaces only `llm:`-provenance fields.** The stored `provenance` map says who
   owns each field; a field tagged `human:` (a triage edit, task 9) survives the upsert
   untouched, which is what "a bad model run is re-runnable" actually requires.
+- **No `removal` reaches a row below that package's floor, whoever wrote it.** The check
+  lives in `_upsert`, the one seam every writer here passes, because a check per caller is
+  one the next caller forgets — and triage is that next caller: it writes `human:` ratings
+  into these columns with no `classify.validate_response` anywhere in its path. It refuses
+  rather than clamps, for the reason `classify.py`'s docstring gives at length.
 """
 
 import logging
@@ -26,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from uadclaw.bundle import PackageIdentity
 from uadclaw.classify import Classification
+from uadclaw.ladder import Removal, danger_rank
 from uadclaw.models import PackageAnalysis, PackageClassification, PackageFact
 
 logger = logging.getLogger(__name__)
@@ -50,6 +56,17 @@ HUMAN_PREFIX = "human:"
 class ClassificationStoreError(RuntimeError):
     """The corpus is not in a state the classification stage can run against. A
     pipeline-order problem rather than a model failure."""
+
+
+class BelowFloorError(RuntimeError):
+    """A write would have left a `removal` ranking below that package's computed floor.
+
+    Deliberately NOT a `ClassificationStoreError`: that class means "the pipeline ran out of
+    order", which a caller can reasonably decide to report and move on from, and a
+    safety-critical refusal must never ride inside a class somebody is already catching
+    broadly. Carries the package, the two tiers and where the floor came from, because the
+    triage form that hit it has to say what to do next.
+    """
 
 
 async def load_identities(session: AsyncSession) -> dict[str, PackageIdentity]:
@@ -265,7 +282,73 @@ async def park_package(
     )
 
 
+async def _refuse_below_floor(session: AsyncSession, values: dict[str, Any]) -> None:
+    """Refuse a write whose `removal` ranks below the package's stored floor.
+
+    Ranked with `ladder.danger_rank`, never with `<` on the values: `Removal` is a `StrEnum`
+    and `"Expert" < "Recommended"` is True lexicographically, which inverts the whole ladder
+    while every test that only checks the extremes stays green.
+
+    **A missing floor is unknown, and unknown is not `Recommended`.** The two cases split by
+    who is writing, because they have different amounts of guarantee behind them:
+
+    - a model rating already cleared a floor `ladder.compute_floors` built from the live
+      corpus, and `llm_stage` recomputes rather than reading this column precisely because a
+      stored floor can lag the corpus. Refusing here would reject a validated answer over a
+      missing denormalised copy — a pipeline-order check wearing a safety check's clothes. It
+      is logged instead, naming the package: a gate that could not run did not pass.
+    - a `human:` rating has no upstream validator anywhere in its path, so a floor it cannot
+      be checked against is the entire guarantee absent rather than a duplicate of one. That
+      is refused.
+    """
+    proposed = values.get("removal")
+    if proposed is None:
+        return
+    package = values["package"]
+    owner = (values.get("provenance") or {}).get("removal")
+    human = isinstance(owner, str) and owner.startswith(HUMAN_PREFIX)
+
+    analysis = await session.get(PackageAnalysis, package)
+    stored = analysis.floor if analysis is not None else None
+    if stored is None:
+        if human:
+            raise BelowFloorError(
+                f"{package}: refusing a {owner} removal of {proposed} because the package has "
+                "no computed floor. `package_analysis.floor` is NULL, which means the "
+                "rule_ladder stage has not run for this package — not that its floor is "
+                "Recommended. A human rating is the one this repo has no other validator "
+                "for, so it is refused rather than written unchecked. Run a "
+                "firmware_analysis job through rule_ladder first."
+            )
+        logger.warning(
+            "floor gate could not run: package=%s removal=%s has no package_analysis.floor "
+            "(rule_ladder has not written this package)",
+            package,
+            proposed,
+        )
+        return
+
+    try:
+        floor = Removal(stored)
+    except ValueError as exc:
+        raise BelowFloorError(
+            f"{package}: package_analysis.floor reads {stored!r}, which is not a removal "
+            f"tier. A floor nothing can rank against clears nothing, so the write of "
+            f"{proposed} is refused rather than allowed past an unreadable bound."
+        ) from exc
+
+    if danger_rank(Removal(proposed)) < danger_rank(floor):
+        raise BelowFloorError(
+            f"{package}: refusing to store removal {proposed} under a computed floor of "
+            f"{floor} (set by {analysis.floor_rule}). The floor is a lower bound that may be "
+            "raised and never lowered, and this is REFUSED rather than raised to the floor: "
+            "an answer below it came from misreading the same evidence the description was "
+            "written from, so correcting the number would keep the misreading and hide it."
+        )
+
+
 async def _upsert(session: AsyncSession, values: dict[str, Any]) -> None:
+    await _refuse_below_floor(session, values)
     statement = pg_insert(PackageClassification).values(values)
     await session.execute(
         statement.on_conflict_do_update(
