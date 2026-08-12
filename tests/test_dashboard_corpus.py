@@ -353,6 +353,28 @@ async def test_a_row_never_shows_more_than_three_badges_at_once(db_env, db_sessi
     assert badge_count == 3, f"expected floor + verdict + conflict, got {badge_count}: {row!r}"
 
 
+async def test_the_list_page_carries_a_keyboard_reachable_badge_legend(
+    db_env, db_session_factory, client
+):
+    """Badges on a 50-row list stay bare text — a per-row explanation would add up to 100 tab
+    stops to a table meant to be scanned. One shared `<details>` legend explains every
+    verdict/pending/conflict value instead, and `<summary>` is natively focusable so a
+    keyboard user reaches it without a pointer (SPEC §5). Seeded with ZERO packages
+    deliberately: the empty-corpus state still renders the legend (it sits above the
+    `total == 0` branch), so nothing here can be satisfied by a row's own badge markup —
+    only the legend itself can produce this text, which is what makes this a standalone pin
+    rather than one that happens to red alongside a row-badge mutation."""
+    await _login(client)
+
+    resp = await client.get("/corpus")
+
+    assert "<summary" in resp.text
+    assert "what the badges mean" in resp.text
+    assert "reaches the additions queue" in resp.text
+    assert "dropped from the queue" in resp.text
+    assert "review signal, not a verdict" in resp.text
+
+
 async def test_filter_verdict_never_renders_its_raw_enum_spelling(
     db_env, db_session_factory, client
 ):
