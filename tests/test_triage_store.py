@@ -160,10 +160,16 @@ async def test_the_queue_ranks_by_device_count_descending(db_env, triage_db):
 
 async def test_the_queue_breaks_a_device_count_tie_by_package_name(db_env, triage_db):
     """Without the tie-break the order is whatever Postgres returns, so a reviewer walking
-    the queue twice walks it differently and cannot tell where they were."""
-    await seed(triage_db, {"com.example.zeta": 2, "com.example.alpha": 2})
+    the queue twice walks it differently and cannot tell where they were.
 
-    assert await queue(triage_db) == ["com.example.alpha", "com.example.zeta"]
+    Five packages, inserted in exactly reverse order, so the answer is not the order they
+    were written in. The width is measured rather than chosen: with two rows, dropping the
+    tie-break from the query still passed, because Postgres handed those two back in package
+    order for its own reasons. Five separates them.
+    """
+    await seed(triage_db, {f"com.example.{name}": 2 for name in "edcba"})
+
+    assert await queue(triage_db) == [f"com.example.{name}" for name in "abcde"]
 
 
 async def test_a_package_with_no_facts_row_sorts_last_rather_than_first(db_env, triage_db):
@@ -387,6 +393,38 @@ async def test_an_edit_writes_the_value_and_its_human_provenance(db_env, triage_
     assert row.description == "Notes application. Removing it loses locally stored notes."
     assert row.provenance["description"] == "human:triage"
     assert row.provenance["list"] == f"llm:{MODEL}"
+
+
+async def test_an_edit_survives_the_next_model_run(db_env, triage_db):
+    """The whole reason the edit writes provenance rather than only a value, driven through
+    both writers. Asserting the provenance string alone proves the edit is TAGGED; this is
+    the leg that proves the tag does something, and it is what the model re-run would erase.
+    """
+    await seed(triage_db, {"com.example.one": 1})
+    edited = "Notes application. Removing it loses locally stored notes."
+    async with triage_db() as session, session.begin():
+        await triagestore.apply_edit(
+            session, package="com.example.one", edits={"description": edited}, at=NOW
+        )
+
+    async with triage_db() as session, session.begin():
+        await store_classification(
+            session,
+            proposal("com.example.one", bundle="c" * 64),
+            model=MODEL,
+            thinking=True,
+            usage={},
+            attempts=1,
+            at=NOW,
+        )
+
+    async with triage_db() as session:
+        row = await session.get(PackageClassification, "com.example.one")
+    assert row is not None
+    assert row.description == edited
+    assert row.provenance["description"] == "human:triage"
+    # …and the rest of the row is the new run's, or nothing was re-classified at all.
+    assert row.bundle_sha256 == "c" * 64
 
 
 async def test_an_edit_that_changes_nothing_writes_no_decision(db_env, triage_db):
