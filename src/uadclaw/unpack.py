@@ -27,20 +27,32 @@ falls through to its gzip reader and lists ONE entry where `fsck.erofs --extract
 105 — an under-extraction that raises nothing and looks exactly like a sparse partition. So
 EROFS goes through `fsck.erofs`, and the archive type is forced on every 7z call rather than
 sniffed, because that same sniffing is what produced the wrong answer.
+
+Samsung adds two more steps and the deepest chain here — zip -> tar -> LZ4 frame -> sparse ->
+super -> partition — and its member names carry none of it: the tars are called `.tar.md5`
+and every image inside them `.img.lz4`, so both steps are taken from magic (`ustar` at 257,
+`04 22 4d 18` at 0) and the suffixes are never read. The tar is walked as a STREAM straight
+out of the zip member, because writing it out first would put an 11.47 GB copy on disk that
+nothing reads twice. Measured 2026-08-12 on the real `SM-S911U`/`XAA` build.
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
 import shutil
 import struct
+import tarfile
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
+from typing import IO
+
+import lz4.frame
 
 from uadclaw.settings import Settings
 
@@ -95,7 +107,9 @@ class DuplicatePartitionError(UnpackError):
 class ContainerFormat(StrEnum):
     ZIP = "zip"
     SEVEN_ZIP = "seven_zip"  # Nothing ships its partitions as a split 7z volume set
+    TAR = "tar"  # Samsung wraps each of its six firmware halves in one
     PAYLOAD_BIN = "payload_bin"  # A/B OTA payload
+    LZ4_FRAME = "lz4_frame"  # Samsung compresses every partition image with one
     SPARSE_IMAGE = "sparse_image"  # Android sparse image -> simg2img
     SUPER_IMAGE = "super_image"  # dynamic partitions -> lpunpack
     GPT_DISK = "gpt_disk"  # whole-disk image with a partition table
@@ -110,16 +124,23 @@ _HEADER_BYTES = 8192
 _ZIP_MAGIC = b"PK\x03\x04"
 _SEVEN_ZIP_MAGIC = b"7z\xbc\xaf\x27\x1c"
 _PAYLOAD_MAGIC = b"CrAU"
+_LZ4_FRAME_MAGIC = b"\x04\x22\x4d\x18"  # 0x184D2204 LE, LZ4 frame format
 _SPARSE_MAGIC = b"\x3a\xff\x26\xed"  # 0xED26FF3A little-endian
+_TAR_MAGIC = b"ustar"  # in the first header block, POSIX and GNU spell the rest differently
 _GPT_MAGIC = b"EFI PART"  # at LBA 1
 _LP_GEOMETRY_MAGIC = b"gDla"  # 0x616C4467 LE, at LP_PARTITION_RESERVED_BYTES (4096)
 _EROFS_MAGIC = b"\xe2\xe1\xf5\xe0"  # 0xE0F5E1E2 LE, at EROFS_SUPER_OFFSET (1024)
 _EXT4_MAGIC = b"\x53\xef"  # 0xEF53 LE, at superblock offset 0x38 (i.e. 1024 + 56)
 
+_TAR_MAGIC_OFFSET = 257
 _GPT_HEADER_OFFSET = 512
 _LP_GEOMETRY_OFFSET = 4096
 _EROFS_MAGIC_OFFSET = 1024
 _EXT4_MAGIC_OFFSET = 1024 + 0x38
+
+# How much of a stream is read at a time, and how much of it has to arrive before a decoded
+# payload can be classified (`_HEADER_BYTES` covers every magic offset above).
+_STREAM_CHUNK_BYTES = 4 * 1024 * 1024
 
 # Recursion cap for the container chain (zip -> zip -> super -> partition is depth 4 on real
 # firmware). A cap turns a pathological or hostile nesting into a named error instead of a
@@ -163,6 +184,21 @@ _NON_FILESYSTEM_IMAGES = frozenset(
     }
 )
 
+# Real filesystems that carry no preinstalled app on any build measured, so unpacking one
+# costs a full decompression and yields nothing. Distinct from `_NON_FILESYSTEM_IMAGES`
+# (those are not filesystems at all) and from `PARTITIONS_ALLOWED_EMPTY` (which says a
+# partition ALREADY unpacked is allowed to yield nothing). `userdata` is why this exists: the
+# Samsung `AP_`/`USERDATA_` pair ships one as 1.85 GB of LZ4 that un-sparses to the whole
+# declared partition, and it is a fresh `/data` with not one preinstalled APK in it.
+# `vm-bootsys` (the pVM guest's own root, 8 files) and `dspso` (the DSP firmware filesystem
+# inside Samsung's bootloader tar, 80 files) are here on the same measured footing: real ext4,
+# no APK, and not a partition the device ever installs an app into. Missing one of these is a
+# loud failure and not a quiet one — `extract_artifacts` names the partition and says what to
+# do about it — so the list grows a name per device met rather than guessing ahead.
+_NO_APP_PARTITIONS = frozenset(
+    {"userdata", "cache", "metadata", "persist", "omr", "misc", "vm-bootsys", "dspso"}
+)
+
 _TOOL_PROVIDERS = {
     # p7zip 16.02 does not read ext4 at all; 7-Zip >= 24 does. Neither reads EROFS.
     "7z": "7-Zip >= 24 (Arch: `7zip`, Debian: `7zip`; p7zip 16.02 will NOT do)",
@@ -180,7 +216,23 @@ _TOOL_PROVIDERS = {
 # partition, 429 entries on oriole, zero matches) and every `*_dlkm` partition (kernel modules
 # only — 333 entries on oriole's vendor_dlkm, 105 on the emulator's system_dlkm). Anything
 # else that comes back empty is a bug in the patterns or the extraction, and says so.
-PARTITIONS_ALLOWED_EMPTY = frozenset({"system_other", "cache", "metadata", "userdata"})
+# `prism` and `optics` are Samsung's CSC pair and are kept rather than skipped: they are
+# where a carrier build could put an app, and on the measured `SM-S911U` they hold 397 and 72
+# entries with not one artifact among them. Listed here rather than in `_NO_APP_PARTITIONS`
+# so that the day one of them does carry an APK, it is extracted instead of never opened.
+#
+# `odm` is the one entry here that COSTS something. It carries 4 APKs on Nothing's FroggerPro
+# and is a 10-file stub on Samsung's SM-S911U — `etc/build.prop`, `etc/passwd`, four selinux
+# files — so it is a partition that genuinely holds no app on one vendor and real apps on
+# another, and this list is per-partition rather than per-vendor. Listing it buys Samsung a
+# job that finishes at the price of Nothing's `odm` no longer raising if its extraction
+# breaks. The alternative is to separate "the image yielded no file" from "the image yielded
+# files and none was wanted", which the EROFS path cannot currently tell apart at all
+# (`listed is None` below); that is a change to what this guard MEANS and wants deciding
+# rather than slipping in.
+PARTITIONS_ALLOWED_EMPTY = frozenset(
+    {"system_other", "cache", "metadata", "userdata", "prism", "optics", "odm"}
+)
 
 
 def partition_may_be_empty(name: str) -> bool:
@@ -250,6 +302,13 @@ def _classify_header(header: bytes) -> ContainerFormat:
         return ContainerFormat.SEVEN_ZIP
     if at(0, _PAYLOAD_MAGIC):
         return ContainerFormat.PAYLOAD_BIN
+    if at(0, _LZ4_FRAME_MAGIC):
+        return ContainerFormat.LZ4_FRAME
+    # Before the deeper offsets: `ustar` in a tar's first header block is a longer and more
+    # structured match than a two-byte ext4 magic that a tar's first FILE could carry at the
+    # same offset by coincidence.
+    if at(_TAR_MAGIC_OFFSET, _TAR_MAGIC):
+        return ContainerFormat.TAR
     if at(_GPT_HEADER_OFFSET, _GPT_MAGIC):
         return ContainerFormat.GPT_DISK
     if at(_LP_GEOMETRY_OFFSET, _LP_GEOMETRY_MAGIC):
@@ -588,6 +647,10 @@ async def _unpack(
             return await _unpack_zip(source, workdir, settings, depth)
         case ContainerFormat.SEVEN_ZIP:
             return await _unpack_7z(source, workdir, settings, depth)
+        case ContainerFormat.TAR:
+            return await _unpack_tar(source, workdir, settings, depth)
+        case ContainerFormat.LZ4_FRAME:
+            return await _unpack_lz4(source, name, workdir, settings, depth)
         case ContainerFormat.PAYLOAD_BIN:
             return await _unpack_payload(source, workdir, settings, depth)
         case ContainerFormat.SPARSE_IMAGE:
@@ -655,7 +718,8 @@ async def _unpack_zip(
         return await _unpack(extracted, "payload", workdir, settings, depth + 1)
 
     found: list[PartitionImage] = []
-    for stem, chunks in sorted(_sparsechunk_sets(members).items()):
+    chunk_sets = _sparsechunk_sets(members)
+    for stem, chunks in sorted(chunk_sets.items()):
         found.extend(await _unpack_sparsechunks(source, stem, chunks, workdir, settings, depth))
 
     for member in images:
@@ -678,11 +742,34 @@ async def _unpack_zip(
             logger.info("skipping %s: not a filesystem image", member)
             await asyncio.to_thread(extracted.unlink, True)
 
+    # Whatever the scan above did not claim is sniffed. A Samsung archive claims nothing —
+    # its six members are named `.tar.md5` and this pipeline reads none of that — so all six
+    # are opened by their magic, and each is walked as a stream rather than extracted, which
+    # is what keeps an 11.47 GB copy of the `AP_` member off the disk.
+    claimed = set(images) | {member for chunks in chunk_sets.values() for _index, member in chunks}
+    seen: dict[tuple[str, str], Path] = {}
+    tars = await asyncio.to_thread(
+        _zip_tar_members, source, [member for member in members if member not in claimed]
+    )
+    for member in tars:
+        extracted = await asyncio.to_thread(
+            _stream_zip_tar,
+            source,
+            member,
+            workdir / "tar",
+            root=workdir,
+            max_bytes=settings.max_firmware_archive_bytes,
+            seen=seen,
+        )
+        logger.info("%s: %s yielded %d partition image(s)", source.name, member, len(extracted))
+        found.extend(await _unpack_images(extracted, workdir, settings, depth + 1))
+
     if not found:
         raise UnsupportedContainerError(
             f"_unpack_zip: {source.name} contains no nested archive, no payload.bin, no "
-            f"sparsechunk set and no readable .img member (it has {len(members)} entries); "
-            "this is not a firmware archive shape the pipeline knows"
+            f"sparsechunk set, no tar carrying a partition image and no readable .img member "
+            f"(it has {len(members)} entries); this is not a firmware archive shape the "
+            "pipeline knows"
         )
     return found
 
@@ -849,6 +936,251 @@ async def _extract_7z(archive: Path, names: Sequence[str], dest: Path) -> None:
 def _zip_members(archive: Path) -> list[str]:
     with zipfile.ZipFile(archive) as zf:
         return [info.filename for info in zf.infolist() if not info.is_dir()]
+
+
+# --- tar and LZ4, the two steps Samsung adds. Neither is decided from a name: `AP_….tar.md5`
+# is a plain tar with an md5 line appended, and every image inside it wears `.img.lz4`, so
+# both would be trivial to dispatch on and both are dispatched on magic instead. ------------
+
+# What a partition image can be once it has been decoded. A tar entry that lands outside this
+# set is dropped exactly as a non-filesystem `.img` member of a zip is: an `AP_` tar carries
+# a 1.2 GB `meta-data/fota.zip` next to the partitions, and recursing into that would unpack
+# a whole second OTA package nothing downstream reads.
+_PARTITION_FORMATS = frozenset(
+    {
+        ContainerFormat.SPARSE_IMAGE,
+        ContainerFormat.SUPER_IMAGE,
+        ContainerFormat.EXT4,
+        ContainerFormat.EROFS,
+    }
+)
+
+_SKIPPED_TAR_PARTITIONS = _NON_FILESYSTEM_IMAGES | _NO_APP_PARTITIONS
+
+
+def _decoded_chunks(
+    payload: IO[bytes], head: bytes, *, framed: bool, max_bytes: int, context: str
+) -> Iterator[bytes]:
+    """One entry's payload, LZ4-decoded when its own leading bytes said it was a frame.
+
+    Streamed rather than decoded in one call: an LZ4 frame declares no output size anywhere
+    in its header, so `lz4.frame.decompress` on a Samsung `super.img.lz4` builds an 11 GB
+    `bytes` in the worker's heap before returning any of it. `max_bytes` is the same ceiling
+    the zip path applies to a declared member size, applied here to what actually comes out,
+    since nothing declares it up front — which is also what bounds a decompression bomb.
+    """
+    decompressor = lz4.frame.LZ4FrameDecompressor() if framed else None
+    produced = 0
+    chunk = head
+    while chunk:
+        decoded = decompressor.decompress(chunk) if decompressor is not None else chunk
+        if decoded:
+            produced += len(decoded)
+            if produced > max_bytes:
+                raise UnpackError(
+                    f"{context}: decoded more than the {max_bytes}-byte ceiling without reaching "
+                    "the end of the entry; raise max_firmware_archive_bytes if this firmware is "
+                    "genuinely that large"
+                )
+            yield decoded
+        chunk = payload.read(_STREAM_CHUNK_BYTES)
+
+
+def _extract_tar_partitions(
+    stream: IO[bytes],
+    dest_dir: Path,
+    *,
+    root: Path,
+    context: str,
+    max_bytes: int,
+    seen: dict[tuple[str, str], Path],
+) -> list[tuple[str, Path]]:
+    """Every partition image inside one tar, without the tar itself ever being written.
+
+    `tarfile`'s `r|` stream mode walks a non-seekable file object, which is exactly what a zip
+    member is, so the 11.47 GB `AP_` member is decompressed once on its way past rather than
+    landing on disk to be read again.
+
+    Each entry is classified twice from its own bytes: once raw, which is what says whether it
+    is an LZ4 frame, and once on the decoded head, because what has to be known is what the
+    payload IS. `seen` is keyed on the partition name AND the sha256 of the decoded image, so
+    a build that ships one partition in two of its tars (`CSC_` and `HOME_CSC_` carry
+    byte-identical `prism` and `optics`) resolves rather than colliding, while two DIFFERENT
+    partitions that happen to hold the same bytes — two near-empty images of one size is not
+    an exotic shape — stay two partitions. There is nothing to guess between two copies of one
+    partition, which is what separates this from `DuplicatePartitionError`.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    found: list[tuple[str, Path]] = []
+    with tarfile.open(fileobj=stream, mode="r|") as tar:
+        for member in tar:
+            if not member.isfile():
+                continue
+            safe_archive_path(member.name, context=context)
+            payload = tar.extractfile(member)
+            if payload is None:
+                continue
+            raw_head = payload.read(_HEADER_BYTES)
+            raw_fmt = _classify_header(raw_head)
+            framed = raw_fmt is ContainerFormat.LZ4_FRAME
+            if not framed and raw_fmt not in _PARTITION_FORMATS:
+                logger.info("%s: %s is %s, not a partition image", context, member.name, raw_fmt)
+                continue
+            # The suffix is dropped only because the magic already said the payload was a
+            # frame; it is bookkeeping for the name on disk, never the reason to decode.
+            entry = PurePosixPath(member.name)
+            filename = safe_component(entry.stem if framed else entry.name, context=context)
+            name = Path(filename).stem
+            if normalize_partition_name(name) in _SKIPPED_TAR_PARTITIONS:
+                logger.info("%s: skipping %s, it carries no artifact", context, member.name)
+                continue
+
+            chunks = _decoded_chunks(
+                payload,
+                raw_head,
+                framed=framed,
+                max_bytes=max_bytes,
+                context=f"{context}[{member.name}]",
+            )
+            head = bytearray()
+            for chunk in chunks:
+                head += chunk
+                if len(head) >= _HEADER_BYTES:
+                    break
+            fmt = _classify_header(bytes(head[:_HEADER_BYTES]))
+            if fmt not in _PARTITION_FORMATS:
+                logger.info(
+                    "%s: %s decodes to %s, not a partition image", context, member.name, fmt
+                )
+                continue
+
+            dest = unique_path(dest_dir, filename)
+            ensure_within(root, dest, context=context)
+            digest = hashlib.sha256()
+            with dest.open("wb") as out:
+                out.write(head)
+                digest.update(head)
+                for chunk in chunks:
+                    out.write(chunk)
+                    digest.update(chunk)
+            key = (name, digest.hexdigest())
+            if key in seen:
+                logger.info(
+                    "%s: %s is byte-identical to %s, already taken from an earlier member",
+                    context,
+                    member.name,
+                    seen[key].name,
+                )
+                dest.unlink(missing_ok=True)
+                continue
+            seen[key] = dest
+            found.append((name, dest))
+    return found
+
+
+def _stream_zip_tar(
+    archive: Path,
+    member: str,
+    dest_dir: Path,
+    *,
+    root: Path,
+    max_bytes: int,
+    seen: dict[tuple[str, str], Path],
+) -> list[tuple[str, Path]]:
+    with zipfile.ZipFile(archive) as zf, zf.open(member) as stream:
+        return _extract_tar_partitions(
+            stream,
+            dest_dir,
+            root=root,
+            context=f"_stream_zip_tar[{member}]",
+            max_bytes=max_bytes,
+            seen=seen,
+        )
+
+
+def _zip_tar_members(archive: Path, members: Sequence[str]) -> list[str]:
+    """Which of `members` are tars, decided by reading each one's leading bytes.
+
+    Costs one 8 KB decompression per member, which is why it is handed only the members the
+    name-shaped scan did not already claim — and why a Samsung archive, whose six members
+    claim nothing, gets all six sniffed.
+    """
+    tars: list[str] = []
+    with zipfile.ZipFile(archive) as zf:
+        for member in members:
+            with zf.open(member) as stream:
+                if _classify_header(stream.read(_HEADER_BYTES)) is ContainerFormat.TAR:
+                    tars.append(member)
+    return tars
+
+
+async def _unpack_images(
+    images: Sequence[tuple[str, Path]], workdir: Path, settings: Settings, depth: int
+) -> list[PartitionImage]:
+    """Recurse into images already classified as partition formats, dropping the ones that
+    turn out not to be a filesystem this pipeline reads."""
+    found: list[PartitionImage] = []
+    for name, path in images:
+        try:
+            found.extend(await _unpack(path, name, workdir, settings, depth + 1))
+        except UnsupportedContainerError:
+            logger.info("skipping %s: not a filesystem image", path.name)
+            await asyncio.to_thread(path.unlink, True)
+    return found
+
+
+async def _unpack_tar(
+    source: Path, workdir: Path, settings: Settings, depth: int
+) -> list[PartitionImage]:
+    def read() -> list[tuple[str, Path]]:
+        with source.open("rb") as stream:
+            return _extract_tar_partitions(
+                stream,
+                workdir / "tar",
+                root=workdir,
+                context=f"_unpack_tar[{source.name}]",
+                max_bytes=settings.max_firmware_archive_bytes,
+                seen={},
+            )
+
+    images = await asyncio.to_thread(read)
+    if not images:
+        raise NothingExtractedError(
+            f"_unpack_tar: {source.name} holds no entry whose bytes are a partition image; a "
+            "tar handed here directly is expected to be the one carrying them"
+        )
+    _drop_consumed_intermediate(source, depth)
+    found = await _unpack_images(images, workdir, settings, depth)
+    if not found:
+        raise UnpackError(
+            f"_unpack_tar: none of the {len(images)} image(s) in {source.name} is a filesystem "
+            "this pipeline reads"
+        )
+    return found
+
+
+async def _unpack_lz4(
+    source: Path, name: str, workdir: Path, settings: Settings, depth: int
+) -> list[PartitionImage]:
+    raw_dir = workdir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw = unique_path(raw_dir, f"{safe_component(name, context='_unpack_lz4')}.img")
+
+    def decode() -> None:
+        with source.open("rb") as src, raw.open("wb") as out:
+            head = src.read(_STREAM_CHUNK_BYTES)
+            for chunk in _decoded_chunks(
+                src,
+                head,
+                framed=True,
+                max_bytes=settings.max_firmware_archive_bytes,
+                context=f"_unpack_lz4[{source.name}]",
+            ):
+                out.write(chunk)
+
+    await asyncio.to_thread(decode)
+    _drop_consumed_intermediate(source, depth)
+    return await _unpack(raw, name, workdir, settings, depth + 1)
 
 
 async def _unpack_sparse(
