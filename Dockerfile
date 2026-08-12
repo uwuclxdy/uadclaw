@@ -99,24 +99,32 @@ WORKDIR /app
 #
 # `simg2img` comes from android-sdk-libsparse-utils below and IS present, which is what the
 # Motorola sparsechunk rebuild needs before lpunpack ever runs.
+#
+# `git` is the odd one out: nothing unpacks with it. The branch-emission stage shells out to it
+# against a local clone the operator mounts, and it neither pushes nor authenticates — there is
+# no GitHub credential in this stack, a human pushes the branch by hand.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       7zip \
       erofs-utils \
       android-sdk-libsparse-utils \
+      git \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=payload-dumper /go/bin/payload-dumper-go /usr/local/bin/payload-dumper-go
 COPY --from=lpunpack-builder /src/build/vendor/lpunpack /usr/local/bin/lpunpack
 
-# Every tool `uadclaw.unpack` shells out to, resolved and link-checked at BUILD time. The gap
-# this closes is the lpunpack builder's eleven -dev packages: CMake's configure step probes
+# Every tool this image shells out to — `uadclaw.unpack`'s five plus `git` for branch emission —
+# resolved and link-checked at BUILD time. A tool this loop does not NAME is unasserted however
+# many other lines install it, and the dev box carries all of them, so a tool missing from the
+# image passes every local run and fails inside a job: a tool added above gets added here in the
+# same change. The gap this closes is the lpunpack builder's eleven -dev packages: CMake probes
 # all of them, so an android-tools release that makes one an lpunpack-side dependency gives
 # the binary a NEEDED entry this slim runtime has no library for — the image still builds, and
 # the failure is a dynamic-loader error the first time a Motorola job reaches its `super.img`.
 # `/usr/bin/7z` is a `#!/bin/sh` wrapper (its ELF is `7zz`), so for that one `command -v` is
 # the whole check and the ldd half is a deliberate no-op.
 RUN set -eu; \
-    for tool in 7z fsck.erofs simg2img lpunpack payload-dumper-go; do \
+    for tool in 7z fsck.erofs simg2img lpunpack payload-dumper-go git; do \
       resolved="$(command -v "$tool")" || { echo "missing tool: $tool" >&2; exit 1; }; \
       if ldd "$resolved" 2>/dev/null | grep -q 'not found'; then \
         echo "unresolved shared libraries in $resolved:" >&2; \
