@@ -206,12 +206,38 @@ async def test_root_sends_a_browser_to_triage_and_a_script_the_identity_payload(
 
 
 @pytest.mark.parametrize("item", web.NAV_ITEMS)
-async def test_every_nav_destination_resolves(client, item):
-    """A nav entry pointing at a route nobody registered is a dead link the moment a lane
-    renames its path, and nothing else in the suite would notice."""
+async def test_every_nav_destination_resolves(db_env, client, item):
+    """A nav entry pointing at a route nobody registered is a dead link the moment a screen
+    renames its path, and nothing else in the suite would notice.
+
+    Takes `db_env` so it tests what its name says. Without it the database is unreachable and
+    this silently became an assertion about how screens behave when Postgres is down — a real
+    property, but not this one, and two screen authors independently had to work out why a
+    test called "resolves" was failing them. That property now has its own test below.
+    """
     await _login(client)
     resp = await client.get(item.href, headers={"accept": "text/html"})
     assert resp.status_code == 200, f"{item.key} -> {item.href}"
+
+
+@pytest.mark.parametrize("item", web.NAV_ITEMS)
+async def test_every_screen_degrades_when_the_database_is_unreachable(client, item):
+    """No `db_env`, so `postgres_host` stays at its container-only default and every query
+    raises. Each screen must still render, with a visible error.
+
+    Asserting the error marker rather than only the status is the point: a screen that
+    swallowed the failure and rendered its EMPTY state would answer 200 and be lying, and
+    "no packages yet" is the most expensive lie this dashboard could tell a reviewer.
+
+    Note what this does NOT cover, because it is worth knowing: a database host that is
+    routable but dead makes asyncpg hang rather than raise, since nothing sets a connect
+    timeout. Measured against a blackhole address, all four screens hang instead of
+    degrading. This test reaches the DNS-failure case only.
+    """
+    await _login(client)
+    resp = await client.get(item.href, headers={"accept": "text/html"})
+    assert resp.status_code == 200, f"{item.key} 500ed instead of degrading"
+    assert "callout-danger" in resp.text, f"{item.key} hid the failure instead of showing it"
 
 
 async def test_the_shell_marks_the_screen_you_are_on(client):
