@@ -39,7 +39,9 @@
     </div>
   </nav>
 
-  <main id="main" style="padding:var(--space-10) var(--space-12);max-width:1400px;margin:0 auto;width:100%">
+  {# The page box is a class rather than a `style=` attribute because its padding changes at a
+     phone width, and an inline style wins over every media query that would. #}
+  <main id="main" class="page-main">
     {% block content %}{% endblock %}
   </main>
 </div>

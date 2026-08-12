@@ -6,7 +6,7 @@
     <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">human gate</div>
     <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em">triage</h2>
     <p style="font-size:var(--text-sm);color:var(--text-dim);margin-top:var(--space-2)">
-      ranked by how many devices shipped the package. every entry needs a human before it can reach a pull request.
+      ranked by device count. nothing reaches a pull request without a human.
     </p>
   </header>
 
@@ -58,6 +58,18 @@
     // refused, and a keybind that fires a refusal is a keybind that teaches nothing.
     if (control.dataset.focus === 'true') { control.focus(); control.select(); return; }
     control.click();
+  });
+
+  // An htmx swap replaces the board, and the focused control goes with it: focus falls back
+  // to <body>, so the next Tab restarts at the top of the document and a refusal the reviewer
+  // has to answer is somewhere behind them. The SERVER says where focus belongs, because it
+  // is what knows why this render happened; this only moves it.
+  document.body.addEventListener('htmx:afterSwap', function () {
+    var target = document.querySelector('[data-swap-focus]');
+    if (target) target.focus();
+    // The rail scrolls in its own box, so an advance can select a row that is not on screen.
+    var selected = document.querySelector('[data-queue-row][data-selected="true"]');
+    if (selected) selected.scrollIntoView({ block: 'nearest' });
   });
 })();
 </script>

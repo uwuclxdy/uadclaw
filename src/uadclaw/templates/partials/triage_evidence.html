@@ -1,0 +1,134 @@
+{# The evidence column: everything that BACKS a decision without being one. Split from the
+   card so the reviewer's controls stay at a fixed place on the screen instead of moving
+   with however much evidence this package happens to carry.
+
+   `sources` and `firmware facts` stay open — the first is what an upstream maintainer asked
+   for and the second is what the rating is argued from. The reference sections below them
+   are `<details>`: they are read on the packages where something looks wrong, and they were
+   most of the scroll.
+
+   Nothing here is `|safe`. Titles and page text come off the open web. #}
+{% set c = board.candidate %}
+
+{# --- sources ------------------------------------------------------------------------------ #}
+<article class="card" style="margin-bottom:var(--space-4)">
+  <div style="display:flex;gap:var(--space-3);align-items:baseline;justify-content:space-between;margin-bottom:var(--space-3)">
+    <div class="label">sources</div>
+    {% if c.corroboration == "corroborated" %}
+      <span class="tag tag-success">{{ corroboration_label(c.corroboration, c.sources|length) }}</span>
+    {% elif c.corroboration %}
+      <span class="tag tag-warning">{{ corroboration_label(c.corroboration, c.sources|length) }}</span>
+    {% else %}
+      <span class="tag tag-default">not searched</span>
+    {% endif %}
+  </div>
+  {% if c.corroboration %}
+    {% if c.corroboration_reasoning or c.corroboration_failure %}
+      <p style="font-size:var(--text-sm);color:var(--text-dim);margin-bottom:var(--space-3)">
+        {{ c.corroboration_reasoning }}{% if c.corroboration_failure %} ({{ c.corroboration_failure }}){% endif %}
+      </p>
+    {% endif %}
+  {% else %}
+    <p style="font-size:var(--text-sm);color:var(--text-dim);margin-bottom:var(--space-3)">
+      not searched yet.
+    </p>
+  {% endif %}
+  {% if c.sources %}
+    <ul style="list-style:none;display:grid;gap:var(--space-2)">
+      {% for url, title, linkable in c.sources %}
+        <li>
+          {% if linkable %}
+            {# The scheme was checked in the store: an `href` is a scheme away from being
+               executable and escaping does nothing about it, because the value is not
+               markup. #}
+            <a href="{{ url }}" target="_blank" rel="noopener noreferrer nofollow">{{ title or url }}</a>
+          {% else %}
+            {{ title or url }} <span class="tag tag-warning">not a web link</span>
+          {% endif %}
+          <div style="font-size:var(--text-xs);color:var(--text-faint);word-break:break-all">{{ url }}</div>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</article>
+
+{# --- what the firmware declared ------------------------------------------------------------ #}
+<article class="card" style="margin-bottom:var(--space-4)">
+  <div class="label" style="margin-bottom:var(--space-3)">firmware facts</div>
+  {% if c.evidence %}
+    <table class="info-table">
+      {% for name, value in c.evidence %}
+        <tr><td>{{ name }}</td><td style="word-break:break-word">{{ value }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p style="font-size:var(--text-sm);color:var(--text-faint)">no merged facts row.</p>
+  {% endif %}
+  {% if c.conflicts %}
+    <div class="callout callout-info" style="margin-top:var(--space-4)">
+      <div class="callout-body">
+        <span class="callout-title">{{ c.conflicts|length }} field{{ " differs" if c.conflicts|length == 1 else "s differ" }} between devices</span>
+        {% for line in c.conflicts %}<div style="word-break:break-word">{{ line }}</div>{% endfor %}
+        every one measured so far is ordinary signing-key rotation. shown, never filtered on.
+      </div>
+    </div>
+  {% endif %}
+</article>
+
+{# --- what upstream already carries --------------------------------------------------------- #}
+<article class="card" style="margin-bottom:var(--space-4)">
+  <details>
+    <summary class="label" style="cursor:pointer">similar upstream entries</summary>
+    <div style="margin-top:var(--space-3)">
+      {% if board.upstream_error %}
+        <div class="callout callout-warning">
+          <div class="callout-body">{{ board.upstream_error }}</div>
+        </div>
+      {% elif c.anchors %}
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>package</th><th>list</th><th>removal</th><th>description</th></tr></thead>
+            <tbody>
+              {% for entry in c.anchors %}
+                <tr>
+                  <td class="table-name" style="word-break:break-all">{{ entry.package }}</td>
+                  <td>{{ entry.list or "-" }}</td>
+                  <td>{{ entry.removal or "-" }}</td>
+                  <td>{{ entry.description }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p style="font-size:var(--text-sm);color:var(--text-faint)">
+          nothing upstream shares this namespace.
+        </p>
+      {% endif %}
+    </div>
+  </details>
+</article>
+
+{# --- the log ------------------------------------------------------------------------------- #}
+{% if c.history %}
+  <article class="card">
+    <details>
+      <summary class="label" style="cursor:pointer">past decisions ({{ c.history|length }})</summary>
+      <div class="table-wrap" style="margin-top:var(--space-3)">
+        <table>
+          <thead><tr><th>when</th><th>action</th><th>this proposal</th><th>reason</th></tr></thead>
+          <tbody>
+            {% for item in c.history %}
+              <tr>
+                <td class="num">{{ item.decided_at.strftime("%Y-%m-%d %H:%M") }}</td>
+                <td class="table-name">{{ item.action }}</td>
+                <td>{{ "yes" if item.current else "an earlier one" }}</td>
+                <td>{{ item.reason or "-" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  </article>
+{% endif %}

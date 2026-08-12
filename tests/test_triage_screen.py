@@ -11,6 +11,7 @@ The five screen states each get a test. Four of them are the ones that ship brok
 
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -183,8 +184,9 @@ async def test_the_card_shows_the_floor_and_the_rule_that_set_it(
 
     body = await screen(client)
 
+    assert "minimum rating" in body
+    assert ">Advanced</strong>, set by <code>privileged</code>" in body
     assert "privileged (priv-app)" in body
-    assert "floor advanced" in body
 
 
 async def test_the_card_shows_the_evidence_and_the_nearest_upstream_entry(
@@ -195,7 +197,8 @@ async def test_the_card_shows_the_evidence_and_the_nearest_upstream_entry(
 
     body = await screen(client)
 
-    assert "what the firmware declared" in body
+    assert "firmware facts" in body
+    assert "similar upstream entries" in body
     assert "Organization: Example Corp" in body
     assert "com.example.sibling" in body
 
@@ -317,7 +320,8 @@ async def test_an_uncorroborated_candidate_reaches_the_screen_flagged(
     body = await screen(client)
 
     assert "com.android.example" in body
-    assert "not corroborated" in body
+    assert ">not searched</span>" in body
+    assert "not searched yet." in body
 
 
 # --- the five states ---------------------------------------------------------------------------
@@ -355,8 +359,8 @@ async def test_the_partial_state_names_what_is_missing(db_env, triage_env, triag
 
     body = await screen(client)
 
-    assert "deciding without" in body
-    assert "corroboration" in body
+    assert '<span class="callout-title">missing</span>' in body
+    assert "sources. common rather than broken." in body
 
 
 async def test_an_unknown_package_is_an_error_beside_the_queue_rather_than_a_500(
@@ -502,7 +506,7 @@ async def test_a_parked_package_is_reachable_behind_its_own_filter(
 
     assert "com.example.parked" not in await screen(client)
     parked = await screen(client, "?view=parked")
-    assert "the model could not answer this one" in parked
+    assert "deepseek gave no answer" in parked
 
 
 # --- the edit path ----------------------------------------------------------------------------
@@ -700,3 +704,456 @@ async def test_a_database_that_refuses_the_password_is_an_error_state_not_a_500(
 async def test_the_screen_is_behind_auth_like_every_other_route(db_env, triage_env, client):
     resp = await client.post("/triage/decide", data={"package": "x", "action": "approve"})
     assert resp.status_code == 401
+
+
+# --- the three columns, the badges and the wording ---------------------------------------
+
+
+def columns(body: str) -> tuple[str, str]:
+    """The decide column and the evidence column, split where the second one starts.
+
+    Asserted against the rendered halves rather than against the whole body, because every
+    string this round moved is a string that already existed somewhere on the page: a bare
+    `in body` cannot tell "the evidence is in its own column" from "the evidence is where it
+    always was".
+    """
+    marker = '<div class="triage-evidence">'
+    assert marker in body, "the evidence column was not rendered"
+    decide, evidence = body.split(marker, 1)
+    return decide, evidence
+
+
+def badge_rows(fragment: str) -> list[list[str]]:
+    """Every `.badge-row` in a fragment, as the list of badge labels inside it."""
+    return [
+        re.findall(r'<span class="tag [^"]*"[^>]*>([^<]*)</span>', row)
+        for row in re.findall(r'class="badge-row"[^>]*>(.*?)</div>', fragment, re.S)
+    ]
+
+
+async def corroborate(session_factory, package: str, *, status: str, sources: list) -> None:
+    async with session_factory() as session, session.begin():
+        session.add(
+            PackageCorroboration(
+                package=package,
+                created_at=NOW,
+                updated_at=NOW,
+                description_sha256="e" * 64,
+                status=status,
+                model=MODEL,
+                thinking=True,
+                sources=sources,
+                reasoning="",
+                provenance={},
+                usage={},
+                attempts=1,
+            )
+        )
+
+
+async def test_the_decision_and_the_evidence_are_separate_columns(
+    db_env, triage_env, triage_db, client
+):
+    """The clutter this round was asked to fix: seven sections stacked in one column on one
+    scroll. What the reviewer acts on and what backs it up are different columns now, so a
+    long evidence section cannot push the verdict buttons off the screen."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+
+    body = await screen(client)
+    decide, evidence = columns(body)
+
+    assert 'class="triage-board"' in body
+    assert 'class="triage-rail"' in body
+    for acted_on in ('name="action" value="approve"', "deepseek's answer", "minimum rating"):
+        assert acted_on in decide, acted_on
+    for backing in (">firmware facts</div>", ">similar upstream entries</summary>"):
+        assert backing in evidence, backing
+    assert ">firmware facts</div>" not in decide
+
+
+async def test_the_lower_value_evidence_is_collapsed_rather_than_scrolled_past(
+    db_env, triage_env, triage_db, client
+):
+    """`sources` and `firmware facts` are what a rating is argued from and stay open. The two
+    reference sections were most of the scroll and are read on the packages where something
+    looks wrong, so they open on request."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+    await act(client, package="com.example.one", action="defer", view="queue")
+
+    _, evidence = columns(await screen(client, "?view=deferred"))
+
+    assert (
+        '<summary class="label" style="cursor:pointer">similar upstream entries</summary>'
+        in evidence
+    )
+    assert '<summary class="label" style="cursor:pointer">past decisions (1)</summary>' in evidence
+    assert (
+        '<div class="label" style="margin-bottom:var(--space-3)">firmware facts</div>' in evidence
+    )
+
+
+async def flag_everything(session_factory, package: str) -> None:
+    """One package carrying every flag at once: a rating, a device disagreement, no answer.
+
+    The worst case is what the ceiling is measured against — a ceiling checked on a row that
+    renders no badges at all passes for the wrong reason. The park reuses the bundle the
+    proposal was stored under on purpose, because `park_package` only clears the answer when
+    the bundle moved, and a park that wiped the rating would take the third badge with it.
+    """
+    async with session_factory() as session, session.begin():
+        await store_device_facts(
+            session,
+            device_key="pixel:rotated",
+            build="bp1a.260505.001",
+            facts=[make_facts(package, cert_issuer="Organization: Rotated Key")],
+            observed_at=NOW,
+        )
+    async with session_factory() as session, session.begin():
+        await park_package(
+            session,
+            package,
+            bundle_sha256=BUNDLE,
+            model=MODEL,
+            thinking=True,
+            reason="removal: answered below the floor three times",
+            usage={},
+            attempts=3,
+            at=NOW,
+        )
+
+
+async def test_the_card_shows_at_most_three_badges_and_the_rail_at_most_two(
+    db_env, triage_env, triage_db, client
+):
+    """The user's complaint, measured. The card header rendered up to seven at once and the
+    rail up to five; a row carrying a rating, a confidence, a corroboration verdict, a
+    conflict and a park is a row nobody reads any of."""
+    await login(client)
+    await seed(triage_db, {"com.example.flagged": 1})
+    await corroborate(triage_db, "com.example.flagged", status="corroborated", sources=[])
+    await flag_everything(triage_db, "com.example.flagged")
+
+    body = await screen(client, "?view=parked")
+    decide, _ = columns(body)
+    rail = body.split('<aside class="triage-rail">', 1)[1].split("</aside>", 1)[0]
+
+    card_badges = badge_rows(decide)
+    rail_badges = badge_rows(rail)
+    assert card_badges and card_badges[0], "the card rendered no badges, so no ceiling was read"
+    assert rail_badges and rail_badges[0], "the rail rendered no badges, so no ceiling was read"
+    for row in card_badges:
+        assert len(row) <= 3, f"the card header carries {len(row)} badges: {row}"
+    for row in rail_badges:
+        assert len(row) <= 2, f"a queue row carries {len(row)} badges: {row}"
+
+
+async def test_the_rail_drops_the_badges_that_do_not_change_a_decision(
+    db_env, triage_env, triage_db, client
+):
+    """Only `no answer` and `conflict` earn a slot in the rail: both mean this package needs a
+    DIFFERENT decision. A rating and a corroboration verdict are read on the card, on the one
+    package in front of the reviewer.
+
+    Driven on a row that DOES render badges. On a row with none, "the rating is not in the
+    rail" is true because nothing is, and adding the rating back changes nothing the test can
+    see — measured: the mutation that puts it back survived this test until the fixture grew
+    a row with a badge row on it.
+    """
+    await login(client)
+    await seed(triage_db, {"com.example.flagged": 1})
+    await corroborate(triage_db, "com.example.flagged", status="corroborated", sources=[])
+    await flag_everything(triage_db, "com.example.flagged")
+
+    body = await screen(client, "?view=parked")
+    rail = body.split('<aside class="triage-rail">', 1)[1].split("</aside>", 1)[0]
+
+    assert badge_rows(rail) == [["no answer", "conflict"]]
+    for dropped in ("advanced", "corroborated", "medium"):
+        assert dropped not in rail.lower(), dropped
+
+
+async def test_every_badge_is_explained_where_a_keyboard_can_reach_it(
+    db_env, triage_env, triage_db, client
+):
+    """A `title` on a non-focusable `<span>` is a pointer affordance, and this screen exists to
+    be driven by keyboard. One `<summary>` is one tab stop for the whole set."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+
+    body = await screen(client)
+
+    assert '<summary class="label" style="cursor:pointer">what the badges mean</summary>' in body
+    legend = body.split('id="triage-badge-help"', 1)[1].split("</details>", 1)[0]
+    # Spelled out rather than only looped over the constant: a test that reads its expected
+    # values off the same table the template renders proves the table is rendered and never
+    # that the table says anything.
+    assert "how many sources back the description" in legend
+    assert "deepseek could not answer" in legend
+    for badge, meaning in triage_view.BADGE_MEANINGS:
+        assert f">{badge}</span>" in legend, badge
+        assert meaning in legend, meaning
+
+
+async def test_the_words_this_project_invented_are_gone_from_the_screen(
+    db_env, triage_env, triage_db, client
+):
+    """`corroborated` was the one the user named. The rest went with it: every string in the
+    round's wording table is a display string, and the value under it is untouched — the view
+    is still `deferred`, the action is still `defer`, the status column still says
+    `corroborated`."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+    await corroborate(
+        triage_db,
+        "com.example.one",
+        status="corroborated",
+        sources=[{"url": "https://example.test/a", "title": "A page"}],
+    )
+
+    body = await screen(client)
+
+    for retired in (
+        "not corroborated",
+        "deciding without",
+        "the model's proposal",
+        "the removal floor",
+        "what the firmware declared",
+        "nearest entries upstream",
+        "decisions on this package",
+        "the model could not answer this one",
+        "pinned at",
+    ):
+        assert retired not in body, retired
+    assert ">1 source</span>" in body
+    # …and the values under the labels did not move.
+    assert 'href="/triage?view=deferred"' in body
+    assert 'value="defer"' in body
+
+
+@pytest.mark.parametrize(
+    ("status", "label"),
+    [
+        ("uncorroborated", "no sources"),
+        ("search_failed", "search failed"),
+        ("judge_failed", "check failed"),
+    ],
+)
+async def test_a_corroboration_status_reads_as_its_label_and_never_as_its_value(
+    db_env, triage_env, triage_db, client, status, label
+):
+    """A map rather than `.replace("_", " ")`: a substitution turns a status nobody wrote a
+    label for into a sentence that looks authored, and it cannot spell `corroborated` as the
+    count the reviewer actually decides on."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+    await corroborate(triage_db, "com.example.one", status=status, sources=[])
+
+    body = await screen(client)
+
+    assert f">{label}</span>" in body
+    assert status not in body
+
+
+# --- icons ---------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def has_icons(monkeypatch):
+    """Every row and card answers "this package has an icon".
+
+    `package_facts.icon_mime` is another lane's column and does not exist in this checkout, so
+    the store cannot produce a true `has_icon` here. What this fixture pins is the half that
+    is this screen's: given the flag, the markup. The flag's own derivation is pinned in the
+    store suite against the column being absent.
+    """
+    real_board = triagestore.load_board
+    real_candidate = triagestore.load_candidate
+
+    async def board(session, *, view):
+        rows, counts = await real_board(session, view=view)
+        return tuple(replace(row, has_icon=True) for row in rows), counts
+
+    async def candidate(session, package, *, upstream=None):
+        return replace(await real_candidate(session, package, upstream=upstream), has_icon=True)
+
+    monkeypatch.setattr(triagestore, "load_board", board)
+    monkeypatch.setattr(triagestore, "load_candidate", candidate)
+
+
+async def test_a_package_with_no_icon_gets_a_monogram_and_never_a_request(
+    db_env, triage_env, triage_db, client
+):
+    """~62% of packages declare no icon at all, so the fallback is the ordinary case. A chip
+    that fetched anything would be 62% of the corpus fetching a 404."""
+    await login(client)
+    await seed(triage_db, {"com.example.notes": 1})
+
+    body = await screen(client)
+
+    assert "/icons/" not in body
+    chip = triagestore.monogram("com.example.notes")
+    assert (
+        f'<span class="monogram {chip.tint}" role="img" aria-label="com.example.notes">'
+        f"{chip.letters}</span>" in body
+    )
+
+
+async def test_a_package_with_an_icon_renders_the_image_at_both_sizes(
+    db_env, triage_env, triage_db, client, has_icons
+):
+    await login(client)
+    await seed(triage_db, {"com.example.notes": 1})
+
+    body = await screen(client)
+
+    assert 'class="pkg-icon pkg-icon-sm" src="/icons/com.example.notes"' in body
+    assert 'class="pkg-icon" src="/icons/com.example.notes"' in body
+    assert "monogram" not in body
+
+
+async def test_an_icon_url_encodes_the_package_name_rather_than_escaping_it(
+    db_env, triage_env, triage_db, client, has_icons
+):
+    """The rule the queue link already follows. Escaping turns a literal `&` into `&amp;`,
+    which the browser decodes straight back into a parameter separator — on an icon route the
+    consequence is the wrong package's icon beside a name, which reads as a correct answer."""
+    await login(client)
+    await seed(triage_db, {"com.example.notes&x=1": 1})
+
+    body = await screen(client)
+
+    assert "/icons/com.example.notes%26x%3D1" in body
+    assert "/icons/com.example.notes&amp;x=1" not in body
+
+
+# --- focus after a swap ----------------------------------------------------------------------
+
+
+async def test_exactly_one_element_asks_for_focus_after_a_swap(
+    db_env, triage_env, triage_db, client
+):
+    """A swap replaces the board and focus falls back to `<body>`, so the next Tab restarts at
+    the top of the document. Two candidates for it is the same bug wearing an answer: whichever
+    the script finds first wins, and which one that is depends on document order."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+
+    body = await act(client, package="com.example.one", action="defer", view="queue")
+
+    assert body.count("data-swap-focus") == 1
+    assert '<div class="triage-decide" tabindex="-1" data-swap-focus>' in body
+
+
+async def test_a_rejection_with_no_reason_puts_focus_on_the_field_it_is_about(
+    db_env, triage_env, triage_db, client
+):
+    """The message names the field; focus lands there. Anywhere else and the reviewer answers a
+    refusal by hunting for the input it refused."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+
+    body = await act(client, package="com.example.one", action="reject", reason=" ", view="queue")
+
+    assert body.count("data-swap-focus") == 1
+    assert 'id="triage-reject-reason"' in body
+    reason_field = body.split('id="triage-reject-reason"', 1)[1].split(">", 1)[0]
+    assert "data-swap-focus" in reason_field
+
+
+async def test_a_refused_edit_puts_focus_back_in_the_form_that_still_holds_the_typing(
+    db_env, triage_env, triage_db, client
+):
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1}, floor="Advanced")
+
+    resp = await client.post(
+        "/triage/edit",
+        data={"package": "com.example.one", "removal": "Recommended", "view": "queue"},
+        headers={"accept": "text/html", "HX-Request": "true"},
+    )
+
+    assert resp.text.count("data-swap-focus") == 1
+    textarea = resp.text.split('id="edit-description"', 1)[1].split(">", 1)[0]
+    assert "data-swap-focus" in textarea
+    assert '<details id="triage-edit" open' in resp.text
+
+
+# --- the description a reviewer cannot write --------------------------------------------------
+
+
+async def test_the_form_can_declare_a_description_unknown(db_env, triage_env, triage_db, client):
+    """`_check_description` refuses a short description and tells the writer to declare it in
+    `unknown_fields`. That message is shared with the model path deliberately, so the fix is
+    the control it names rather than a second spelling of the rule for humans."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+
+    resp = await client.post(
+        "/triage/edit",
+        data={
+            "package": "com.example.one",
+            "description": "too short",
+            "unknown_description": "1",
+            "view": "queue",
+        },
+        headers={"accept": "text/html", "HX-Request": "true"},
+    )
+
+    assert resp.status_code == 200, resp.text[:400]
+    async with triage_db() as session:
+        row = await session.get(PackageClassification, "com.example.one")
+    assert row is not None
+    assert row.description == "unknown"
+    assert row.unknown_fields == ["description"]
+    assert row.provenance["description"] == "human:triage"
+
+
+async def test_a_declared_unknown_description_comes_back_with_the_control_ticked(
+    db_env, triage_env, triage_db, client
+):
+    """Otherwise the next reviewer reads a row whose description says `unknown` with a box that
+    says it does not, and un-ticking is the only way back."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+    await client.post(
+        "/triage/edit",
+        data={"package": "com.example.one", "unknown_description": "1", "view": "queue"},
+        headers={"accept": "text/html", "HX-Request": "true"},
+    )
+
+    body = await screen(client)
+
+    checkbox = body.split('id="edit-unknown"', 1)[1].split(">", 1)[0]
+    assert "checked" in checkbox
+
+
+async def test_writing_a_real_description_takes_the_unknown_declaration_back_off(
+    db_env, triage_env, triage_db, client
+):
+    """A row carrying a written description while still declaring it unknown asserts two
+    contradictory things."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+    await client.post(
+        "/triage/edit",
+        data={"package": "com.example.one", "unknown_description": "1", "view": "queue"},
+        headers={"accept": "text/html", "HX-Request": "true"},
+    )
+
+    await client.post(
+        "/triage/edit",
+        data={
+            "package": "com.example.one",
+            "description": "Notes application. Removing it loses locally stored notes.",
+            "view": "queue",
+        },
+        headers={"accept": "text/html", "HX-Request": "true"},
+    )
+
+    async with triage_db() as session:
+        row = await session.get(PackageClassification, "com.example.one")
+    assert row is not None
+    assert row.unknown_fields == []
+    assert row.description.startswith("Notes application")

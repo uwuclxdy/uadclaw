@@ -21,12 +21,13 @@ Three properties this module owes the rest of the pipeline:
 """
 
 import logging
+import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import null, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from uadclaw.bundle import nearest_entries
@@ -60,6 +61,14 @@ VIEWS: tuple[str, ...] = ("queue", "deferred", "decided", "parked")
 # the model was shown when it wrote it.
 ANCHOR_COUNT = 4
 
+# `package_facts.icon_mime` is the icons lane's column. Until it exists a NULL literal keeps
+# this module's select arity and its answer ("no icon") identical either way, so the screen
+# renders monograms rather than failing to import. Drop the fallback once the column lands.
+_ICON_MIME: Any = getattr(PackageFact, "icon_mime", null())
+
+# How many tints a monogram chip can take. The classes are `monogram-t0` upward in `app.css`.
+MONOGRAM_TINTS = 8
+
 
 class TriageError(ValueError):
     """A triage action was refused. Bad input from the form (a rejection with no reason, a
@@ -85,9 +94,36 @@ class Decision:
 
 
 @dataclass(frozen=True, slots=True)
+class Monogram:
+    """The fallback chip for a package that ships no icon: two letters and a tint class."""
+
+    letters: str
+    tint: str
+
+
+def monogram(package: str) -> Monogram:
+    """One package's chip, the same one every time.
+
+    `crc32` rather than `hash()`: Python salts `hash()` per process unless PYTHONHASHSEED is
+    set, so the chip would change colour every time the worker restarted, on a value whose
+    whole job is being recognisable across renders.
+
+    The letters come off the last dotted component, filtered to alphanumerics — a package
+    name is bytes out of a downloaded manifest, so the component can be punctuation and the
+    chip would read as a fragment of markup rather than as a name.
+    """
+    tail = package.rsplit(".", 1)[-1]
+    letters = "".join(char for char in tail if char.isalnum())[:2].upper()
+    if not letters:
+        letters = "".join(char for char in package if char.isalnum())[:2].upper() or "?"
+    return Monogram(letters, f"monogram-t{zlib.crc32(package.encode()) % MONOGRAM_TINTS}")
+
+
+@dataclass(frozen=True, slots=True)
 class QueueRow:
     package: str
     device_count: int
+    has_icon: bool
     removal: str | None
     floor: str | None
     confidence: str | None
@@ -105,6 +141,7 @@ class Candidate:
 
     package: str
     device_count: int
+    has_icon: bool
     devices: tuple[str, ...]
     evidence: tuple[tuple[str, str], ...]
     has_conflict: bool
@@ -188,6 +225,7 @@ async def load_rows(session: AsyncSession) -> tuple[QueueRow, ...]:
             PackageFact.has_conflict,
             PackageAnalysis.floor,
             PackageCorroboration.status,
+            _ICON_MIME.label("icon_mime"),
         )
         .outerjoin(PackageFact, PackageFact.package == PackageClassification.package)
         .outerjoin(PackageAnalysis, PackageAnalysis.package == PackageClassification.package)
@@ -200,11 +238,12 @@ async def load_rows(session: AsyncSession) -> tuple[QueueRow, ...]:
     latest = await _latest_decisions(session)
 
     rows: list[QueueRow] = []
-    for classification, device_count, has_conflict, floor, corroboration in result:
+    for classification, device_count, has_conflict, floor, corroboration, icon_mime in result:
         rows.append(
             QueueRow(
                 package=classification.package,
                 device_count=device_count or 0,
+                has_icon=icon_mime is not None,
                 removal=classification.removal,
                 floor=floor,
                 confidence=classification.confidence,
@@ -397,16 +436,16 @@ def _missing(
     """
     missing: list[str] = []
     if fact is None:
-        missing.append("device facts")
+        missing.append("firmware facts")
     if analysis is None or analysis.floor is None:
-        missing.append("removal floor")
+        missing.append("minimum rating")
     if corroboration is None or corroboration.status != "corroborated":
-        missing.append("corroboration")
+        missing.append("sources")
     if not anchors:
         missing.append("upstream neighbours")
     if classification.unknown_fields:
         unknown = ", ".join(str(field) for field in classification.unknown_fields)
-        missing.append(f"model answer ({unknown})")
+        missing.append(f"deepseek's answer ({unknown})")
     return tuple(missing)
 
 
@@ -454,6 +493,7 @@ async def load_candidate(
     return Candidate(
         package=package,
         device_count=fact.device_count if fact else 0,
+        has_icon=getattr(fact, "icon_mime", None) is not None,
         devices=tuple(str(device) for device in (fact.devices if fact else [])),
         evidence=_evidence_rows(fact),
         has_conflict=bool(fact.has_conflict) if fact else False,

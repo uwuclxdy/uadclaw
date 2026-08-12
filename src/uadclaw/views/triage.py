@@ -30,6 +30,7 @@ from fastapi import APIRouter, Form, Request, Response, status
 from fastapi.responses import RedirectResponse
 
 from uadclaw import triagestore, web
+from uadclaw.classify import UNKNOWN
 from uadclaw.classifystore import BelowFloorError
 from uadclaw.db import get_session_factory
 from uadclaw.settings import get_settings
@@ -75,10 +76,54 @@ _UPSTREAM_CACHE: dict[tuple[str, int, int], UpstreamList] = {}
 PAST_TENSE: dict[str, str] = {
     "approve": "approved",
     "reject": "rejected",
-    "defer": "deferred",
+    "defer": "skipped",
     "edit": "edited",
     "reopen": "reopened",
 }
+
+# What each list is CALLED, against what it is. Display strings only: the value in the url,
+# in `VIEWS` and in every branch of `triagestore.in_view` stays what it is, because a rename
+# there is a migration and this is a label.
+VIEW_LABELS: dict[str, str] = {
+    "queue": "queue",
+    "deferred": "skipped",
+    "decided": "decided",
+    "parked": "no answer",
+}
+
+# The corroboration statuses, in the reviewer's words. A MAP rather than `.replace("_", " ")`
+# on whatever the column holds: that turns a status nobody wrote a label for into a sentence
+# that looks authored, and `corroborated` has to become a count anyway, which no substitution
+# can do. An unmapped value falls through as itself, which reads as the raw value it is.
+CORROBORATION_LABELS: dict[str, str] = {
+    "uncorroborated": "no sources",
+    "search_failed": "search failed",
+    "judge_failed": "check failed",
+}
+
+
+def corroboration_label(status: str | None, sources: int) -> str:
+    """How a corroboration verdict reads on the card.
+
+    `corroborated` is spelled as its evidence rather than as its name, because the count is
+    what a reviewer decides on and the word was the one the user named as unclear.
+    """
+    if status is None:
+        return "not searched yet"
+    if status == "corroborated":
+        return f"{sources} source{'' if sources == 1 else 's'}"
+    return CORROBORATION_LABELS.get(status, status)
+
+
+# Every badge this screen can render, with the one line that says what it means. Rendered
+# once, in a `<details>` a keyboard reaches with one Tab, rather than as a `title` on each
+# badge: a `title` on a non-focusable `<span>` exists for a pointer and for nothing else.
+BADGE_MEANINGS: tuple[tuple[str, str], ...] = (
+    ("removal", "the rating this entry would ship with, never below the minimum rating."),
+    ("no answer", "deepseek could not answer. read the reason, then edit or reject."),
+    ("conflict", "devices disagree on a fact. shown, never filtered on."),
+    ("n sources", "how many sources back the description. 13.6% of packages have any."),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +142,12 @@ class Board:
     undo: str | None = None
     upstream_error: str | None = None
     edit_open: bool = False
+    # What takes focus once htmx has swapped the board in. Decided here rather than in the
+    # script, because the server is what knows why this render happened: a swap leaves focus
+    # on `<body>`, so the next Tab restarts at the top of the document and a refusal the
+    # reviewer has to answer is somewhere behind them. One of `decide` (the column holding
+    # the callouts and the card), `reason`, `edit`.
+    focus: str = "decide"
 
 
 def _valid_view(view: str) -> tuple[str, str | None]:
@@ -132,8 +183,7 @@ def _upstream(path: Path) -> tuple[UpstreamList | None, str | None]:
     except (OSError, UpstreamListError) as exc:
         logger.warning("triage: upstream list unavailable at %s: %s", path, exc)
         return None, (
-            f"no upstream list at {path}, so this card has nothing to compare against. "
-            "point UPSTREAM_LIST_PATH at a copy of uad_lists.json."
+            f"no upstream list at {path}. point UPSTREAM_LIST_PATH at a copy of uad_lists.json."
         )
 
 
@@ -145,6 +195,7 @@ async def _board(
     notice: str | None = None,
     undo: str | None = None,
     edit_open: bool = False,
+    focus: str = "decide",
 ) -> Board:
     settings = get_settings()
     session_factory = get_session_factory()
@@ -157,7 +208,8 @@ async def _board(
             rows, counts = await triagestore.load_board(session, view=view)
             selected = package if any(row.package == package for row in rows) else None
             if selected is None and package is not None and error is None:
-                error = f"{package} is not in the {view} list. showing the top of it instead."
+                label = VIEW_LABELS[view]
+                error = f"{package} is not in the {label} list. showing the top of it instead."
             if selected is None and rows:
                 selected = rows[0].package
             candidate = (
@@ -181,6 +233,7 @@ async def _board(
             state="error",
             error=f"the queue could not be read. {web.DB_UNREACHABLE_MESSAGE}",
             upstream_error=upstream_error,
+            focus=focus,
         )
 
     if rows:
@@ -200,6 +253,7 @@ async def _board(
         undo=undo,
         upstream_error=upstream_error,
         edit_open=edit_open,
+        focus=focus,
     )
 
 
@@ -212,6 +266,14 @@ def _context(board: Board) -> dict[str, Any]:
         "reject_key": REJECT_KEY,
         "edit_key": EDIT_KEY,
         "views": VIEWS,
+        "view_labels": VIEW_LABELS,
+        "badge_meanings": BADGE_MEANINGS,
+        "corroboration_label": corroboration_label,
+        # Passed as a callable rather than pre-rendered onto every row: a chip is derived
+        # from the package name and nothing else, so a field on the row would be the same
+        # value written twice.
+        "monogram": triagestore.monogram,
+        "unknown_value": UNKNOWN,
     }
 
 
@@ -287,14 +349,15 @@ async def decide(
             await triagestore.decide(session, package=package, action=action, reason=reason, at=at)
     except ReasonRequired:
         # In the screen's own words. The store's message names the function and the invariant,
-        # which is what a log wants; what a reviewer needs is the next action.
+        # which is what a log wants; what a reviewer needs is the next action — and the field
+        # it is about, which is why focus goes there rather than to the top of the card.
         return _render(
             request,
             await _board(
                 view=view,
                 package=package,
-                error=view_error
-                or "a rejection needs a reason. one line is enough, and it is kept.",
+                error=view_error or "a rejection needs a reason. one line, and it is kept.",
+                focus="reason",
             ),
         )
     except TriageError as exc:
@@ -335,6 +398,7 @@ async def edit(
     request: Request,
     package: str = Form(...),
     description: str = Form(default=""),
+    unknown_description: str | None = Form(default=None),
     list_: str = Form(default="", alias="list"),
     removal: str = Form(default=""),
     confidence: str = Form(default=""),
@@ -345,8 +409,17 @@ async def edit(
     Only fields the form actually sent are offered, so an empty box is "unchanged" rather
     than "set this to empty" — the alternative silently blanks a description whenever a
     browser omits a disabled field.
+
+    `unknown_description` is the control the description rule's own message asks for. That
+    message is shared with the model path deliberately, so it tells a reviewer to declare the
+    field in `unknown_fields`, and until this box existed the screen offered no way to do it:
+    the only answers were a description long enough to pass a floor the reviewer could not
+    honestly reach, or nothing. The box wins over the text area, because a reviewer who ticks
+    it has said the box above is not an answer.
     """
     at = datetime.now(UTC)
+    if unknown_description is not None:
+        description = UNKNOWN
     edits = {
         field: value.strip()
         for field, value in (
@@ -365,7 +438,13 @@ async def edit(
     except (TriageError, BelowFloorError, ValueError) as exc:
         return _render(
             request,
-            await _board(view=view, package=package, error=view_error or str(exc), edit_open=True),
+            await _board(
+                view=view,
+                package=package,
+                error=view_error or str(exc),
+                edit_open=True,
+                focus="edit",
+            ),
         )
     except web.DB_UNREACHABLE:
         # Same reason as `decide` above, plus one of its own: the form is still open and the
@@ -379,6 +458,7 @@ async def edit(
                 package=package,
                 error=view_error or f"the edit was not saved. {web.DB_UNREACHABLE_MESSAGE}",
                 edit_open=True,
+                focus="edit",
             ),
         )
 

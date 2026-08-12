@@ -789,7 +789,43 @@ async def test_the_card_names_the_evidence_that_is_missing(db_env, triage_db):
     async with triage_db() as session:
         card = await triagestore.load_candidate(session, "com.example.one", upstream=UPSTREAM)
 
-    assert "corroboration" in card.missing
+    assert "sources" in card.missing
+
+
+# --- icons and the chip that stands in for one -----------------------------------------------
+
+
+def test_a_monogram_is_two_letters_off_the_last_component_and_never_moves():
+    """Deterministic across processes, which `hash()` is not: Python salts it per process
+    unless PYTHONHASHSEED is set, so the chip would change colour on every worker restart —
+    on a value whose whole job is being recognisable across renders.
+
+    The tint is spelled out rather than compared against another call, because "the same
+    function agrees with itself" is true of a random one too.
+    """
+    assert triagestore.monogram("com.android.settings") == triagestore.Monogram("SE", "monogram-t1")
+    assert triagestore.monogram("com.example.one") == triagestore.Monogram("ON", "monogram-t6")
+
+
+def test_a_monogram_survives_a_name_the_pipeline_did_not_write():
+    """A package name is bytes out of a downloaded manifest. A last component that is all
+    punctuation would otherwise put a fragment of markup on the chip."""
+    assert triagestore.monogram("com.example.<script>").letters == "SC"
+    assert triagestore.monogram("...").letters == "?"
+
+
+async def test_a_package_with_no_stored_icon_says_so_on_the_row_and_on_the_card(db_env, triage_db):
+    """`has_icon` is what the templates branch on, so the screen never probes the icon route
+    to find out whether there is anything behind it. Measured here against the column being
+    absent, which is this checkout's state: the answer is False and nothing raises."""
+    await seed(triage_db, {"com.example.one": 1})
+
+    async with triage_db() as session:
+        rows = await triagestore.load_rows(session)
+        card = await triagestore.load_candidate(session, "com.example.one", upstream=UPSTREAM)
+
+    assert [row.has_icon for row in rows] == [False]
+    assert card.has_icon is False
 
 
 async def test_the_card_refuses_a_package_with_no_proposal(db_env, triage_db):
