@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select, text
 
+from uadclaw import triagestore
 from uadclaw.classify import Classification, Confidence, UadList
 from uadclaw.classifystore import park_package, store_classification
 from uadclaw.facts import ApkFacts
@@ -600,6 +601,29 @@ async def test_a_package_name_out_of_firmware_is_escaped(db_env, triage_env, tri
 
     assert "<script>alert(1)</script>" not in body
     assert "&lt;script&gt;" in body
+
+
+async def test_one_render_of_the_screen_reads_the_queue_once(
+    db_env, triage_env, triage_db, client, monkeypatch
+):
+    """Pinned at the CALL SITE, not on the helper. `triagestore.load_board` having one read in
+    it says nothing about the screen using it: swapping the view back to `load_counts` then
+    `load_queue` left a helper-only test green and the screen computing its counts and its
+    rows from two snapshots again."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+    reads = []
+    real = triagestore.load_rows
+
+    async def counting(session):
+        reads.append(1)
+        return await real(session)
+
+    monkeypatch.setattr(triagestore, "load_rows", counting)
+
+    await screen(client)
+
+    assert len(reads) == 1, f"the screen read the queue {len(reads)} times"
 
 
 async def test_a_package_name_in_a_queue_link_is_url_encoded(db_env, triage_env, triage_db, client):
