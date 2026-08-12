@@ -9,10 +9,12 @@
 {% macro pkg_icon(package, has_icon, small=false) %}
   {%- set mono = monogram_for(package) -%}
   {%- if has_icon -%}
-    {# `urlencode`, not autoescape: escaping turns a literal `&` into `&amp;`, which the
-       browser decodes straight back into a parameter separator. #}
+    {# `url_segment` rather than autoescape or `urlencode`. Autoescape turns a literal `&`
+       into `&amp;`, which the browser decodes straight back into a separator; jinja's
+       `urlencode` then keeps `/` safe, which is right for a query string and wrong for the
+       path segment this is. #}
     <img class="pkg-icon{% if small %} pkg-icon-sm{% endif %}"
-         src="/icons/{{ package|urlencode }}" alt="" loading="lazy"
+         src="/icons/{{ package|url_segment }}" alt="" loading="lazy"
          width="{{ 32 if small else 48 }}" height="{{ 32 if small else 48 }}">
   {%- else -%}
     <span class="monogram monogram-c{{ mono[1] }}{% if small %} monogram-sm{% endif %}"

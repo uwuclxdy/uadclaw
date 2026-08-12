@@ -35,10 +35,17 @@ def test_a_name_with_no_alphanumerics_still_renders_something():
     assert monogram_for("...")[0] == "??"
 
 
-def test_the_colour_is_inside_the_range_the_stylesheet_covers():
-    for package in ("com.a.b", "com.google.android.gms", "x.y.z", "com.qti.qcc"):
-        _, colour = monogram_for(package)
-        assert 0 <= colour < MONOGRAM_COLOURS
+def test_the_palette_is_actually_spread_across_rather_than_nominally_available():
+    """`0 <= digest[0] % MONOGRAM_COLOURS < MONOGRAM_COLOURS` is true of every implementation
+    including one that returns a constant, so the bound is not worth asserting. What can fail
+    is the spread: a chip palette that collapses onto one colour is the same screen as no
+    palette at all."""
+    packages = [f"com.google.android.{name}" for name in ("gms", "vending", "gsf", "tts")]
+    packages += [f"com.android.{name}" for name in ("settings", "systemui", "phone", "vpndialogs")]
+    packages += ["com.qti.qcc", "com.motorola.launcher", "com.samsung.knox", "com.oppo.market"]
+    seen = {monogram_for(p)[1] for p in packages}
+    assert seen <= set(range(MONOGRAM_COLOURS))
+    assert len(seen) >= 6, f"12 names landed on {len(seen)} colours: {sorted(seen)}"
 
 
 def test_the_colour_survives_a_restart():
@@ -74,6 +81,17 @@ def test_the_icon_branch_encodes_a_package_name_that_would_otherwise_split_the_q
     rendered = str(macro("com.evil&view=decided", True))
     assert "com.evil&view=decided" not in rendered
     assert "%26" in rendered
+
+
+def test_a_slash_in_a_package_name_never_spells_a_path_segment():
+    """A package name comes out of a downloaded APK's manifest, so it is not permitted to
+    spell its own path. Jinja's `urlencode` keeps `/` safe, which is right for a query string
+    and wrong here: the browser resolves `..` before the request is sent, so the link points
+    at something other than the record it sits on."""
+    macro = templates.env.get_template("partials/pkg_icon.html").module.pkg_icon
+    rendered = str(macro("../../secret", True))
+    assert "/icons/..%2F..%2Fsecret" in rendered
+    assert "/icons/../.." not in rendered
 
 
 def test_neither_branch_announces_the_name_a_second_time():

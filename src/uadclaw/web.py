@@ -15,6 +15,7 @@ else, so a future template directory cannot quietly opt out of it.
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import quote
 
 import asyncpg
 from fastapi import Request
@@ -95,6 +96,21 @@ templates.env.globals["active_nav"] = None
 # context. One implementation is the point: two screens deriving it separately is how one
 # package ended up with two different chips.
 templates.env.globals["monogram_for"] = monogram_for
+
+
+def url_segment(value: Any) -> str:
+    """One path segment of a URL, from a string this pipeline did not write.
+
+    Jinja's own `urlencode` filter is built for query strings and keeps `/` safe, which is
+    correct there and wrong in a path: a package name carrying a slash would spell a segment
+    boundary the record never had, and the browser resolves `..` before the request is even
+    sent. Package names come out of a downloaded APK's manifest, so the identity of a record
+    is not permitted to spell its path.
+    """
+    return quote(str(value), safe="")
+
+
+templates.env.filters["url_segment"] = url_segment
 
 
 def is_htmx(request: Request) -> bool:
