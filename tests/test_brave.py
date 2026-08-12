@@ -1,7 +1,10 @@
 """The Brave client and the page fetcher, against a mocked transport.
 
-The default suite never touches the network and never needs a token: every response here is
-synthesized by an `httpx.MockTransport`, so a box with no search account runs these identically.
+The default suite sends no HTTP and needs no token: every response here is synthesized by an
+`httpx.MockTransport`, so a box with no search account runs these identically. It does resolve
+DNS, because the SSRF gate calls `getaddrinfo` on a hostname before any request is made and the
+`.test`/`.example` hosts in these tests go through it. A resolution failure is deliberately not
+a refusal, so the suite still passes offline; the cost is 30-110 ms on the first lookup.
 `tests/test_corroborate_live.py` is the opt-in half that proves the real API answers the shape
 this file assumes.
 
