@@ -569,6 +569,44 @@ async def test_the_counts_and_the_rows_come_off_one_read(db_env, triage_db, monk
     assert counts["queue"] == 2
 
 
+async def test_load_rows_reads_its_three_dicts_on_one_snapshot(db_env, triage_db, monkeypatch):
+    """`load_rows` runs the joined rows, the newest-decision dict and the shipped-branch dict
+    as three statements, and Postgres reads committed PER STATEMENT — so without a REPEATABLE
+    READ transaction a decision landing between them is visible to one and not the others,
+    and the board renders a stale decision beside fresh rows (or the reverse).
+
+    The competing write is a real second connection committing a real decision, fired from
+    between the two reads by wrapping the decision dict. Under REPEATABLE READ the whole read
+    sees the instant before the write and the row carries no decision; under READ COMMITTED
+    the dict read takes a fresh snapshot and the row carries the new verdict — so removing
+    `load_rows`'s `_begin_snapshot` call turns this red.
+    """
+    await seed(triage_db, {"com.example.one": 1})
+    real = triagestore._latest_decisions
+    fired: list[str] = []
+
+    async def latest_then_let_somebody_else_decide(session):
+        async with triage_db() as other, other.begin():
+            await triagestore.decide(
+                other, package="com.example.one", action="reject", reason="raced in", at=NOW
+            )
+        fired.append("decided")
+        return await real(session)
+
+    monkeypatch.setattr(triagestore, "_latest_decisions", latest_then_let_somebody_else_decide)
+
+    async with triage_db() as session:
+        rows = await triagestore.load_rows(session)
+
+    # The interleave really happened, and it really landed: without both of these the snapshot
+    # assertion below passes for the wrong reason.
+    assert fired == ["decided"]
+    async with triage_db() as session:
+        result = await session.execute(select(PackageTriageDecision))
+        assert [row.action for row in result.scalars()] == ["reject"]
+    assert [row.decision for row in rows] == [None]
+
+
 async def test_an_unknown_action_is_refused(db_env, triage_db):
     await seed(triage_db, {"com.example.one": 1})
 

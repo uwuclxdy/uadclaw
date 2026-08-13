@@ -229,6 +229,18 @@ async def load_shipped_branch(session: AsyncSession, package: str) -> str | None
     ).scalar_one_or_none()
 
 
+async def _begin_snapshot(session: AsyncSession) -> None:
+    """Put this session's transaction on one snapshot for every statement it will run.
+
+    Must be the first thing done on a fresh session: Postgres takes the snapshot at the
+    transaction's first statement, and SQLAlchemy cannot change the isolation level of a
+    connection that is already inside one. `load_rows` is the one seam that calls it, so
+    every read of the board and the approved set is on one snapshot without any caller
+    spelling the isolation level itself.
+    """
+    await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+
+
 async def load_rows(session: AsyncSession) -> tuple[QueueRow, ...]:
     """Every package the model has answered, ranked, with its current decision attached.
 
@@ -236,7 +248,18 @@ async def load_rows(session: AsyncSession) -> tuple[QueueRow, ...]:
     descending with NULLs LAST, then package name. Nulls last is not decoration — a package
     with no `package_facts` row sorts FIRST under Postgres's default for a descending order,
     which puts the least evidence at the top of a queue ranked by evidence.
+
+    Runs on one REPEATABLE READ snapshot. The joined rows, the decision dict and the
+    shipped-branch dict are three statements, and Postgres reads committed per statement, so
+    without one snapshot a decision or emission landing between them is visible to one and
+    not the other — the screen would render a stale count beside fresh rows.
+
+    Must be the first thing done on a fresh session: the isolation level cannot be set on a
+    connection already inside a transaction, so a caller that runs any statement first gets a
+    warning and silently loses the snapshot. `load_board` and `load_approved` are the two
+    production callers and both call this first.
     """
+    await _begin_snapshot(session)
     statement = (
         select(
             PackageClassification,

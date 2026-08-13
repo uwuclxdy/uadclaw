@@ -170,16 +170,6 @@ class EmissionDetail:
 # --- reading -----------------------------------------------------------------------------
 
 
-async def _begin_snapshot(session: AsyncSession) -> None:
-    """Put this session's transaction on one snapshot for every statement it will run.
-
-    Must be the first thing done on a fresh session: Postgres takes the snapshot at the
-    transaction's first statement, and SQLAlchemy cannot change the isolation level of a
-    connection that is already inside one.
-    """
-    await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-
-
 def approved_names(rows: Iterable[QueueRow]) -> list[str]:
     """The packages a human approved against the proposal on the row today, name-ordered.
 
@@ -320,7 +310,8 @@ async def load_approved(session: AsyncSession, *, vendor: str) -> tuple[Approved
 
     **Hand this a fresh session with no transaction open**: it puts the whole read on one
     REPEATABLE READ snapshot, and the isolation level cannot be set on a connection that is
-    already inside a transaction.
+    already inside a transaction. `load_rows` begins the snapshot, so the detail read below
+    rides the same transaction and sees the same instant.
 
     A package whose device keys name no driver at all fails the whole load rather than being
     skipped, and that refusal is deliberately NOT scoped to the requested vendor: a package
@@ -329,7 +320,6 @@ async def load_approved(session: AsyncSession, *, vendor: str) -> tuple[Approved
     ship, with nothing raised. Everything a vendor can be decided for is then filtered first,
     so an unrelated vendor's missing floor cannot fail this batch.
     """
-    await _begin_snapshot(session)
     rows = await load_rows(session)
     names = approved_names(rows)
     if not names:

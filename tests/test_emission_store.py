@@ -561,7 +561,7 @@ async def test_the_approved_set_is_read_on_one_snapshot(store_db, monkeypatch):
     The competing write is a real second connection committing a real change, and it is fired
     from between the two reads by wrapping the first. Under READ COMMITTED the detail read
     returns the NEW description; the assertion below is the OLD one, so flipping the isolation
-    level in `emissionstore._begin_snapshot` turns this red.
+    level in `triagestore._begin_snapshot` turns this red.
     """
     await seed(store_db, "com.example.one")
     await decide(store_db, "com.example.one", "approve")
