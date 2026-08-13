@@ -67,10 +67,12 @@ logger = logging.getLogger(__name__)
 # so a call still running after this is a hung git (a credential or editor prompt, a wedged hook)
 # rather than slow work, and a worker blocked forever on it holds the job and its scratch lease.
 #
-# It bounds THIS MODULE'S WAIT and nothing else: `subprocess.run(timeout=...)` kills the direct
-# child and reaps it, so a hook the clone spawned keeps running — and can keep writing — while
-# the restore works around it. Reaping that would need a process group this module does not
-# create, and killing an operator's hooks is a decision nobody has taken.
+# It bounds THIS MODULE'S WAIT and nothing else. `subprocess.run(timeout=...)` kills the direct
+# child only; measured on git 2.55 with a `pre-commit` sleeping 6s against a 1s deadline, the
+# TimeoutExpired surfaced at 1.00s and the hook went on to rewrite the working tree 6.5s later,
+# after the emission had given up. Reaping it would need a process group this module does not
+# create, and killing an operator's own hooks is a behaviour change nobody has decided on, so
+# the timeout says what it leaves behind instead.
 GIT_TIMEOUT_SECONDS = 120
 
 # Stripped from the environment every git call inherits. These override `git -C <path>` rather
@@ -172,7 +174,10 @@ def _run_git(
         raise UpstreamRepoError(
             f"{context}: `{shlex.join(command)}` did not finish within {GIT_TIMEOUT_SECONDS}s. "
             "Every operation here is local, so this is a git waiting on something — a hook, an "
-            "editor, or a credential prompt — rather than slow work."
+            "editor, or a credential prompt — rather than slow work. Only that git was killed: "
+            "anything it spawned is still running and can still write into the clone after this, "
+            "and a git killed mid-write leaves `.git/index.lock` behind, which is what the next "
+            "emission will refuse on with no other visible cause. Check for both before rerunning."
         ) from exc
     if check and result.returncode != 0:
         raise UpstreamRepoError(

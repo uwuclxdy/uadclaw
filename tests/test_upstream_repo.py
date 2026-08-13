@@ -850,6 +850,37 @@ def test_a_non_ascii_list_path_is_not_read_as_a_rewritten_commit(clone, tmp_path
     )
 
 
+def test_a_timeout_says_what_it_leaves_running(clone, monkeypatch):
+    """The only test that reaches the `TimeoutExpired` arm, and the reason its message has to be
+    honest: `subprocess.run(timeout=...)` kills the direct child and nothing below it.
+
+    Measured on git 2.55 — a `pre-commit` sleeping 6s against a 1s deadline surfaced the timeout
+    at 1.00s, and the hook went on to rewrite the working tree 6.5s later, after the emission had
+    given up. A git killed mid-write also leaves `.git/index.lock`, which the next emission then
+    refuses on with nothing visible to explain it. Killing the hook's process group would fix
+    both and is a behaviour change against the operator's own config, so the error carries the
+    consequence instead.
+    """
+    import uadclaw.upstreamrepo as module
+
+    monkeypatch.setattr(module, "GIT_TIMEOUT_SECONDS", 1)
+    install_hook(clone, "sleep 6")
+
+    with pytest.raises(UpstreamRepoError, match="did not finish within 1s") as raised:
+        emit_branch(
+            clone,
+            branch="uadclaw/timed-out",
+            base_ref="base",
+            list_path=LIST_PATH,
+            new_bytes=_bytes(NEW_LIST),
+            message="feat(lists): a batch",
+        )
+
+    message = str(raised.value)
+    assert "still running" in message
+    assert ".git/index.lock" in message
+
+
 def test_a_restore_that_cannot_finish_names_the_branch_the_clone_is_left_on(clone, monkeypatch):
     """The operator's fix differs from the one the original failure asks for, so it cannot live
     in a log line the dashboard never shows."""
