@@ -74,6 +74,80 @@ class FirmwareDownloadError(FirmwareError):
     published."""
 
 
+class FirmwareRedirectError(FirmwareError):
+    """A firmware fetch's redirect would downgrade https to http. Refused rather than followed.
+    Carries the refused URL."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        super().__init__(f"refused a redirect downgrading https to http: {url!r}")
+
+
+class _NoHttpsDowngradeTransport(httpx.AsyncBaseTransport):
+    """Wraps the inner transport and refuses a redirect that downgrades https to http.
+
+    httpx follows a 3xx to an http location without complaint, so the redirect is the one place
+    a https-by-construction fetch can leak into the clear. An http request is refused only once
+    an https request has already passed through this transport — that is the downgrade case, and
+    it is the only one that can be a downgrade: no driver initiates an http URL on its own, since
+    every default index/mirror/catalogue URL is https and `FirmwareRef.url` is validated
+    `^https://` (Xiaomi's plain-http rows are refused at ref construction). A direct http URL an
+    operator configured — a self-hosted mirror, say — is the FIRST request through a fresh client
+    and passes, because the operator chose cleartext for a host they control; the guard is about
+    a source silently downgrading a transfer, never about refusing cleartext by fiat. This beats
+    a shared redirect-walk (`follow_redirects=False` plus a per-hop helper, the shape
+    `brave.PageFetcher` uses) because it covers every `client.get`/`post`/`stream` call site in
+    all six drivers automatically, where a redirect-walk would touch each call site. The address
+    half (loopback/private/reserved) deliberately does not live here: a firmware CDN is a public
+    host by definition, and `brave.PageFetcher` owns that gate for the URLs a third party
+    chooses.
+
+    Passing an explicit transport to `httpx.AsyncClient` disables httpx's env-proxy mounting
+    (`allow_env_proxies = trust_env and transport is None`), so `HTTP_PROXY`/`HTTPS_PROXY` no
+    longer route firmware traffic. Deliberate rather than an accident, and stated here so it
+    never reads as one: the worker image pulls from public CDNs and sets no proxy, while
+    `deepseek`/`brave` build their own clients and still honour the env. Flag it rather than
+    widening it — a proxied firmware deployment is a follow-up, not this task.
+    """
+
+    def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
+        self._inner = inner
+        self._seen_https = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.scheme == "http" and self._seen_https:
+            raise FirmwareRedirectError(str(request.url))
+        if request.url.scheme == "https":
+            self._seen_https = True
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        # `AsyncBaseTransport.aclose` is a no-op, and the inner transport's `aclose` is where
+        # keep-alive connections return to the pool. Without this, every driver's
+        # `finally: client.aclose()` closes nothing and the per-call pool leaks sockets.
+        await self._inner.aclose()
+
+
+def driver_client(
+    timeout: float, *, transport: httpx.AsyncBaseTransport | None = None
+) -> httpx.AsyncClient:
+    """The one client constructor every driver's `_open_client` uses.
+
+    `follow_redirects=True` because firmware sources legitimately 3xx (a Samsung download
+    authorisation, Xiaomi's CDN rewrite, an Oppo gate), but the wrapper transport refuses any
+    redirect that would downgrade https to http before it is sent — see
+    `_NoHttpsDowngradeTransport`. `transport` is a test seam: production wraps
+    `httpx.AsyncHTTPTransport()`, tests hand in a `MockTransport`.
+    """
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout),
+        transport=_NoHttpsDowngradeTransport(
+            transport if transport is not None else httpx.AsyncHTTPTransport()
+        ),
+        follow_redirects=True,
+    )
+
+
 class TermsRisk(StrEnum):
     """How exposed the operator is by enabling a driver. Ordered loosely by how likely the
     source is to object, which is what the dashboard wants to surface."""

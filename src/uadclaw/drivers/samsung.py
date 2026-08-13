@@ -79,6 +79,7 @@ from uadclaw.firmware import (
     TermsPosture,
     TermsRisk,
     download_to_file,
+    driver_client,
 )
 from uadclaw.settings import Settings
 
@@ -91,7 +92,9 @@ logger = logging.getLogger(__name__)
 FUS_URL = "https://neofussvr.sslcs.cdngc.net"
 # samloader-rs downloads over plain http. https serves the same path — verified 2026-08-11 by
 # a ranged GET answering 206 with a correct Content-Range — so this pipeline never pulls
-# firmware in the clear, the same call the Xiaomi driver makes about its own index rows.
+# firmware in the clear: the URL is https, and the shared driver client (`firmware.driver_client`)
+# refuses any redirect that would downgrade it to http, the same call the Xiaomi driver makes
+# about its own index rows.
 DOWNLOAD_URL = "https://cloud-neofussvr.samsungmobile.com/NF_SmartDownloadBinaryForMass.do"
 USER_AGENT = "SMART 2.0"
 
@@ -643,7 +646,7 @@ class SamsungDriver(FirmwareDriver):
         """The client plus whether the caller owns closing it."""
         if self._client is not None:
             return self._client, False
-        return httpx.AsyncClient(timeout=httpx.Timeout(self._timeout), follow_redirects=True), True
+        return driver_client(self._timeout), True
 
     def _index_url_for(self, model: str, region: str) -> str:
         return f"{self._index_url}/{region}/{model}/version.xml"

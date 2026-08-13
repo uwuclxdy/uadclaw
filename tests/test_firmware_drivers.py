@@ -61,8 +61,10 @@ from uadclaw.firmware import (
     FirmwareError,
     FirmwareInputError,
     FirmwareJobParams,
+    FirmwareRedirectError,
     FirmwareRef,
     TermsRisk,
+    driver_client,
     driver_names,
     enabled_driver_names,
     get_driver,
@@ -1563,3 +1565,52 @@ async def test_a_driver_refuses_a_ref_belonging_to_another_driver(driver_class, 
 
     with pytest.raises(FirmwareInputError):
         await driver.fetch(ref, tmp_path)
+
+
+# --- todo 13: the shared client refuses a redirect that downgrades https to http -------------
+
+
+async def test_a_driver_index_fetch_refuses_a_downgrading_redirect():
+    """Verify line for todo 13, index half: a 302 off an https index to an http location must
+    raise the named error carrying the refused URL rather than follow it."""
+    driver = XiaomiDriver(
+        make_settings(),
+        client=driver_client(
+            make_settings().firmware_http_timeout_seconds,
+            transport=httpx.MockTransport(
+                lambda _r: httpx.Response(302, headers={"location": "http://example.com/i.yml"})
+            ),
+        ),
+    )
+
+    with pytest.raises(FirmwareRedirectError) as excinfo:
+        await driver.list_available()
+
+    assert str(excinfo.value.url) == "http://example.com/i.yml"
+
+
+async def test_a_driver_download_refuses_a_downgrading_redirect(tmp_path):
+    """Verify line for todo 13, download half: the refusal must surface as the named error out
+    of `fetch` (which streams through `download_to_file`), not be folded into
+    `FirmwareDownloadError` or followed."""
+    driver = MotorolaDriver(
+        make_settings(motorola_devices="rtwo"),
+        client=driver_client(
+            make_settings().firmware_http_timeout_seconds,
+            transport=httpx.MockTransport(
+                lambda _r: httpx.Response(302, headers={"location": "http://example.com/r.zip"})
+            ),
+        ),
+    )
+    ref = FirmwareRef(
+        driver="motorola",
+        device="rtwo",
+        build="V1TRS35H.60-33-7_RETAIL",
+        url="https://mirrors.lolinet.com/firmware/lenomola/2023/rtwo/official/"
+        "V1TRS35H.60-33-7_RETAIL_subsidy-DEFAULT_regulatory-unknown_CFC.zip",
+    )
+
+    with pytest.raises(FirmwareRedirectError) as excinfo:
+        await driver.fetch(ref, tmp_path)
+
+    assert str(excinfo.value.url) == "http://example.com/r.zip"

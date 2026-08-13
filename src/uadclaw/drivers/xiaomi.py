@@ -51,6 +51,7 @@ from uadclaw.firmware import (
     TermsPosture,
     TermsRisk,
     download_to_file,
+    driver_client,
 )
 from uadclaw.settings import Settings
 
@@ -199,7 +200,7 @@ class XiaomiDriver(FirmwareDriver):
         """The client plus whether the caller owns closing it."""
         if self._client is not None:
             return self._client, False
-        return httpx.AsyncClient(timeout=httpx.Timeout(self._timeout), follow_redirects=True), True
+        return driver_client(self._timeout), True
 
     async def list_available(self) -> list[FirmwareRef]:
         client, owned = self._open_client()

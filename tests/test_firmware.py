@@ -22,12 +22,14 @@ from uadclaw.firmware import (
     FirmwareDriverDisabledError,
     FirmwareError,
     FirmwareInputError,
+    FirmwareRedirectError,
     FirmwareRef,
     FirmwareTermsNotAcknowledgedError,
     TermsRisk,
     UnknownFirmwareDriverError,
     build_date,
     download_to_file,
+    driver_client,
     driver_names,
     enabled_driver_names,
     get_driver,
@@ -529,3 +531,116 @@ async def test_a_redirected_index_is_refused_rather_than_followed():
         await driver.list_available()
 
     assert "evil.example" in str(excinfo.value)
+
+
+# --- the shared driver client refuses a downgrading redirect --------------------------------
+
+
+def _downgrading_handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(302, headers={"location": "http://example.com/next"})
+
+
+async def test_driver_client_refuses_a_downgrade_on_a_plain_get():
+    client = driver_client(5.0, transport=httpx.MockTransport(_downgrading_handler))
+    try:
+        with pytest.raises(FirmwareRedirectError) as excinfo:
+            await client.get("https://example.com/start")
+        assert str(excinfo.value.url) == "http://example.com/next"
+    finally:
+        await client.aclose()
+
+
+async def test_driver_client_refuses_a_downgrade_on_a_stream(tmp_path):
+    """The download half: `download_to_file` streams over the shared client, and the refusal
+    must surface as the named error — not be folded into `FirmwareDownloadError` — and leave no
+    partial behind."""
+    client = driver_client(5.0, transport=httpx.MockTransport(_downgrading_handler))
+    try:
+        with pytest.raises(FirmwareRedirectError) as excinfo:
+            await download_to_file(client, "https://example.com/start", tmp_path / "f.zip")
+        assert str(excinfo.value.url) == "http://example.com/next"
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        await client.aclose()
+
+
+async def test_driver_client_still_follows_an_https_to_https_redirect(tmp_path):
+    """Refusing the downgrade must not refuse the legitimate hop: firmware sources 3xx within
+    https (Samsung's download authorisation, Xiaomi's CDN rewrite, an Oppo gate)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={"location": "https://example.com/archive.zip"})
+        return httpx.Response(200, content=b"zip-bytes")
+
+    client = driver_client(5.0, transport=httpx.MockTransport(handler))
+    try:
+        archive = await download_to_file(client, "https://example.com/start", tmp_path / "f.zip")
+        assert archive.path.read_bytes() == b"zip-bytes"
+    finally:
+        await client.aclose()
+
+
+class _RecordingTransport(httpx.AsyncBaseTransport):
+    """A fake inner transport that records `aclose`, so the wrapper's delegation is observable."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_driver_client_does_not_refuse_a_direct_http_fetch():
+    """The guard refuses a DOWNGRADE, not cleartext by fiat: an operator-configured http
+    index/mirror is the first request through a fresh client and must pass — the operator chose
+    that host. Only an http request after an https one (a downgrade) is refused."""
+    client = driver_client(
+        5.0, transport=httpx.MockTransport(lambda _r: httpx.Response(200, text="index"))
+    )
+    try:
+        response = await client.get("http://example.com/index")
+        assert response.status_code == 200
+    finally:
+        await client.aclose()
+
+
+async def test_driver_client_close_reaches_the_inner_transport():
+    """The wrapper's `aclose` must delegate, or the inner keep-alive pool leaks. The default
+    `AsyncBaseTransport.aclose` is a no-op, so this pins the override rather than the base."""
+    inner = _RecordingTransport()
+    client = driver_client(5.0, transport=inner)
+    await client.aclose()
+    assert inner.closed is True
+
+
+async def test_all_six_drivers_build_their_client_through_the_shared_factory(monkeypatch):
+    """Every driver's `_open_client` routes through the shared factory. Replacing `driver_client`
+    in every driver module with a recorder proves each `_open_client` calls it rather than
+    constructing `httpx.AsyncClient` directly. This pins `_open_client` only — it does not watch
+    a future driver building a client somewhere else, which stays a grep-level invariant."""
+    real = driver_client
+    seen: list[float] = []
+
+    def recording(timeout: float):
+        seen.append(timeout)
+        return real(timeout, transport=httpx.MockTransport(lambda _r: httpx.Response(200)))
+
+    for name in driver_names():
+        monkeypatch.setattr(f"uadclaw.drivers.{name}.driver_client", recording)
+    opened: list[httpx.AsyncClient] = []
+    try:
+        for name in driver_names():
+            driver = get_driver(name, make_settings())
+            client, owned = driver._open_client()
+            assert owned is True
+            opened.append(client)
+    finally:
+        for client in opened:
+            await client.aclose()
+
+    assert len(seen) == len(driver_names())
+    assert set(seen) == {make_settings().firmware_http_timeout_seconds}
