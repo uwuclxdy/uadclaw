@@ -21,6 +21,7 @@ import pytest
 
 from uadclaw.upstreamrepo import (
     UpstreamRepoError,
+    _git_env,
     branch_exists,
     emit_branch,
     inspect_repo,
@@ -257,6 +258,90 @@ def test_a_stray_git_dir_in_the_environment_cannot_retarget_the_clone(clone, tmp
     assert state.base_commit == expected
     assert state.base_commit != decoy
     assert state.list_bytes == _bytes(BASE_LIST)
+
+
+def test_a_git_config_global_hooks_path_never_reaches_the_commit(clone, tmp_path, monkeypatch):
+    """`GIT_CONFIG_GLOBAL` injects config into every git call, `core.hooksPath` included, so a
+    parent process holding one would run its own hook inside somebody's live clone. `_git_env()`
+    neutralises it to /dev/null, so the hook is asserted to never fire rather than the variable
+    being absent — this box's own global `core.hooksPath` is the exact mechanism, and it has
+    already fired inside throwaway probe repos in this project."""
+    hooks_dir = tmp_path / "hostile-hooks"
+    hooks_dir.mkdir()
+    marker = tmp_path / "hook-fired"
+    hook = hooks_dir / "pre-commit"
+    hook.write_text(f"#!/bin/sh\nprintf 'fired' > {marker}\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    config = tmp_path / "hostile.gitconfig"
+    config.write_text(f"[core]\n\thooksPath = {hooks_dir}\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+
+    head = emit_branch(
+        clone,
+        branch="uadclaw/no-global-hook",
+        base_ref="base",
+        list_path=LIST_PATH,
+        new_bytes=_bytes(NEW_LIST),
+        message="feat(lists): a batch",
+    )
+
+    assert head == git(clone, "rev-parse", "uadclaw/no-global-hook")
+    assert not marker.exists()
+
+
+def test_inline_git_config_count_hooks_path_never_reaches_the_commit(clone, tmp_path, monkeypatch):
+    """`GIT_CONFIG_COUNT` plus the indexed `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` pairs inject
+    config with no file involved, so stripping only the file variables leaves this path open.
+    Asserted on the hook not firing rather than the variables being absent."""
+    hooks_dir = tmp_path / "hostile-inline-hooks"
+    hooks_dir.mkdir()
+    marker = tmp_path / "inline-hook-fired"
+    hook = hooks_dir / "pre-commit"
+    hook.write_text(f"#!/bin/sh\nprintf 'fired' > {marker}\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(hooks_dir))
+
+    head = emit_branch(
+        clone,
+        branch="uadclaw/no-inline-hook",
+        base_ref="base",
+        list_path=LIST_PATH,
+        new_bytes=_bytes(NEW_LIST),
+        message="feat(lists): a batch",
+    )
+
+    assert head == git(clone, "rev-parse", "uadclaw/no-inline-hook")
+    assert not marker.exists()
+
+
+def test_git_env_neutralises_file_config_and_strips_inline_config(monkeypatch):
+    """File-based config vars are forced to /dev/null (git would otherwise fall back to its
+    default global/system files); inline config vars are removed outright, the indexed
+    `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` run included. Each is planted in `os.environ` first
+    so the env is what changed it."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/tmp/hostile-global")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/tmp/hostile-system")
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/hostile-objects")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "/tmp/hostile-hooks")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.hooksPath=/tmp/hostile-hooks'")
+
+    env = _git_env()
+
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert env["GIT_CONFIG_SYSTEM"] == os.devnull
+    for name in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_PARAMETERS",
+    ):
+        assert name in os.environ
+        assert name not in env
 
 
 def _index_identity(index_file: Path) -> tuple[int, int, int]:

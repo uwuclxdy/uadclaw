@@ -77,19 +77,51 @@ logger = logging.getLogger(__name__)
 # the timeout says what it leaves behind instead.
 GIT_TIMEOUT_SECONDS = 120
 
-# Stripped from the environment every git call inherits. These override `git -C <path>` rather
-# than combining with it, so one of them left in a parent process retargets reads and writes at a
-# different repository with nothing raised. Not hypothetical: the global pre-commit hook exports
-# `GIT_INDEX_FILE` to every child of a `git commit -- <files>`, which is why this repo bans that
-# spelling of a commit outright.
-_REDIRECTING_GIT_ENV = (
+# Stripped from the environment every git call inherits, so a parent process cannot retarget a
+# call made inside somebody's live clone. Repository redirection and configuration injection are
+# two different reasons, and configuration injection has two spellings:
+#
+# Repository redirection — these override `git -C <path>` rather than combining with it, so one
+# of them left in a parent process retargets reads and writes at a different repository with
+# nothing raised. Not hypothetical: the global pre-commit hook exports `GIT_INDEX_FILE` to every
+# child of a `git commit -- <files>`, which is why this repo bans that spelling of a commit
+# outright.
+_REPOSITORY_REDIRECTING_GIT_ENV = (
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
     "GIT_COMMON_DIR",
     "GIT_OBJECT_DIRECTORY",
     "GIT_NAMESPACE",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 )
+
+# Configuration injection, file-based — these point git at a config FILE a parent process chose,
+# so one left in a parent process injects settings (`core.hooksPath`, aliases, ...) into every
+# call made inside the clone. Neutralised to /dev/null in `_git_env()` rather than stripped:
+# unset, git falls back to its DEFAULT global and system files (~/.gitconfig, /etc/gitconfig),
+# which is the same injection by another path. This box's ~/.gitconfig sets `core.hooksPath`,
+# and that hook has already fired inside throwaway probe repos in this project.
+_CONFIG_FILE_GIT_ENV = (
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+)
+
+# Configuration injection, inline — no file and no fallback, so stripped and left absent.
+# `GIT_CONFIG_COUNT` counts a run of `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` pairs (the indexed
+# halves are stripped by prefix below), and `GIT_CONFIG_PARAMETERS` is the single-variable
+# spelling of `git -c`. Either sets a config key on the command git is about to run,
+# `core.hooksPath` and `core.fsmonitor` included.
+_CONFIG_INLINE_GIT_ENV = (
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+)
+
+# The indexed halves of `GIT_CONFIG_COUNT`, stripped by prefix rather than enumerated: a parent
+# can carry any number of them and the count is the only bound.
+_GIT_CONFIG_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+
+_STRIPPED_GIT_ENV = _REPOSITORY_REDIRECTING_GIT_ENV + _CONFIG_INLINE_GIT_ENV
 
 # A git operation the clone can be stopped in the middle of. Every one of these is invisible to
 # `status --porcelain` in at least one of its states — a rebase stopped at an `edit` step stages
@@ -129,7 +161,19 @@ class RepoState:
 
 
 def _git_env() -> dict[str, str]:
-    return {key: value for key, value in os.environ.items() if key not in _REDIRECTING_GIT_ENV}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _STRIPPED_GIT_ENV and not key.startswith(_GIT_CONFIG_PREFIXES)
+    }
+    # The file-based config pair is neutralised rather than left absent: unset, git falls back to
+    # its DEFAULT global and system files (~/.gitconfig, /etc/gitconfig), so the injection lands
+    # by another path and a `core.hooksPath` there masks the clone's own hooks. This box's
+    # ~/.gitconfig sets one; /dev/null makes git read no global or system config, so the clone's
+    # own config is the identity and its own hooks the only hooks.
+    for name in _CONFIG_FILE_GIT_ENV:
+        env[name] = os.devnull
+    return env
 
 
 def _failure_tail(result: subprocess.CompletedProcess[bytes]) -> str:
