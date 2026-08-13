@@ -164,13 +164,14 @@ def cn_region(monkeypatch) -> oppo.OppoRegion:
     return region
 
 
-def plk110_ref(md5: str) -> FirmwareRef:
+def plk110_ref(md5: str, *, size: int | None = None) -> FirmwareRef:
     return FirmwareRef(
         driver="oppo",
         device="PLK110",
         build=PLK110_BUILD,
         url=PLK110_GATE,
         md5=md5,
+        size=size,
         android_version="16",
     )
 
@@ -352,6 +353,21 @@ def test_a_malformed_envelope_is_a_protocol_error(text):
         decrypt_update_response(text, b"k" * 32)
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (7549973765, 7549973765),  # the catalogue spells sizes as a JSON int
+        ("7549973765", 7549973765),  # the endpoint spells them as a digit string
+        ("0", None),  # zero is not a size, and the two branches must agree on it
+        (0, None),
+        (True, None),  # a bool is an int subclass but never a size
+        (None, None),
+    ],
+)
+def test_a_size_parses_from_both_spellings_and_drops_zero(value, expected):
+    assert oppo._parse_size(value) == expected
+
+
 def test_the_resolved_package_is_read_out_of_the_captured_200_documents():
     cdn = resolved_package(captured_response("rmx3706"), model="RMX3706")
     gate = resolved_package(captured_response("plk110"), model="PLK110")
@@ -528,6 +544,9 @@ def test_two_regional_images_of_one_build_are_two_refs_and_not_one():
         "15e2d68a9e5324ee838a38b97052a105",
         "2989f602832ec78246156589950fdf2d",
     }
+    # The size differs too, and it now rides the ref the way the md5 does, so a resolved
+    # package whose size disagrees is the same wrong-package signal the md5 check catches.
+    assert {ref.size for ref in cph2449} == {7751474897, 7749485507}
     assert len({oppo._host_of(ref.url) for ref in cph2449}) == 1
     # The whole index, not just the pair: a build id is what `package_observations` is keyed on.
     assert len({(ref.device, ref.build) for ref in refs}) == len(refs)
@@ -566,6 +585,7 @@ def test_every_ref_carries_the_durable_gate_and_the_published_digest():
         assert ref.url.startswith("https://component-ota-")
         assert "/downloadCheck?" in ref.url
         assert ref.md5 is not None
+        assert ref.size is not None
         assert ref.android_version == "16"
         assert ref.archive_suffix == ".zip"
 
@@ -760,7 +780,9 @@ async def test_fetch_downloads_the_endpoints_url_when_it_offers_exactly_this_bui
         ),
     )
 
-    archive = await driver.fetch(plk110_ref(hashlib.md5(payload).hexdigest()), tmp_path)
+    archive = await driver.fetch(
+        plk110_ref(hashlib.md5(payload).hexdigest(), size=len(payload)), tmp_path
+    )
 
     assert archive.path.name == f"oppo-PLK110-{PLK110_BUILD}.zip"
     assert archive.integrity_verified is True
@@ -843,6 +865,40 @@ async def test_fetch_falls_back_rather_than_filing_another_build_under_this_ones
     assert str([r for r in seen if r.method == "GET"][-1].url) == PLK110_GATE
     assert archive.path.read_bytes() == payload
     assert "PLK110_11.A.68_0680_202606250030" in caplog.text
+
+
+async def test_fetch_falls_back_when_the_resolved_packages_size_disagrees_with_the_refs(
+    cn_region, tmp_path, caplog
+):
+    """The catalogue publishes a size and the endpoint publishes one too, so a both-present
+    disagreement is the same wrong-package signal the md5 check already catches — and the
+    gate, whose size the ref carries, is what downloads."""
+    payload = b"PK\x03\x04" + b"catalogue-served" * 64
+    document = captured_response("plk110")
+    document["otaVersion"] = document["realOtaVersion"] = PLK110_OTA
+    document["components"][0]["componentVersion"] = f"{PLK110_OTA}.97.3d82867d"
+    document["components"][0]["componentPackets"] = {
+        "url": "https://gauss-compotacostauto-cn.allawnfs.com/component-ota/a.zip",
+        "md5": hashlib.md5(payload).hexdigest(),
+        "size": str(len(payload) + 1),
+    }
+    seen: list[httpx.Request] = []
+    driver = OppoDriver(
+        make_settings(),
+        client=mock_client(
+            endpoint_handler(cn_region, document=document, payload=payload, seen=seen)
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="uadclaw.drivers.oppo"):
+        archive = await driver.fetch(
+            plk110_ref(hashlib.md5(payload).hexdigest(), size=len(payload)), tmp_path
+        )
+
+    assert str([r for r in seen if r.method == "GET"][-1].url) == PLK110_GATE
+    assert archive.path.read_bytes() == payload
+    assert str(len(payload)) in caplog.text
+    assert str(len(payload) + 1) in caplog.text
 
 
 async def test_an_oversized_catalogue_is_refused_before_it_is_parsed():

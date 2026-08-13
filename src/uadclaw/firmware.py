@@ -69,8 +69,9 @@ class EmptyFirmwareIndexError(FirmwareError):
 
 
 class FirmwareDownloadError(FirmwareError):
-    """The archive did not come down intact: bad status, truncated body, or a checksum that
-    does not match the one the index published."""
+    """The archive did not come down intact: bad status, a `Content-Length` disagreeing with
+    the published size, truncated body, or a checksum that does not match the one the index
+    published."""
 
 
 class TermsRisk(StrEnum):
@@ -123,6 +124,10 @@ class FirmwareRef(BaseModel):
     # What Xiaomi's index publishes, and all it publishes. Kept as its own field rather than
     # folded into `sha256` with an algorithm tag so that `sha256` always means sha256.
     md5: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    # The byte size the source published for this build. A lower bound only: zero cannot be a
+    # downloadable archive, and the ceiling is `download_to_file`'s `max_bytes`, which knows
+    # this box's scratch budget rather than the catalogue's.
+    size: int | None = Field(default=None, gt=0)
     android_version: str | None = Field(default=None, max_length=64)
     # Marketing name ("Pixel 9 Pro Fold"). Not `model_*`: pydantic protects that prefix.
     marketing_name: str | None = Field(default=None, max_length=128)
@@ -349,9 +354,15 @@ async def download_to_file(
     expected_digest: str | None = None,
     digest_algorithm: str = "sha256",
     max_bytes: int | None = None,
+    expected_size: int | None = None,
 ) -> DownloadedArchive:
     """Stream `url` to `dest`, verifying the checksum the index published when there is one.
     Returns the archive's sha256 alongside its path, so a caller can record what it got.
+
+    `expected_size`, when set, is compared against the response's `Content-Length` before the
+    first body byte is written, so a source serving the wrong archive fails before a multi-GB
+    transfer rather than at the digest. A missing `Content-Length` proceeds — not every source
+    sends one, and the digest is still the final gate.
 
     `digest_algorithm` is the algorithm the SOURCE published in, not the one this pipeline
     keeps: Xiaomi's index publishes md5 for 3,454 of its 3,550 entries and no sha256 at all,
@@ -388,6 +399,16 @@ async def download_to_file(
                     f"download_to_file: {url} answered HTTP {response.status_code}; expected "
                     "200. Re-list the index — a firmware URL can expire or be withdrawn."
                 )
+            if expected_size is not None:
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None and content_length.isdigit():
+                    declared = int(content_length)
+                    if declared != expected_size:
+                        raise FirmwareDownloadError(
+                            f"download_to_file: {url} advertised Content-Length {declared}, "
+                            f"but the index published {expected_size} bytes; refusing to "
+                            "start a transfer whose size cannot match"
+                        )
             with partial.open("wb") as fh:
                 async for chunk in response.aiter_bytes(_DOWNLOAD_CHUNK_BYTES):
                     written += len(chunk)

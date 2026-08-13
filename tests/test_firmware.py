@@ -426,6 +426,69 @@ async def test_a_download_over_the_ceiling_stops_and_cleans_up(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+async def test_a_content_length_disagreeing_with_the_published_size_is_refused_before_any_write(
+    tmp_path,
+):
+    """The verify line for todo 15: a source serving the wrong archive is caught from its
+    `Content-Length` header, before a multi-GB transfer, on the raised type and both numbers —
+    never on log text."""
+    body = b"factory-zip-bytes" * 100
+    read = {"bytes": 0}
+
+    class BodyCanary(httpx.AsyncByteStream):
+        # The body is a canary: the size check must refuse before a single body byte is
+        # streamed, so any read here is the regression the test exists to catch.
+        async def __aiter__(self):
+            read["bytes"] += len(body)
+            yield body
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _r: httpx.Response(
+                200, stream=BodyCanary(), headers={"Content-Length": "999999"}
+            )
+        )
+    )
+
+    with pytest.raises(FirmwareDownloadError) as excinfo:
+        await download_to_file(client, "https://x/y.zip", tmp_path / "f.zip", expected_size=12345)
+
+    message = str(excinfo.value)
+    assert "999999" in message
+    assert "12345" in message
+    assert read["bytes"] == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_a_content_length_agreeing_with_the_published_size_proceeds(tmp_path):
+    body = b"factory-zip-bytes" * 100
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _r: httpx.Response(200, content=body, headers={"Content-Length": str(len(body))})
+        )
+    )
+
+    archive = await download_to_file(
+        client, "https://x/y.zip", tmp_path / "f.zip", expected_size=len(body)
+    )
+
+    assert archive.path.read_bytes() == body
+
+
+async def test_a_missing_content_length_proceeds_when_a_size_is_expected(tmp_path):
+    """Some sources send no `Content-Length`; the digest stays the final gate for those."""
+    body = b"factory-zip-bytes" * 100
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=body))
+    )
+
+    archive = await download_to_file(
+        client, "https://x/y.zip", tmp_path / "f.zip", expected_size=len(body)
+    )
+
+    assert archive.path.read_bytes() == body
+
+
 # --- the ack cookie goes to exactly one host ------------------------------------------------
 
 

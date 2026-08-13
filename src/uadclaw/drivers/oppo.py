@@ -278,6 +278,23 @@ _MARKETING_MAJOR_RE = re.compile(r"^[A-Za-z0-9]{2,32}_(?P<major>\d{1,3})\.")
 _MD5_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
+def _parse_size(value: object) -> int | None:
+    """A byte size out of a JSON value, or None when it published none.
+
+    Accepts a positive integer whether it arrived as a JSON int or as a digit string — the
+    catalogue and the update endpoint disagree on spelling, so the guard has to survive both.
+    A boolean is not a size (and `bool` is an `int` subclass), and neither is zero, in either
+    spelling. Anything else is a dropped size, never a dropped row.
+    """
+    if isinstance(value, str):
+        if not value.isdigit():
+            return None
+        value = int(value)
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
 def synthesize_ota_version(model: str, branch: str, *, major: str) -> str:
     """The `otaVersion` that makes the endpoint offer a FULL package rather than an incremental.
 
@@ -587,7 +604,7 @@ def resolved_package(document: dict[str, Any], *, model: str) -> ResolvedPackage
         ota_version=ota_version,
         url=url,
         md5=md5.lower() if isinstance(md5, str) and _MD5_RE.match(md5) else None,
-        size=int(size) if isinstance(size, str) and size.isdigit() else None,
+        size=_parse_size(size),
     )
 
 
@@ -717,6 +734,7 @@ def _ref_for(release: dict[str, Any]) -> FirmwareRef | None:
             build=build,
             url=str(release.get("source_url", "")),
             md5=md5.lower() if _MD5_RE.match(md5) else None,
+            size=_parse_size(release.get("size")),
             android_version=marketing_major(str(release.get("version", ""))),
             marketing_name=str(release.get("device", "")) or None,
         )
@@ -917,6 +935,16 @@ class OppoDriver(FirmwareDriver):
                 ref.md5,
             )
             return None
+        if ref.size is not None and package.size is not None and package.size != ref.size:
+            logger.warning(
+                "oppo: %s/%s resolved to %d bytes where the catalogue published %d; "
+                "downloading the catalogue's gate, whose size is the one this ref carries",
+                ref.device,
+                ref.build,
+                package.size,
+                ref.size,
+            )
+            return None
         return package
 
     async def fetch(self, ref: FirmwareRef, dest_dir: Path) -> DownloadedArchive:
@@ -950,6 +978,7 @@ class OppoDriver(FirmwareDriver):
                 expected_digest=digest,
                 digest_algorithm="md5",
                 max_bytes=self._max_archive_bytes,
+                expected_size=ref.size,
             )
         finally:
             if owned:
