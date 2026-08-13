@@ -5,7 +5,11 @@ The renderer is exercised through `svg_from_drawable`, which takes a parsed elem
 than a binary AXML blob. That is the whole interesting surface — every refusal, every value
 that reaches the output — and testing it this way keeps a hand-built AXML fixture (which would
 test the fixture rather than androguard) out of the suite. The decode itself is one androguard
-call, proven against the 312-APK Pixel tree by the backfill rather than here.
+call, proven against the 312-APK Pixel tree by the backfill. The one exception is the drawable
+byte-cap gate, which decides on the blob before any decode: its fixtures are committed aapt2
+output fed through the real `ApkDrawables.element()` path, because no hand-built blob can
+attribute a refusal to the cap (generation is recorded in those tests' docstrings, since aapt2
+is not in the CI image).
 
 The security property these tests pin: **no string out of an APK is ever copied into the
 emitted SVG**. Every value is parsed into a number, a colour or a fixed enum first, and
@@ -13,6 +17,7 @@ anything that does not parse refuses the whole icon.
 """
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 import sqlalchemy.exc
@@ -39,6 +44,10 @@ from uadclaw.models import PackageFact
 
 ANDROID_NS = "http://schemas.android.com/apk/res/android"
 AAPT_NS = "http://schemas.android.com/aapt"
+
+FIXTURES = Path(__file__).parent / "fixtures"
+DRAWABLE_97K = FIXTURES / "icons_drawable_97k.axml"
+DRAWABLE_314K = FIXTURES / "icons_drawable_314k.axml"
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"payload"
 WEBP_BYTES = b"RIFF\x10\x00\x00\x00WEBPVP8 "
@@ -623,6 +632,66 @@ def test_an_oversized_xml_drawable_is_refused_before_it_is_decoded(monkeypatch):
 
     assert extract_icon(apk) is None
     assert decoded == []
+
+
+def test_a_valid_drawable_over_the_measured_maximum_is_parsed_not_refused():
+    """The cap's lower direction, pinned with a REAL drawable: the largest binary AXML
+    drawable measured across both corpora is 22,664 bytes, so a fixture under that would
+    let the cap retune below every real drawable with the suite green. This fixture is
+    96,796 bytes and decodes to a vector with four flat paths — element() must hand it
+    over; size alone must not refuse it. `ApkDrawables.element()` is the seam: the
+    top-level `_extract_icon` path cannot pin the input cap, because its observable is
+    masked by the 64 KB output cap — a >256 KB drawable returns None there whatever the
+    input cap says, which is an equivalent mutation.
+
+    Generated with aapt2 2.20-13193326 (build-tools 36.0.0, deliberately absent from
+    the worker/CI image, hence committed and never re-run): a `res/drawable/big.xml`
+    vector in this module's support set (`viewportWidth`, `viewportHeight`, flat
+    `<path>` with `pathData`+`fillColor`), then `aapt2 compile --dir res -o
+    compiled.zip` and `aapt2 link -o out.apk -I android.jar --manifest
+    AndroidManifest.xml --min-sdk-version 21 compiled.zip`, extracting
+    `res/drawable/big.xml` from the APK and checking the magic `03 00 08 00`. Both link
+    flags are load-bearing: 2.20's compile emits only the protobuf format (there is no
+    legacy flag), and link flattens it back to the legacy binary XML the runtime and
+    this gate read — and without `--min-sdk-version` the vector is auto-split into a
+    480-byte degraded base member plus the full drawable under `-v21`, so the extracted
+    member would be the tiny one. A binary-XML string is length-prefixed (u16 in UTF-16
+    pools, u16-encoded in UTF-8 pools), so one pathData cannot exceed ~64 KB: reaching
+    this size takes four flat paths, each carrying its own pathData string."""
+    data = DRAWABLE_97K.read_bytes()
+    # The literals, not the constant: a fixture whose range check is built out of
+    # MAX_DRAWABLE_BYTES goes green with the constant retuned around it.
+    assert 22_664 < len(data) < 256 * 1024
+    apk = FakeApk(
+        resources=FakeResources({0x7F110001: [(0, "res/drawable/big.xml")]}),
+        files={"res/drawable/big.xml": data},
+    )
+
+    result = ApkDrawables(apk).element("@7F110001")
+
+    assert result is not None
+    assert result.tag == "vector"
+    assert [child.tag for child in result] == ["path"] * 4
+
+
+def test_a_valid_drawable_over_the_cap_is_refused_at_the_cap():
+    """The cap's upper direction: 313,764 bytes, decoded here in the same assertion the
+    fixture's validity rests on (a vector with thirteen flat paths), so the refusal
+    below can only come from the cap — and only from the size half, since the magic
+    passes. Mutating the cap to 512 KB (or deleting it) makes this test red, which the
+    sibling test's `tag` assertion cannot catch. Generated with the sibling test's
+    steps, with thirteen paths instead of four."""
+    data = DRAWABLE_314K.read_bytes()
+    assert len(data) > 256 * 1024
+    decoded = icons_module.AXMLPrinter(data).get_xml_obj()
+    assert decoded.tag == "vector"
+    assert len(decoded.findall("path")) == 13
+    apk = FakeApk(
+        resources=FakeResources({0x7F110001: [(0, "res/drawable/big.xml")]}),
+        files={"res/drawable/big.xml": data},
+    )
+
+    assert ApkDrawables(apk).element("@7F110001") is None
 
 
 def test_a_package_that_declares_no_icon_yields_nothing():
