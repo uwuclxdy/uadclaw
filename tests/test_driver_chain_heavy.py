@@ -7,13 +7,16 @@ registry so `get_driver`'s enable/disable check is exercised too.
 
 Only the transport is replaced. Each driver's `list_available` reads the committed index
 fixture and its `fetch` runs verbatim: Xiaomi's md5 is checked against the digest its real
-index published for this exact build, and Nothing's three volumes are joined by the driver's
-own join. What the mock does NOT do is re-download 13 GB on every run.
+index published for this exact build, Nothing's three volumes are joined by the driver's
+own join, and Samsung's `.enc4` is decrypted in place with the key the committed inform
+fixture resolves, its encrypted body's CRC32 checked over every byte. What the mock does NOT
+do is re-download 13 GB on every run.
 
     UADCLAW_HEAVY_TESTS=1 \\
       UADCLAW_HEAVY_XIAOMI_ZIP=/path/to/miui_WATERGlobal_V14.0.24.0.TGOMIXM_....zip \\
       UADCLAW_HEAVY_NOTHING_DIR=/path/holding/FroggerPro_B4.1-260723-1820-image-logical.7z.00N \\
       UADCLAW_HEAVY_MOTOROLA_ZIP=/path/to/RTWO_RETAIL_15_V1TRS35H.60-33-7....zip \\
+      UADCLAW_HEAVY_SAMSUNG_ENC4=/path/to/SM-S911U_2_..._fac.zip.enc4 \\
       UADCLAW_HEAVY_UPSTREAM_LIST=/path/to/uad_lists.json \\
       UADCLAW_HEAVY_WORKDIR=/var/tmp/uadclaw-heavy \\
       uv run pytest -n0 -m heavy tests/test_driver_chain_heavy.py
@@ -21,6 +24,10 @@ own join. What the mock does NOT do is re-download 13 GB on every run.
 Every count below was measured on 2026-08-11 and is asserted exactly. A chain that quietly
 stops extracting returns a smaller number, never an exception: the Xiaomi build's three EROFS
 partitions and the Motorola super's six are the whole point of pinning them per partition.
+Samsung is the one exception to "asserted exactly": its chain figures were measured with
+`test_samsung_fetch_heavy.py` on 2026-08-12, but `filter` and `rule_ladder` have never run for
+a Samsung build, so `SAMSUNG_QUEUE`'s two upstream columns are placeholders that red on
+purpose until a heavy run measures them and pins the columns.
 """
 
 import json
@@ -36,6 +43,7 @@ from uadclaw import firmware as firmware_module
 from uadclaw import jobs as jobs_module
 from uadclaw.drivers.motorola import MotorolaDriver
 from uadclaw.drivers.nothing import NothingDriver
+from uadclaw.drivers.samsung import SamsungDriver
 from uadclaw.drivers.xiaomi import XiaomiDriver
 from uadclaw.models import JobKind, PackageAnalysis, PackageFact, PackageObservation
 from uadclaw.settings import get_settings
@@ -76,15 +84,17 @@ def _require_toolchain() -> None:
         pytest.skip(f"needs the unpacking toolchain on PATH: {', '.join(missing)}")
 
 
-def _require_workdir(name: str) -> Path:
+def _require_workdir(name: str, required_bytes: int = REQUIRED_FREE_BYTES) -> Path:
     root = Path(os.environ.get("UADCLAW_HEAVY_WORKDIR", "/var/tmp/uadclaw-heavy"))
     work = root / name
     if work.exists():
         shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(work).free
-    if free < REQUIRED_FREE_BYTES:
-        pytest.skip(f"{work} has {free / 1024**3:.1f} GB free, need ~40 GB")
+    if free < required_bytes:
+        pytest.skip(
+            f"{work} has {free / 1024**3:.1f} GB free, need ~{required_bytes / 1024**3:.0f} GB"
+        )
     return work
 
 
@@ -350,6 +360,122 @@ async def test_motorola_rtwo_end_to_end(db_env, db_session_factory, monkeypatch,
     assert state.integrity_verified is False
     assert await _apk_partitions(db_session_factory) == MOTOROLA_APKS_BY_PARTITION
     assert await _queue_counts(db_session_factory) == MOTOROLA_QUEUE
+    assert state.archive_path is None
+    assert not list((work / "unpack").rglob("*.img"))
+    assert not list((work / ARTIFACTS_DIRNAME).rglob("*.apk"))
+
+
+# --- Samsung: zip -> tar -> LZ4 frame -> sparse -> super -> EROFS --------------------------
+
+SAMSUNG_DEVICE = "SM-S911U"
+SAMSUNG_REGION = "XAA"
+SAMSUNG_BUILD = "S911USQS8FZG1_XAA"
+# sha256 of the decrypted archive. FUS publishes no digest of either form, so
+# `integrity_verified` is True because the CRC32 it declared for the ENCRYPTED body
+# (949352961) was checked over every one of the 11,565,187,312 bytes during the in-place
+# decrypt. The archive is 14 bytes shorter than the encrypted body: PKCS#7 padding, stripped.
+SAMSUNG_ENCRYPTED_BYTES = 11_565_187_312
+SAMSUNG_ENCRYPTED_CRC32 = 949352961
+SAMSUNG_ARCHIVE_SHA256 = "fc563d5b8bff839eaacdf0f9d5674ee043309fb5153d9b73542251d1ae6c85ac"
+SAMSUNG_APKS_BY_PARTITION = {"product": 79, "system": 407, "system_ext": 13, "vendor": 10}
+SAMSUNG_CHAIN = {"apks": 509, "artifacts": 1143, "packages": 491, "parse_failures": 0}
+SAMSUNG_QUEUE = {
+    # MEASURED: pinned after the first heavy run; this placeholder reds on purpose.
+    "already_upstream": 0,
+    "queued": 0,
+    "merged_packages": 491,
+}
+# Measured 2026-08-12 on the real chain: the decrypted archive (11.57 GB), the LZ4-decoded
+# `super.img` (11.37 GB, still sparse) and the raw image simg2img writes from it (12.66 GB)
+# are all on disk at once, a peak of 35.4 GB — deeper than the other three rows' 40 GB budget.
+SAMSUNG_REQUIRED_FREE_BYTES = 44 * 1024**3
+
+
+def _local_enc4() -> Path:
+    value = os.environ.get("UADCLAW_HEAVY_SAMSUNG_ENC4", "")
+    if not value:
+        pytest.skip("set UADCLAW_HEAVY_SAMSUNG_ENC4 to the downloaded .enc4 for this build")
+    path = Path(value)
+    if not path.is_file():
+        pytest.skip(f"UADCLAW_HEAVY_SAMSUNG_ENC4 points at {path}, which is not on this box")
+    if path.stat().st_size != SAMSUNG_ENCRYPTED_BYTES:
+        pytest.skip(
+            f"{path} is {path.stat().st_size} bytes, not the {SAMSUNG_ENCRYPTED_BYTES} this "
+            "build publishes; Samsung has moved on and the pinned digests below describe the "
+            "old one"
+        )
+    return path
+
+
+async def test_samsung_sm_s911u_end_to_end_with_upstream_figures(
+    db_env, db_session_factory, monkeypatch, tmp_path
+):
+    """Task-14's verify line for Samsung: `filter` and `rule_ladder` over a real
+    `uad_lists.json`, filling the two upstream columns `test_samsung_fetch_heavy.py` could not
+    measure. The chain figures are asserted beside them because they are the proof that these
+    queue counts describe the same build that run pinned.
+    """
+    _require_toolchain()
+    enc4 = _local_enc4()
+    work = _require_workdir("samsung", required_bytes=SAMSUNG_REQUIRED_FREE_BYTES)
+    monkeypatch.setenv("UPSTREAM_LIST_PATH", _upstream_list())
+    monkeypatch.setenv("SAMSUNG_MODELS", SAMSUNG_DEVICE)
+    monkeypatch.setenv("SAMSUNG_REGIONS", SAMSUNG_REGION)
+    get_settings.cache_clear()
+
+    # The committed fixture is what the driver derives the key and the CRC from, so it has to
+    # still describe the build these numbers were measured on.
+    inform = (FIXTURES / "samsung_binary_inform.xml").read_text(encoding="utf-8")
+    assert f"<BINARY_CRC><Data>{SAMSUNG_ENCRYPTED_CRC32}</Data>" in inform
+    assert f"<BINARY_BYTE_SIZE><Data>{SAMSUNG_ENCRYPTED_BYTES}</Data>" in inform
+
+    nonces = iter([f"nonce-{index:04d}" for index in range(3)])
+
+    async def body():
+        with enc4.open("rb") as fh:
+            while chunk := fh.read(8 * 1024 * 1024):
+                yield chunk
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "version.xml" in url:
+            return httpx.Response(
+                200, text=(FIXTURES / "samsung_version_index.xml").read_text(encoding="utf-8")
+            )
+        if "BinaryForMass" in url:
+            return httpx.Response(200, content=body())
+        headers = {"NONCE": next(nonces)}
+        if url.endswith("BinaryInform.do"):
+            return httpx.Response(200, text=inform, headers=headers)
+        return httpx.Response(
+            200,
+            text="<FUSMsg><FUSBody><Results><Status>S00</Status></Results></FUSBody></FUSMsg>",
+            headers=headers,
+        )
+
+    _register(
+        monkeypatch,
+        "samsung",
+        lambda settings: SamsungDriver(
+            settings, client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        ),
+    )
+    job_id = await _make_job(
+        db_session_factory,
+        {"driver": "samsung", "device": SAMSUNG_DEVICE, "build": SAMSUNG_BUILD},
+    )
+    ctx = StageContext(
+        job_id=job_id, attempt=1, scratch_dir=work, session_factory=db_session_factory
+    )
+
+    counts = await _run_chain(ctx)
+
+    assert counts == SAMSUNG_CHAIN
+    state = read_state(work)
+    assert state.integrity_verified is True
+    assert state.archive_sha256 == SAMSUNG_ARCHIVE_SHA256
+    assert await _apk_partitions(db_session_factory) == SAMSUNG_APKS_BY_PARTITION
+    assert await _queue_counts(db_session_factory) == SAMSUNG_QUEUE
     assert state.archive_path is None
     assert not list((work / "unpack").rglob("*.img"))
     assert not list((work / ARTIFACTS_DIRNAME).rglob("*.apk"))
