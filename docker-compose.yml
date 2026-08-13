@@ -118,6 +118,12 @@ services:
       # The classification stage's credential. Absent, every deterministic stage still runs
       # and only a `classification` job fails, naming this setting.
       - deepseek_key
+      # The UI credential pair, and the worker needs them mounted too even though it serves
+      # nothing: `Settings()` refuses blank credentials at load, so without these the
+      # process crash-loops before its first line of work. Measured 2026-08-13 on the first
+      # compose run of the worker ever.
+      - auth_password
+      - session_secret
     depends_on:
       postgres:
         condition: service_healthy
