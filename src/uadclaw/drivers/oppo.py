@@ -81,11 +81,13 @@ stores the gate — a ref minted off the endpoint for a configured model stores 
 endpoint answered, and `fetch` re-asks the endpoint for a fresh URL before downloading, so the
 expiry never meets a job that runs minutes after the listing.
 
-**The endpoint is the optional half and the gate is the durable one, so no endpoint failure ends
-a fetch.** A 500, a transport error, a body past the memory ceiling and a response this driver
-cannot read all land where `2004` already landed: a warning naming the model and the cause, then
-the stored URL. The reverse would let the reverse-engineered half fail every Oppo job at
-`acquire` while the URL the ref carries was live and serving.
+**The endpoint is the optional half, so no endpoint failure ends a fetch.** A 500, a transport
+error, a body past the memory ceiling and a response this driver cannot read all land where
+`2004` already landed: a warning naming the model and the cause, then the stored URL. The
+reverse would let the reverse-engineered half fail every Oppo job at `acquire`. That fallback is
+the durable gate for a catalogue ref; for a ref minted off the endpoint the stored URL is the
+expiring link itself, so a re-resolution that fails downloads it anyway and the failure surfaces
+at the download once it has expired rather than at the re-resolution.
 
 **`OPPO_MODELS` reaches the models the catalogue never carried, straight off the endpoint.**
 `RMX3706` and `RMX3301` resolve there and publish no catalogue row, so an operator names them as
@@ -867,7 +869,7 @@ class OppoDriver(FirmwareDriver):
         fallback, since no OPlus build id carries a parseable date.
         """
         refs: list[FirmwareRef] = []
-        catalogue_models = {ref.device for ref in catalogue_refs}
+        catalogue_models = {ref.device.upper() for ref in catalogue_refs}
         for entry in self._configured_models:
             model, separator, region_name = entry.partition(":")
             region = REGIONS.get(region_name.strip().upper()) if separator else None
@@ -879,7 +881,9 @@ class OppoDriver(FirmwareDriver):
                     ", ".join(sorted(REGIONS)),
                 )
                 continue
-            model = model.strip()
+            # The same model in one spelling: a lowercase entry is the operator's spelling of
+            # the catalogue's device, never a second device key for one phone.
+            model = model.strip().upper()
             if model in catalogue_models:
                 logger.info(
                     "oppo: OPPO_MODELS entry %r is already in the catalogue, whose newest "
@@ -949,9 +953,19 @@ class OppoDriver(FirmwareDriver):
                     md5=package.md5,
                     size=package.size,
                 )
-            except ValueError as exc:
+            except (FirmwareError, ValueError) as exc:
+                # `resolved_package` raises `OppoProtocolError` — a FirmwareError — for every
+                # way a 200 can carry something this driver cannot use, and `FirmwareRef`
+                # refuses a device or build id outside its charset. A malformed answer is a
+                # skipped model, never a failed listing; the shape it failed in is the only
+                # sign the protocol moved, so the traceback rides along.
                 logger.warning(
-                    "oppo: OPPO_MODELS model %s did not validate as a ref: %s", model, exc
+                    "oppo: OPPO_MODELS model %s against %s answered something this driver "
+                    "cannot use (%s); skipping it",
+                    model,
+                    region.name,
+                    exc,
+                    exc_info=exc,
                 )
                 return None
         logger.warning(
@@ -975,7 +989,9 @@ class OppoDriver(FirmwareDriver):
         half of this driver: the endpoint trails the catalogue on every model where both were
         measured, and five modern export models refuse it outright — so letting a 500, a wedged
         body or a protocol change out of here would fail an acquire stage the stored URL would
-        have served.
+        have served. That is the guarantee a catalogue ref gets, whose stored URL is the durable
+        gate; a ref minted off the endpoint stores the expiring link itself, so its fallback
+        downloads a URL that fails loudly once expired rather than quietly here.
         """
         try:
             return await self._ask_endpoint(client, ref)

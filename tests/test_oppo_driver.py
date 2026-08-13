@@ -1325,12 +1325,55 @@ async def test_a_ref_minted_for_a_configured_model_is_re_resolved_before_it_down
     assert [body["androidVersion"] for body in asked] == ["Android16.0", "Android16.0"]
 
 
-async def test_a_configured_model_the_catalogue_already_carries_is_not_asked_again(caplog):
+async def test_a_configured_model_answering_a_malformed_200_is_skipped_with_a_warning(
+    eu_region, caplog
+):
+    # A 200 whose document carries two components is a protocol violation (`OppoProtocolError`),
+    # and that must be a skipped model with a warning — never a raise out of `list_available`,
+    # whose catalogue half still answers.
+    document = configured_model_document(
+        "RMX3301",
+        "RMX3301_11.A.31_0310_202306202020",
+        url="https://gauss-compotacostauto-eu.allawnfs.com/component-ota/a.zip",
+        md5="e027328b9c1f81382ec4d48b9e802914",
+        size=7549973765,
+    )
+    document["components"] = document["components"] * 2
+    posts = 0
+    calls: list[httpx.Request] = []
+
+    def on_endpoint(request: httpx.Request) -> httpx.Response | None:
+        nonlocal posts
+        if str(request.url) == eu_region.endpoint:
+            posts += 1
+            key = unwrap_session_key(request.headers["protectedKey"], _test_keypair()[0])
+            return httpx.Response(200, text=seal_response(document, key))
+        return None
+
+    driver = OppoDriver(
+        make_settings(oppo_models="RMX3301:EU"),
+        client=mock_client(catalogue_handler(calls, on_endpoint=on_endpoint)),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="uadclaw.drivers.oppo"):
+        refs = await driver.list_available()
+
+    assert posts == 1  # the first answer is malformed, which stops the walk like any answer
+    assert len(refs) == 8
+    assert not [ref for ref in refs if ref.device == "RMX3301"]
+    assert "RMX3301" in caplog.text
+    assert "EU" in caplog.text
+    assert "component" in caplog.text
+
+
+@pytest.mark.parametrize("entry", ["PLK110:CN", "plk110:CN"])
+async def test_a_configured_model_the_catalogue_already_carries_is_not_asked_again(entry, caplog):
     # An appended endpoint ref would outrank the catalogue's newest row in select_ref's
-    # row-order fallback while trailing it in build age, so the endpoint is not asked at all.
+    # row-order fallback while trailing it in build age, so the endpoint is not asked at all —
+    # a lowercase entry is the same device the catalogue carries, never a second device key.
     calls: list[httpx.Request] = []
     driver = OppoDriver(
-        make_settings(oppo_models="PLK110:CN"),
+        make_settings(oppo_models=entry),
         client=mock_client(catalogue_handler(calls)),
     )
 
@@ -1339,7 +1382,7 @@ async def test_a_configured_model_the_catalogue_already_carries_is_not_asked_aga
 
     assert [request.method for request in calls] == ["GET"]
     assert len(refs) == 8
-    assert "PLK110:CN" in caplog.text
+    assert entry in caplog.text
 
 
 @pytest.mark.parametrize("entry", ["RMX3301", "RMX3301:XX", ":EU"])
