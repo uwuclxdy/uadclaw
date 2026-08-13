@@ -31,10 +31,17 @@ already carries rather than a preference:
   nullable — NULL means the rule ladder has not run for that package — while
   `ApprovedPackage.floor` is not, because a package with no floor has no bound for its rating
   to sit above. `triagestore` and `views/corpus.py` both spell `floor=... if analysis else
-  None`, which is right for a screen that renders a dash and wrong here. The spelling to
-  refuse outright is `floor=row.floor or "Recommended"`: `danger_rank("Recommended")` is 0, so
-  it produces a floor that is structurally present, semantically absent, and reads exactly
-  like the safe version while making the below-floor check unable to fire.
+  None`, which is right for a screen that renders a dash and wrong here.
+
+  **What holds it is the `floor is None` leg of `_refusal`, and nothing else** — three tests
+  go red when that leg is disabled. The dangerous spelling to know about is
+  `floor=row.floor or "Recommended"` at the construction site, because `danger_rank`
+  ("Recommended") is 0, so it yields a floor that is structurally present, semantically absent
+  and reads exactly like the safe version. It is worth naming and it is NOT what any test
+  catches: while `_refusal` stands, no None floor ever reaches that line, so planting it there
+  changes no behaviour and the suite stays green (measured — 75 passed). That is the argument
+  for the refusal living in `_refusal` rather than at the construction site: a guard placed
+  where the bad value cannot arrive is a guard nothing can prove.
 """
 
 import logging
@@ -90,6 +97,10 @@ class EmissionRecord:
     id: int
     vendor: str
     branch: str
+    # The work-tree root the emission actually happened in, so a recovery can tell whether the
+    # currently-configured clone is the one that holds its branch. `UPSTREAM_REPO_PATH` is an
+    # operator setting and can be repointed between a crash and the retry.
+    repo_path: str
     list_path: str
     base_commit: str
     list_sha256: str
@@ -297,6 +308,7 @@ async def load_emission(session: AsyncSession, *, job_id: uuid.UUID) -> Emission
         id=row.id,
         vendor=row.vendor,
         branch=row.branch,
+        repo_path=row.repo_path,
         list_path=row.list_path,
         base_commit=row.base_commit,
         list_sha256=row.list_sha256,
@@ -390,6 +402,31 @@ async def record_intent(
             )
         )
     return row.id
+
+
+async def forget_intent(session: AsyncSession, *, emission_id: int) -> None:
+    """Delete an intent whose emission is KNOWN to have rolled back, children and all.
+
+    Called only after the caller has read the clone back and found no branch, which is what
+    separates "this emission left nothing behind" from "this emission's outcome is unknown".
+    The two are otherwise the same row, and telling them apart is what lets an ordinary failed
+    attempt be retried while a crash in the recording window is refused instead of double
+    shipping — see `stages.branch_stage`.
+
+    A row carrying a commit oid is never deleted: that emission happened, and its row is the
+    only record of what went into a branch somebody may already have pushed.
+    """
+    row = await session.get(BranchEmission, emission_id)
+    if row is None:
+        return
+    if row.commit_oid is not None:
+        raise EmissionStoreError(
+            f"forget_intent: emission {emission_id} carries commit {row.commit_oid} on "
+            f"{row.branch}, so it is not an unfinished intent and is not deleted. Its row is "
+            "the only record of what went into that branch."
+        )
+    await session.execute(delete(BranchEmission).where(BranchEmission.id == emission_id))
+    logger.info("emission %d discarded: its branch was rolled back", emission_id)
 
 
 async def record_commit(

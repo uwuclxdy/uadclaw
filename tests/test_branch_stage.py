@@ -17,6 +17,7 @@ nor wedges the job, and the row says plainly which of the two ways it reached it
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,13 +29,15 @@ from uadclaw import jobs as jobs_module
 from uadclaw.classify import Classification, Confidence, UadList
 from uadclaw.classifystore import store_classification
 from uadclaw.emission import EmissionError, branch_name
-from uadclaw.emissionstore import load_approved, load_emission, record_intent
+from uadclaw.emissionstore import load_emission
 from uadclaw.facts import ApkFacts
 from uadclaw.factstore import store_device_facts
 from uadclaw.ladder import Removal
 from uadclaw.models import BranchEmission, JobKind, PackageAnalysis
+from uadclaw.settings import get_settings
 from uadclaw.stages import StageInputError, branch_stage, pipeline_stage_handlers
 from uadclaw.triagestore import record_decision
+from uadclaw.upstreamrepo import UpstreamRepoError
 from uadclaw.worker import StageContext
 
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
@@ -218,6 +221,40 @@ async def make_job(session_factory, vendor: str = "pixel"):
             session, kind=JobKind.BRANCH_EMISSION.value, params={"vendor": vendor}
         )
         return job.id
+
+
+def install_hook(root: Path, body: str, *, name: str = "pre-commit") -> None:
+    hook = root / ".git" / "hooks" / name
+    hook.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+
+async def crash_after_the_commit(session_factory, clone: Path, job_id, monkeypatch) -> str:
+    """Run the stage for real and kill it exactly where the recording write happens.
+
+    Leaves what a SIGKILL in that window leaves: the branch committed, the clone checked out
+    ON it (which `emit_branch` promises, and which is why a human's next commit lands there),
+    and the emission row still pending.
+
+    The patch is undone by restoring the ONE attribute rather than with `monkeypatch.undo()`,
+    which would also revert the autouse `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` isolation and
+    let this box's global `commit-msg` hook fire inside the throwaway clone on any commit a
+    test makes afterwards.
+    """
+    import uadclaw.stages as stages_module
+
+    real_record_commit = stages_module.record_commit
+
+    async def die_after_the_commit(*args, **kwargs):
+        raise RuntimeError("the worker was killed here")
+
+    monkeypatch.setattr(stages_module, "record_commit", die_after_the_commit)
+    with pytest.raises(RuntimeError, match="killed here"):
+        await branch_stage(context(job_id, session_factory))
+    monkeypatch.setattr(stages_module, "record_commit", real_record_commit)
+    branch = branch_name(prefix="uadclaw", vendor="pixel", job_id=str(job_id))
+    assert git(clone, "symbolic-ref", "--short", "HEAD") == branch
+    return branch
 
 
 def context(job_id, session_factory) -> StageContext:
@@ -489,25 +526,11 @@ async def test_a_crash_between_the_commit_and_its_recording_is_recovered(
     await approve(emission_db, "com.example.one")
     job_id = await make_job(emission_db)
 
-    import uadclaw.stages as stages_module
-
-    async def die_after_the_commit(*args, **kwargs):
-        raise RuntimeError("the worker was killed here")
-
-    monkeypatch.setattr(stages_module, "record_commit", die_after_the_commit)
-    with pytest.raises(RuntimeError, match="killed here"):
-        await branch_stage(context(job_id, emission_db))
-
-    branch = branch_name(prefix="uadclaw", vendor="pixel", job_id=str(job_id))
+    branch = await crash_after_the_commit(emission_db, emission_env, job_id, monkeypatch)
     committed = git(clone, "rev-parse", branch)
     async with emission_db() as session:
         assert (await load_emission(session, job_id=job_id)).commit_oid is None
 
-    monkeypatch.undo()
-    monkeypatch.setenv("UPSTREAM_REPO_PATH", str(clone))
-    monkeypatch.setenv("UPSTREAM_REPO_LIST_PATH", LIST_PATH)
-    monkeypatch.setenv("UPSTREAM_BASE_REF", "main")
-    monkeypatch.setenv("PIPELINE_COMMIT_SHA", PIPELINE_SHA)
     await branch_stage(context(job_id, emission_db))
 
     # No second branch, and the row now says how it learned the commit.
@@ -516,87 +539,6 @@ async def test_a_crash_between_the_commit_and_its_recording_is_recovered(
         row = (await session.execute(select(BranchEmission))).scalar_one()
     assert row.commit_oid == committed
     assert row.reconciled is True
-
-
-async def test_a_recovery_refuses_a_branch_that_is_not_the_one_this_job_wrote(
-    db_env, emission_db, emission_env
-):
-    """The recovery keys on the digest the intent recorded, so a branch of the same name
-    carrying something else is refused rather than adopted. Reachable: the branch name is
-    derived from the job, and a human can create any ref they like in their own clone."""
-    clone = emission_env
-    await approve(emission_db, "com.example.one")
-    job_id = await make_job(emission_db)
-    packages = None
-    async with emission_db() as session:
-        packages = await load_approved(session, vendor="pixel")
-    branch = branch_name(prefix="uadclaw", vendor="pixel", job_id=str(job_id))
-    async with emission_db() as session, session.begin():
-        await record_intent(
-            session,
-            job_id=job_id,
-            vendor="pixel",
-            branch=branch,
-            repo_path=str(clone),
-            list_path=LIST_PATH,
-            base_commit=git(clone, "rev-parse", "main"),
-            list_sha256="d" * 64,
-            pipeline_version="0.1.0",
-            pipeline_commit_sha=PIPELINE_SHA,
-            pr_body="## pixel",
-            packages=packages,
-            at=NOW,
-        )
-    git(clone, "branch", branch, "main")
-
-    with pytest.raises(StageInputError, match="not the .* this job's own emission recorded"):
-        await branch_stage(context(job_id, emission_db))
-
-    async with emission_db() as session:
-        assert (await load_emission(session, job_id=job_id)).commit_oid is None
-
-
-async def test_an_intent_whose_branch_was_rolled_back_is_re_emitted(
-    db_env, emission_db, emission_env
-):
-    """`emit_branch` deletes the branch it created on every failure path, so a row with no
-    outcome and no branch means the emission never landed. The retry re-derives the batch from
-    what is approved NOW rather than replaying the recorded one, which is what lets a fix
-    upstream of here (an approval added, a floor computed) actually take effect."""
-    clone = emission_env
-    await approve(emission_db, "com.example.one")
-    job_id = await make_job(emission_db)
-    async with emission_db() as session:
-        packages = await load_approved(session, vendor="pixel")
-    async with emission_db() as session, session.begin():
-        await record_intent(
-            session,
-            job_id=job_id,
-            vendor="pixel",
-            branch=branch_name(prefix="uadclaw", vendor="pixel", job_id=str(job_id)),
-            repo_path=str(clone),
-            list_path=LIST_PATH,
-            base_commit=git(clone, "rev-parse", "main"),
-            list_sha256="d" * 64,
-            pipeline_version="0.1.0",
-            pipeline_commit_sha=PIPELINE_SHA,
-            pr_body="## pixel",
-            packages=packages,
-            at=NOW,
-        )
-    # The fix that lands between the failed attempt and the retry.
-    await approve(emission_db, "com.example.two")
-
-    await branch_stage(context(job_id, emission_db))
-
-    branch = branch_name(prefix="uadclaw", vendor="pixel", job_id=str(job_id))
-    parsed = json.loads(git(clone, "show", f"{branch}:{LIST_PATH}"))
-    assert "com.example.two" in parsed
-    async with emission_db() as session:
-        row = (await session.execute(select(BranchEmission))).scalar_one()
-    assert row.reconciled is False
-    assert row.package_count == 2
-    assert row.list_sha256 != "d" * 64
 
 
 async def test_two_attempts_of_one_job_derive_the_same_branch_name():
@@ -653,3 +595,284 @@ def test_branch_has_a_handler_and_still_is_not_in_the_firmware_walk():
     assert "branch" not in jobs_module.stages_for("firmware_analysis")
     assert "branch" not in jobs_module.stages_for("classification")
     assert jobs_module.next_stage("rule_ladder", "firmware_analysis") is None
+
+
+# --- the recovery bounds the BRANCH, not one file's bytes ----------------------------------------
+
+
+async def test_a_human_commit_riding_along_in_the_crash_window_is_never_adopted(
+    db_env, emission_db, emission_env, monkeypatch
+):
+    """The blocker this round fixed, and the exact shape `emit_branch` was already hardened
+    against once: a read-back that bounds the COMMIT does not bound the BRANCH.
+
+    A successful emission leaves the clone checked out ON the emission branch — that is
+    `emit_branch`'s documented contract, because the human's next act is `git push` from there.
+    So in the crash window a human working in their own clone commits, and their commit lands
+    on OUR branch. It touches nothing this pipeline wrote, so the list blob still hashes to the
+    recorded digest and a content-only recovery adopts their commit as this batch's outcome.
+    The operator is then told to push a branch carrying an unrelated file, disclosed upstream
+    as this pipeline's work.
+
+    Bounding the parent is what catches it, so this asserts the branch is refused AND that
+    nothing was recorded.
+    """
+    clone = emission_env
+    await approve(emission_db, "com.example.one")
+    job_id = await make_job(emission_db)
+    branch = await crash_after_the_commit(emission_db, clone, job_id, monkeypatch)
+    ours = git(clone, "rev-parse", branch)
+    # The human, working in their own clone, on the branch the emission left checked out.
+    (clone / "NOTES.md").write_text("my own notes\n", encoding="utf-8")
+    git(clone, "add", "--", "NOTES.md")
+    git(clone, "commit", "--quiet", "-m", "my own work")
+    theirs = git(clone, "rev-parse", branch)
+    assert theirs != ours
+
+    with pytest.raises(UpstreamRepoError, match="not the single commit"):
+        await branch_stage(context(job_id, emission_db))
+
+    async with emission_db() as session:
+        row = (await session.execute(select(BranchEmission))).scalar_one()
+    assert row.commit_oid is None
+    assert row.reconciled is False
+
+
+async def test_an_amended_commit_that_adds_a_file_is_never_adopted(
+    db_env, emission_db, emission_env, monkeypatch
+):
+    """The shape the parent check alone cannot catch, which is why the touched-paths read-back
+    is a separate leg: amending keeps the parent AND the list bytes, and only the file list
+    changes."""
+    clone = emission_env
+    await approve(emission_db, "com.example.one")
+    job_id = await make_job(emission_db)
+    branch = await crash_after_the_commit(emission_db, clone, job_id, monkeypatch)
+    (clone / "NOTES.md").write_text("my own notes\n", encoding="utf-8")
+    git(clone, "add", "--", "NOTES.md")
+    git(clone, "commit", "--quiet", "--amend", "--no-edit")
+    assert git(clone, "rev-parse", f"{branch}^") == git(clone, "rev-parse", "main")
+
+    with pytest.raises(UpstreamRepoError, match="touches"):
+        await branch_stage(context(job_id, emission_db))
+
+    async with emission_db() as session:
+        assert (await load_emission(session, job_id=job_id)).commit_oid is None
+
+
+async def test_a_branch_carrying_different_bytes_is_never_adopted(
+    db_env, emission_db, emission_env, monkeypatch
+):
+    """The third leg. A hook that reformats `uad_lists.json` after the commit is a documented
+    upstream rejection reason, so a branch whose blob moved is not this emission's outcome."""
+    clone = emission_env
+    await approve(emission_db, "com.example.one")
+    job_id = await make_job(emission_db)
+    await crash_after_the_commit(emission_db, clone, job_id, monkeypatch)
+    rewritten = json.loads((clone / LIST_PATH).read_text())
+    (clone / LIST_PATH).write_text(json.dumps(rewritten, indent=4))
+    git(clone, "add", "--", LIST_PATH)
+    git(clone, "commit", "--quiet", "--amend", "--no-edit")
+
+    with pytest.raises(UpstreamRepoError, match="sha256"):
+        await branch_stage(context(job_id, emission_db))
+
+    async with emission_db() as session:
+        assert (await load_emission(session, job_id=job_id)).commit_oid is None
+
+
+async def test_a_recovery_against_a_repointed_clone_says_so(
+    db_env, emission_db, emission_env, monkeypatch, tmp_path
+):
+    """`EmissionRecord` carries the work-tree root the emission actually happened in, because
+    `UPSTREAM_REPO_PATH` is an operator setting that can be repointed between a crash and the
+    retry. The verification would nearly always fail first on a different clone; this is the
+    leg that names what changed instead."""
+    clone = emission_env
+    await approve(emission_db, "com.example.one")
+    job_id = await make_job(emission_db)
+    await crash_after_the_commit(emission_db, clone, job_id, monkeypatch)
+    # A byte-identical second checkout, so every branch read-back passes there too and the
+    # path check is the only thing left that can notice.
+    twin = tmp_path / "twin"
+    shutil.copytree(clone, twin)
+    monkeypatch.setenv("UPSTREAM_REPO_PATH", str(twin))
+    # `get_settings` is an `lru_cache`, and the first `branch_stage` call above already
+    # populated it. Without this the setenv repoints nothing, the stage keeps reading the
+    # original clone, and the test passes for the wrong reason — which is exactly how a probe
+    # of this concern came back inconclusive during review.
+    get_settings.cache_clear()
+
+    with pytest.raises(StageInputError, match="has been repointed"):
+        await branch_stage(context(job_id, emission_db))
+
+    async with emission_db() as session:
+        assert (await load_emission(session, job_id=job_id)).commit_oid is None
+
+
+# --- the ambiguous state refuses rather than double-shipping -------------------------------------
+
+
+async def test_a_pending_intent_with_no_branch_refuses_instead_of_emitting_again(
+    db_env, emission_db, emission_env, monkeypatch
+):
+    """Pending row, no branch, and two histories produce it: an emission that died before
+    committing anything, or one that committed, got pushed, and had its branch deleted before
+    the recording landed. Nothing inside the clone separates them and they want opposite
+    actions, so the ambiguity resolves toward the refusal — guessing the other way sends a
+    batch upstream twice.
+
+    The push-and-delete history is the one driven here, because it is the expensive one.
+    """
+    clone = emission_env
+    await approve(emission_db, "com.example.one")
+    job_id = await make_job(emission_db)
+    branch = await crash_after_the_commit(emission_db, clone, job_id, monkeypatch)
+    # What the operator does with a branch they were handed.
+    git(clone, "checkout", "--quiet", "main")
+    git(clone, "branch", "--delete", "--force", branch)
+
+    import uadclaw.stages as stages_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        stages_module,
+        "emit_branch",
+        lambda *args, **kwargs: calls.append(kwargs.get("branch", "?")),
+    )
+    with pytest.raises(StageInputError, match="outcome was never written"):
+        await branch_stage(context(job_id, emission_db))
+
+    assert calls == []
+    assert branches(clone) == ["refs/heads/main"]
+    async with emission_db() as session:
+        rows = (await session.execute(select(BranchEmission))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].commit_oid is None
+
+
+async def test_an_ordinary_failed_emission_stays_retryable(db_env, emission_db, emission_env):
+    """The other half, and the reason the ambiguous case above can be refused at all: a
+    `pre-commit` hook rejecting the commit is an everyday operator-fixable failure, and the
+    retry after they fix it has to work.
+
+    `emit_branch` rolls its branch back on every failure path, and that rollback is READ BACK
+    rather than trusted: the intent is discarded only once the branch is confirmed gone, so a
+    retryable failure leaves no row and the retry takes the ordinary path.
+    """
+    clone = emission_env
+    await approve(emission_db, "com.example.one")
+    job_id = await make_job(emission_db)
+    install_hook(clone, "exit 1")
+
+    with pytest.raises(UpstreamRepoError):
+        await branch_stage(context(job_id, emission_db))
+
+    async with emission_db() as session:
+        assert await load_emission(session, job_id=job_id) is None
+    assert branches(clone) == ["refs/heads/main"]
+
+    # The operator fixes the clone and re-runs.
+    install_hook(clone, "exit 0")
+    await branch_stage(context(job_id, emission_db))
+
+    branch = branch_name(prefix="uadclaw", vendor="pixel", job_id=str(job_id))
+    assert branches(clone) == ["refs/heads/main", f"refs/heads/{branch}"]
+    async with emission_db() as session:
+        row = (await session.execute(select(BranchEmission))).scalar_one()
+    assert row.commit_oid == git(clone, "rev-parse", branch)
+    assert row.reconciled is False
+
+
+async def test_a_failed_emission_whose_branch_survived_keeps_its_intent(
+    db_env, emission_db, emission_env, monkeypatch
+):
+    """The case that makes the read-back necessary rather than decorative. `emit_branch`
+    promises a rollback and there is one shape where it cannot deliver — a rollback that itself
+    failed — and its own error text is prose nobody should be matching on. A branch still
+    standing means the intent must survive so the next run can verify and adopt it."""
+    clone = emission_env
+    await approve(emission_db, "com.example.one")
+    job_id = await make_job(emission_db)
+
+    import uadclaw.stages as stages_module
+
+    def emit_and_leave_the_branch(path, **kwargs):
+        git(clone, "branch", kwargs["branch"], "main")
+        raise UpstreamRepoError("emit_branch: and the clone could not be put back")
+
+    monkeypatch.setattr(stages_module, "emit_branch", emit_and_leave_the_branch)
+    with pytest.raises(UpstreamRepoError):
+        await branch_stage(context(job_id, emission_db))
+
+    async with emission_db() as session:
+        record = await load_emission(session, job_id=job_id)
+    assert record is not None
+    assert record.commit_oid is None
+
+
+# --- a vendor can be emitted more than once ------------------------------------------------------
+
+
+async def test_a_second_batch_ships_after_the_first_one_merged_upstream(
+    db_env, emission_db, emission_env
+):
+    """Nothing retires an approved package once it has shipped: the classification row and the
+    human's `approve` both survive emission. So once the first batch merges and the operator
+    pulls, a naive second emission hands `insert_entries` the packages it already sent and is
+    refused WHOLE — new approvals included — making emission single-shot per vendor forever.
+
+    The already-carried set is decided against the destination's own bytes at the base commit,
+    which is the only copy that can answer it.
+    """
+    clone = emission_env
+    await approve(emission_db, "com.example.one")
+    first_job = await make_job(emission_db)
+    await branch_stage(context(first_job, emission_db))
+    first_branch = branch_name(prefix="uadclaw", vendor="pixel", job_id=str(first_job))
+    # Upstream merges it and the operator pulls.
+    merged = git_bytes(clone, first_branch, LIST_PATH)
+    git(clone, "checkout", "--quiet", "main")
+    (clone / LIST_PATH).write_bytes(merged)
+    git(clone, "add", "--", LIST_PATH)
+    git(clone, "commit", "--quiet", "-m", "merged upstream")
+    await approve(emission_db, "com.example.two")
+    second_job = await make_job(emission_db)
+
+    await branch_stage(context(second_job, emission_db))
+
+    second_branch = branch_name(prefix="uadclaw", vendor="pixel", job_id=str(second_job))
+    parsed = json.loads(git_bytes(clone, second_branch, LIST_PATH))
+    assert "com.example.two" in parsed
+    # Exactly once, not twice: the already-carried one was dropped rather than re-proposed.
+    assert list(parsed).count("com.example.one") == 1
+    async with emission_db() as session:
+        rows = (await session.execute(select(BranchEmission).order_by(BranchEmission.id))).scalars()
+        counts = [row.package_count for row in rows]
+    assert counts == [1, 1]
+
+
+async def test_a_vendor_whose_whole_batch_already_shipped_refuses_clearly(
+    db_env, emission_db, emission_env
+):
+    """The end state of the loop above. It is a refusal rather than a silent success because a
+    human queued a job asking for a branch and there is none to cut, but the message has to say
+    which of the two "nothing to emit" reasons it is."""
+    clone = emission_env
+    await approve(emission_db, "com.example.one")
+    first_job = await make_job(emission_db)
+    await branch_stage(context(first_job, emission_db))
+    first_branch = branch_name(prefix="uadclaw", vendor="pixel", job_id=str(first_job))
+    merged = git_bytes(clone, first_branch, LIST_PATH)
+    git(clone, "checkout", "--quiet", "main")
+    (clone / LIST_PATH).write_bytes(merged)
+    git(clone, "add", "--", LIST_PATH)
+    git(clone, "commit", "--quiet", "-m", "merged upstream")
+    second_job = await make_job(emission_db)
+
+    with pytest.raises(StageInputError, match="already carried"):
+        await branch_stage(context(second_job, emission_db))
+
+    async with emission_db() as session:
+        rows = (await session.execute(select(BranchEmission))).scalars().all()
+    assert len(rows) == 1

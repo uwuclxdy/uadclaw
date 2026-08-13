@@ -29,6 +29,7 @@ from uadclaw.emission import (
     SHARED_VENDOR,
     ApprovedPackage,
     EmissionError,
+    already_carried,
     build_entry,
     group_by_vendor,
     insert_entries,
@@ -1161,3 +1162,72 @@ def test_a_document_already_mixing_line_endings_is_refused():
     raw = b'{\r\n  "com.x": {\n    "list": "Oem"\r\n  }\n}\r\n'
     with pytest.raises(EmissionError, match="mixes CRLF"):
         insert_entries(raw, [approved("com.a")])
+
+
+# --- already_carried: the pre-filter in front of the refusal ---------------------------------
+
+
+def test_already_carried_names_what_the_destination_has():
+    """Nothing retires an approved package once it has shipped, so without this a vendor's
+    second batch still carries its first and `insert_entries` refuses the whole thing —
+    including the new approvals. Reported name-sorted so a log line is stable."""
+    packages = [approved("com.felicanetworks.mfc"), approved("com.brand.new"), approved("a.b.c")]
+
+    assert already_carried(FIXTURE, packages) == ("com.felicanetworks.mfc",)
+
+
+def test_already_carried_is_empty_when_the_batch_is_all_new():
+    assert already_carried(FIXTURE, [approved("com.brand.new")]) == ()
+
+
+def test_already_carried_reports_every_collision_not_just_the_first():
+    packages = [
+        approved("com.felicanetworks.mfc"),
+        approved("org.lineageos.jelly"),
+        approved("com.brand.new"),
+    ]
+
+    assert already_carried(FIXTURE, packages) == (
+        "com.felicanetworks.mfc",
+        "org.lineageos.jelly",
+    )
+
+
+def test_already_carried_reads_a_document_carrying_a_byte_order_mark():
+    """The live file is spliced through `raw_decode` after a BOM skip, so the pre-filter has to
+    agree with it about what the document is — otherwise it reports no collisions and hands
+    `insert_entries` the batch it was written to keep out of there."""
+    assert already_carried("\ufeff".encode() + FIXTURE, [approved("org.lineageos.jelly")]) == (
+        "org.lineageos.jelly",
+    )
+
+
+@pytest.mark.parametrize(
+    "raw", [b"", b"not json at all", b"[1, 2, 3]", b"{", b"\xff\xfe not utf-8"]
+)
+def test_a_document_this_cannot_read_yields_no_drops_rather_than_an_error(raw):
+    """The one place here that fails open, and it is bounded: the caller hands these same bytes
+    to `insert_entries` on the very next line, which parses them under its own rules and
+    refuses with the message written for it. A competing "this file is broken" error from a
+    pre-filter would put two spellings of one refusal in front of one document."""
+    assert already_carried(raw, [approved("com.brand.new")]) == ()
+
+
+def test_the_refusal_behind_the_pre_filter_is_unchanged():
+    """`already_carried` exists so a well-formed caller never builds a batch carrying an
+    existing key. It does NOT loosen the refusal, which is a safety property: two members under
+    one key make a document whose meaning depends on the reader."""
+    with pytest.raises(EmissionError, match="already carried"):
+        insert_entries(FIXTURE, [approved("org.lineageos.jelly")])
+
+
+def test_the_refusal_no_longer_names_a_step_that_cannot_help():
+    """It used to say "re-run the filter stage against this copy of the list". `filter` writes
+    `package_analysis.queued`, and the approved set is derived from the triage decision log
+    rather than from that column, so following that advice changes nothing — verified by
+    setting `queued=False` and watching `load_approved` return the package unchanged."""
+    with pytest.raises(EmissionError) as excinfo:
+        insert_entries(FIXTURE, [approved("org.lineageos.jelly")])
+
+    assert "already_carried" in str(excinfo.value)
+    assert "does NOT help" in str(excinfo.value)

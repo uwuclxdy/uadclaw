@@ -94,12 +94,14 @@ from uadclaw.deepseek import (
 )
 from uadclaw.emission import (
     BranchEmissionJobParams,
+    already_carried,
     branch_name,
     insert_entries,
     render_pr_body,
 )
 from uadclaw.emissionstore import (
     EmissionRecord,
+    forget_intent,
     load_approved,
     load_emission,
     record_commit,
@@ -121,7 +123,13 @@ from uadclaw.models import Job
 from uadclaw.settings import Settings, get_settings
 from uadclaw.unpack import canonical_device_path, extract_artifacts, unpack_to_partitions
 from uadclaw.upstream import load_upstream_list
-from uadclaw.upstreamrepo import RepoState, branch_exists, emit_branch, inspect_repo
+from uadclaw.upstreamrepo import (
+    RepoState,
+    branch_exists,
+    emit_branch,
+    inspect_repo,
+    verify_emitted_branch,
+)
 from uadclaw.worker import StageContext, StageHandler
 
 logger = logging.getLogger(__name__)
@@ -1313,44 +1321,94 @@ def _pipeline_version() -> str:
 async def _reconcile_emission(ctx: StageContext, *, repo: Path, recorded: EmissionRecord) -> None:
     """Recover the outcome of an emission whose recording never landed.
 
-    Reached only when this job already wrote an intent, that intent carries no commit, and the
-    branch it named is present in the clone. That combination means the git commit succeeded
-    and the write after it did not — `emit_branch` deletes the branch it created on every
-    failure path, so a rolled-back emission leaves no branch to find.
+    Reached when this job already wrote an intent, that intent carries no commit, and the
+    branch it named is present in the clone: the git commit succeeded and the write after it
+    did not.
 
-    The branch's committed bytes are read back with `inspect_repo` pointed at the BRANCH, which
-    is the same public call the fresh path uses against the base ref, and compared against the
-    digest the intent recorded. Against the recorded digest and never against a freshly derived
-    batch: a reviewer approving one more package between the crash and the retry would
-    otherwise make a perfectly good branch look wrong.
+    **The branch is verified, not merely recognised, and bounding the FILE does not bound the
+    BRANCH.** An earlier revision compared the list blob's digest and adopted the branch tip,
+    which is wrong in the exact shape this repo already found and fixed inside `emit_branch`:
+    a successful emission leaves the clone checked out ON the emission branch, so a human
+    working in their own clone during the crash window commits onto it, their commit touches
+    nothing this pipeline wrote, the blob still matches, and their work is adopted as this
+    batch's outcome and disclosed to upstream as such. `verify_emitted_branch` makes the same
+    three read-backs `emit_branch` makes about its own commit — parent, touched paths, bytes —
+    so a recovery can never accept what the emission itself would have rejected.
+
+    The digest compared is the one the INTENT recorded, never a freshly derived batch: a
+    reviewer approving one more package between the crash and the retry must not make a
+    perfectly good branch look wrong.
     """
-    state = await asyncio.to_thread(
-        inspect_repo, repo, base_ref=recorded.branch, list_path=recorded.list_path
+    verified = await asyncio.to_thread(
+        verify_emitted_branch,
+        repo,
+        branch=recorded.branch,
+        base_commit=recorded.base_commit,
+        list_path=recorded.list_path,
+        list_sha256=recorded.list_sha256,
     )
-    digest = hashlib.sha256(state.list_bytes).hexdigest()
-    if digest != recorded.list_sha256:
+    if verified.root != recorded.repo_path:
+        # Belt and braces rather than the safety gate — the checks above already make an
+        # accidental adopt from another checkout implausible — but it is the difference
+        # between a confusing error and one naming what the operator changed.
         raise StageInputError(
-            f"job {ctx.job_id} branch: {recorded.branch} already exists in {repo} and carries "
-            f"{recorded.list_path} at sha256 {digest}, not the {recorded.list_sha256} this "
-            "job's own emission recorded. Something else wrote that branch, or a hook rewrote "
-            "the file after the commit. Nothing was changed; inspect the branch by hand and "
-            "delete it if it is not wanted."
+            f"job {ctx.job_id} branch: {recorded.branch} was found in {verified.root}, while "
+            f"this job's emission happened in {recorded.repo_path}. UPSTREAM_REPO_PATH has "
+            "been repointed since; point it back to record the outcome, or resolve the "
+            "emission by hand."
         )
     async with ctx.session_factory() as session, session.begin():
         await record_commit(
             session,
             emission_id=recorded.id,
-            commit_oid=state.base_commit,
+            commit_oid=verified.commit,
             at=datetime.now(UTC),
             reconciled=True,
         )
     logger.warning(
         "job %s branch: %s was already committed at %s by an earlier attempt whose recording "
-        "did not land; recovered the commit rather than cutting a second branch",
+        "did not land; verified and recovered the commit rather than cutting a second branch",
         ctx.job_id,
         recorded.branch,
-        state.base_commit[:12],
+        verified.commit[:12],
     )
+
+
+async def _forget_if_rolled_back(
+    ctx: StageContext, *, repo: Path, emission_id: int, branch: str
+) -> None:
+    """After a failed `emit_branch`, discard the intent only once the rollback is CONFIRMED.
+
+    `emit_branch` documents that it deletes the branch it created on every failure path, and
+    this deliberately reads that back instead of trusting it — the one case where it does not
+    hold is the one that matters, a rollback that itself failed, and that error text is prose
+    nobody should be matching on. A branch still standing means the intent has to survive so
+    the next run's recovery path can verify and adopt it.
+
+    Never raises: it runs on a failure path, and the exception it is unwinding is the one the
+    operator needs to see. Anything it cannot do leaves the intent in place, which is the
+    conservative direction — the next run refuses rather than re-emitting.
+    """
+    try:
+        if await asyncio.to_thread(branch_exists, repo, branch):
+            logger.warning(
+                "job %s branch: %s failed but %s still exists in %s, so the intent is kept for "
+                "the next run to verify rather than discarded",
+                ctx.job_id,
+                "emit_branch",
+                branch,
+                repo,
+            )
+            return
+        async with ctx.session_factory() as session, session.begin():
+            await forget_intent(session, emission_id=emission_id)
+    except Exception:
+        logger.exception(
+            "job %s branch: could not confirm whether %s was rolled back; the intent is kept, "
+            "so the next run will refuse rather than emit a second time",
+            ctx.job_id,
+            branch,
+        )
 
 
 async def branch_stage(ctx: StageContext) -> None:
@@ -1387,11 +1445,21 @@ async def branch_stage(ctx: StageContext) -> None:
 
     - no row: nothing happened, emit.
     - a row with a commit: this job is done, no-op, and no second branch is cut.
-    - a row with no commit and no branch in the clone: the emission rolled back, so the intent
-      is replaced and the batch is re-derived from what is approved NOW.
     - a row with no commit and the branch present: the commit landed and the recording did
-      not. `_reconcile_emission` recovers the oid and marks the row `reconciled`, so the row
-      says which of the two ways it got there rather than claiming the pipeline watched it.
+      not. `_reconcile_emission` VERIFIES the branch and recovers the oid, marking the row
+      `reconciled` so it says which of the two ways it got there rather than claiming the
+      pipeline watched it happen.
+    - a row with no commit and no branch: **refused**, and this is the one state that is
+      genuinely ambiguous. It is either an emission that died before committing anything or
+      one that committed, got pushed, and had its branch deleted before the recording landed;
+      nothing inside the clone separates them, and the two want opposite actions. Re-emitting
+      would be the guess that sends a batch upstream twice, so the ambiguity resolves toward
+      the refusal. What keeps that from swallowing the ORDINARY failed attempt is
+      `_forget_if_rolled_back`: a failing `emit_branch` reads the clone back and, when its
+      branch really is gone, deletes the intent, so a retryable failure leaves no row at all
+      and reaches the first state instead of this one. The residual cost is stated rather than
+      hidden — a worker killed inside the emission itself lands here and needs a human to clear
+      the row, which is the price of never double-shipping.
     """
     settings = get_settings()
     params = await _branch_params(ctx)
@@ -1426,13 +1494,25 @@ async def branch_stage(ctx: StageContext) -> None:
             recorded.commit_oid[:12],
         )
         return
-    if recorded is not None and await asyncio.to_thread(branch_exists, repo, recorded.branch):
-        await _reconcile_emission(ctx, repo=repo, recorded=recorded)
-        return
+    if recorded is not None:
+        if await asyncio.to_thread(branch_exists, repo, recorded.branch):
+            await _reconcile_emission(ctx, repo=repo, recorded=recorded)
+            return
+        raise StageInputError(
+            f"job {ctx.job_id} branch: this job recorded an emission of {recorded.branch} into "
+            f"{recorded.repo_path} whose outcome was never written, and that branch is not "
+            "there now. Two things look identical from here and only one is safe to act on: "
+            "the emission may have died before it committed anything, or it may have committed "
+            "and been pushed and deleted before the recording landed — in which case emitting "
+            "again would send this batch upstream a second time. This pipeline cannot tell "
+            "them apart from inside the clone, so it refuses rather than guessing the "
+            "expensive way. Check `git reflog` in that clone and whether the branch was "
+            f"pushed; if nothing shipped, delete emission {recorded.id} and re-queue the job."
+        )
 
     async with ctx.session_factory() as session:
-        packages = await load_approved(session, vendor=vendor)
-    if not packages:
+        approved = await load_approved(session, vendor=vendor)
+    if not approved:
         raise StageInputError(
             f"job {ctx.job_id} branch: nothing is approved under vendor {vendor!r}, so there is "
             "no batch to emit. A branch with no diff on it is not the artifact this stage "
@@ -1446,6 +1526,35 @@ async def branch_stage(ctx: StageContext) -> None:
     state: RepoState = await asyncio.to_thread(
         inspect_repo, repo, base_ref=settings.upstream_base_ref, list_path=list_path
     )
+    # Nothing retires an approved package once it has shipped — the classification row and the
+    # human's `approve` both survive emission — so a vendor's SECOND batch still carries its
+    # first, and `insert_entries` refuses a batch carrying an already-carried key WHOLE. That
+    # refusal is a safety property and stays; what changes is that a well-formed caller never
+    # builds such a batch. Decided against the destination's own bytes at the base commit,
+    # which is the only copy that can answer it: the operator's `/data` copy is a different
+    # file refreshed on a different day.
+    carried = already_carried(state.list_bytes, approved)
+    packages = tuple(item for item in approved if item.package not in set(carried))
+    if carried:
+        logger.info(
+            "job %s branch: %d of %d approved %s package(s) are already carried at %s and are "
+            "left out of this batch: %s",
+            ctx.job_id,
+            len(carried),
+            len(approved),
+            vendor,
+            state.base_commit[:12],
+            ", ".join(carried),
+        )
+    if not packages:
+        raise StageInputError(
+            f"job {ctx.job_id} branch: every package approved under vendor {vendor!r} "
+            f"({len(carried)} of them) is already carried in {state.list_path} at "
+            f"{state.base_commit[:12]}, so there is nothing left to propose. That is what a "
+            "vendor looks like once its batch has merged upstream and the clone has been "
+            "pulled; approve more candidates in triage before queueing another emission."
+        )
+
     new_bytes = insert_entries(state.list_bytes, packages)
     digest = hashlib.sha256(new_bytes).hexdigest()
     body = render_pr_body(
@@ -1478,17 +1587,25 @@ async def branch_stage(ctx: StageContext) -> None:
             at=datetime.now(UTC),
         )
 
-    commit_oid = await asyncio.to_thread(
-        emit_branch,
-        repo,
-        branch=branch,
-        # The resolved object id, never the ref: see the docstring. A fetch landing between
-        # the inspection above and this call would otherwise move what the branch is cut from.
-        base_ref=state.base_commit,
-        list_path=state.list_path,
-        new_bytes=new_bytes,
-        message=message,
-    )
+    try:
+        commit_oid = await asyncio.to_thread(
+            emit_branch,
+            repo,
+            branch=branch,
+            # The resolved object id, never the ref: see the docstring. A fetch landing between
+            # the inspection above and this call would otherwise move what the branch is cut
+            # from.
+            base_ref=state.base_commit,
+            list_path=state.list_path,
+            new_bytes=new_bytes,
+            message=message,
+        )
+    except BaseException:
+        # An ordinary failed attempt has to stay retryable, and it is the ROLLBACK — read back,
+        # never assumed — that separates it from the crash window this stage refuses. Discard
+        # the intent only once the branch is confirmed gone; anything else keeps it.
+        await _forget_if_rolled_back(ctx, repo=repo, emission_id=emission_id, branch=branch)
+        raise
     async with ctx.session_factory() as session, session.begin():
         await record_commit(
             session,

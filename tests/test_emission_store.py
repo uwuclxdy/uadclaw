@@ -32,6 +32,7 @@ from uadclaw.classifystore import store_classification
 from uadclaw.emission import EmissionError
 from uadclaw.emissionstore import (
     EmissionStoreError,
+    forget_intent,
     load_approved,
     load_emission,
     record_commit,
@@ -789,3 +790,64 @@ async def test_a_job_that_never_emitted_has_no_record(store_db):
     job_id = await emission_job(store_db)
     async with store_db() as session:
         assert await load_emission(session, job_id=job_id) is None
+
+
+async def test_forgetting_an_unfinished_intent_takes_its_packages_with_it(store_db):
+    """The write that keeps an ordinary failed attempt retryable. Called only once the caller
+    has read the clone back and found no branch, which is what separates "this emission left
+    nothing behind" from "its outcome is unknown"."""
+    await seed(store_db, "com.example.one")
+    await decide(store_db, "com.example.one", "approve")
+    packages = await approved_for(store_db, "pixel")
+    job_id = await emission_job(store_db)
+    emission_id = await _intent(store_db, job_id, packages)
+
+    async with store_db() as session, session.begin():
+        await forget_intent(session, emission_id=emission_id)
+
+    async with store_db() as session:
+        assert await load_emission(session, job_id=job_id) is None
+        assert (await session.execute(select(BranchEmissionPackage))).scalars().all() == []
+
+
+async def test_a_finished_emission_is_never_forgotten(store_db):
+    """Its row is the only record of what went into a branch somebody may already have pushed,
+    so the delete is refused rather than allowed to erase it."""
+    await seed(store_db, "com.example.one")
+    await decide(store_db, "com.example.one", "approve")
+    packages = await approved_for(store_db, "pixel")
+    job_id = await emission_job(store_db)
+    emission_id = await _intent(store_db, job_id, packages)
+    async with store_db() as session, session.begin():
+        await record_commit(
+            session, emission_id=emission_id, commit_oid="e" * 40, at=NOW, reconciled=False
+        )
+
+    async with store_db() as session, session.begin():
+        with pytest.raises(EmissionStoreError, match="not an unfinished intent"):
+            await forget_intent(session, emission_id=emission_id)
+
+    async with store_db() as session:
+        assert (await load_emission(session, job_id=job_id)).commit_oid == "e" * 40
+
+
+async def test_forgetting_an_emission_that_is_already_gone_is_a_no_op(store_db):
+    """It runs on a failure path unwinding another exception, so it must not raise for a row a
+    previous attempt already cleared."""
+    async with store_db() as session, session.begin():
+        await forget_intent(session, emission_id=987654)
+
+
+async def test_the_record_carries_the_clone_the_emission_happened_in(store_db):
+    """`UPSTREAM_REPO_PATH` is an operator setting and can be repointed between a crash and the
+    retry, so the recovery has to be able to tell whether it is looking at the right
+    checkout."""
+    await seed(store_db, "com.example.one")
+    await decide(store_db, "com.example.one", "approve")
+    packages = await approved_for(store_db, "pixel")
+    job_id = await emission_job(store_db)
+    await _intent(store_db, job_id, packages, repo_path="/somewhere/else")
+
+    async with store_db() as session:
+        record = await load_emission(session, job_id=job_id)
+    assert record.repo_path == "/somewhere/else"

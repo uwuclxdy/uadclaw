@@ -719,8 +719,12 @@ def insert_entries(raw: bytes, packages: Sequence[ApprovedPackage]) -> bytes:
         raise EmissionError(
             f"insert_entries: {', '.join(already)} already carried in uad_lists.json. An "
             "addition PR that re-adds an existing key is a duplicate-key document upstream's "
-            "serde round-trip does not catch; re-run the filter stage against this copy of "
-            "the list, which is what decides the additions queue."
+            "serde round-trip does not catch. The caller is supposed to have dropped these "
+            "against these same bytes with `already_carried` before building the batch, so "
+            "reaching here means that pre-filter was skipped or read a different document — "
+            "note that re-running the `filter` stage does NOT help, because it writes "
+            "`package_analysis.queued` and the approved set is derived from the triage log "
+            "rather than from that column."
         )
 
     newline = _document_newline(text)
@@ -748,6 +752,39 @@ def insert_entries(raw: bytes, packages: Sequence[ApprovedPackage]) -> bytes:
             "a bug here rather than bad input; the file on disk has not been touched."
         )
     return spliced.encode()
+
+
+def already_carried(raw: bytes, packages: Iterable[ApprovedPackage]) -> tuple[str, ...]:
+    """Which of these packages the destination document already has a key for, name-sorted.
+
+    The pre-filter in front of `insert_entries`' already-carried REFUSAL, and the two are not
+    redundant. Nothing in this pipeline retires an approved package once it has shipped: the
+    classification row and the human's `approve` survive emission, so the moment a batch merges
+    upstream and the operator pulls, every later emission for that vendor would hand
+    `insert_entries` the packages it already sent and be refused WHOLE — new approvals and all.
+    Dropping them here is what makes a vendor emittable more than once.
+
+    The refusal stays exactly as strict, and this deliberately does not weaken it: refusing a
+    batch that reaches it carrying an existing key is a safety property, because two members
+    under one key make a document whose meaning depends on the reader. This just means a
+    well-formed caller never builds such a batch.
+
+    **A document this cannot read yields no drops rather than an error**, and that is the one
+    place here that fails open. It is bounded: the caller passes these same bytes to
+    `insert_entries` immediately afterwards, which parses them under its own rules and refuses
+    with the message written for it. Raising a second, competing "this file is broken" error
+    from a pre-filter would put two spellings of that refusal in front of one document.
+    """
+    names = {item.package for item in packages}
+    if not names:
+        return ()
+    try:
+        parsed = json.loads(raw.decode("utf-8").lstrip("﻿"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ()
+    if not isinstance(parsed, dict):
+        return ()
+    return tuple(sorted(names & set(parsed)))
 
 
 def _cell(value: str) -> str:
