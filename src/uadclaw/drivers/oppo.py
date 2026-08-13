@@ -866,10 +866,13 @@ class OppoDriver(FirmwareDriver):
         still come back. A model the catalogue already carries is not asked at all — the
         endpoint trails the catalogue on every model where both were measured, and an appended
         endpoint ref would outrank the catalogue's newest row in `select_ref`'s row-order
-        fallback, since no OPlus build id carries a parseable date.
+        fallback, since no OPlus build id carries a parseable date. Entries naming the same
+        model and region in another case are asked once: `_ordered_names` drops exact spellings
+        only, and a duplicate question would mint a byte-identical second ref.
         """
         refs: list[FirmwareRef] = []
         catalogue_models = {ref.device.upper() for ref in catalogue_refs}
+        asked: set[tuple[str, str]] = set()
         for entry in self._configured_models:
             model, separator, region_name = entry.partition(":")
             region = REGIONS.get(region_name.strip().upper()) if separator else None
@@ -884,6 +887,16 @@ class OppoDriver(FirmwareDriver):
             # The same model in one spelling: a lowercase entry is the operator's spelling of
             # the catalogue's device, never a second device key for one phone.
             model = model.strip().upper()
+            key = (model, region.name)
+            if key in asked:
+                logger.info(
+                    "oppo: OPPO_MODELS entry %r names %s/%s, which this listing already asked "
+                    "the endpoint for; skipping the duplicate",
+                    entry,
+                    model,
+                    region.name,
+                )
+                continue
             if model in catalogue_models:
                 logger.info(
                     "oppo: OPPO_MODELS entry %r is already in the catalogue, whose newest "
@@ -891,6 +904,7 @@ class OppoDriver(FirmwareDriver):
                     entry,
                 )
                 continue
+            asked.add(key)
             ref = await self._resolve_configured_model(client, model, region)
             if ref is not None:
                 refs.append(ref)

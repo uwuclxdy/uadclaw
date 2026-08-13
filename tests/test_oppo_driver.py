@@ -1385,6 +1385,41 @@ async def test_a_configured_model_the_catalogue_already_carries_is_not_asked_aga
     assert entry in caplog.text
 
 
+async def test_a_configured_entry_repeated_in_another_case_is_asked_once(eu_region, caplog):
+    # `_ordered_names` drops exact spellings only, so a mixed-case repeat reaches the driver;
+    # it is the same model and region and mints one ref, never two byte-identical ones.
+    document = configured_model_document(
+        "RMX3301",
+        "RMX3301_11.A.31_0310_202306202020",
+        url="https://gauss-compotacostauto-eu.allawnfs.com/component-ota/a.zip",
+        md5="e027328b9c1f81382ec4d48b9e802914",
+        size=7549973765,
+    )
+    posts = 0
+    calls: list[httpx.Request] = []
+
+    def on_endpoint(request: httpx.Request) -> httpx.Response | None:
+        nonlocal posts
+        if str(request.url) == eu_region.endpoint:
+            posts += 1
+            key = unwrap_session_key(request.headers["protectedKey"], _test_keypair()[0])
+            return httpx.Response(200, text=seal_response(document, key))
+        return None
+
+    driver = OppoDriver(
+        make_settings(oppo_models="RMX3301:EU,rmx3301:eu"),
+        client=mock_client(catalogue_handler(calls, on_endpoint=on_endpoint)),
+    )
+
+    with caplog.at_level(logging.INFO, logger="uadclaw.drivers.oppo"):
+        refs = await driver.list_available()
+
+    assert posts == 1
+    assert len(refs) == 9
+    assert len([ref for ref in refs if ref.device == "RMX3301"]) == 1
+    assert "rmx3301:eu" in caplog.text
+
+
 @pytest.mark.parametrize("entry", ["RMX3301", "RMX3301:XX", ":EU"])
 async def test_a_configured_entry_that_names_no_region_is_skipped_with_a_warning(entry, caplog):
     calls: list[httpx.Request] = []
