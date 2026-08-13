@@ -239,7 +239,7 @@ def test_a_blank_package_name_is_refused():
 
 
 def test_a_control_character_in_a_dependency_is_refused():
-    with pytest.raises(EmissionError, match="control character"):
+    with pytest.raises(EmissionError, match="invisible or direction-changing"):
         build_entry(approved("com.example.app", dependencies=("com.example\x00.other",)))
 
 
@@ -294,13 +294,16 @@ def test_a_floor_that_is_not_a_tier_is_refused():
     [
         "A vendor component.\n Removing it is safe.",
         "A vendor component. \nRemoving it is safe.",
-        "A vendor component.\n\xa0Removing it is safe.",
-        "A vendor component.\xa0\nRemoving it is safe.",
     ],
 )
 def test_whitespace_next_to_a_newline_refuses_the_batch_naming_the_substring(description: str):
     """PR #1180, a literal maintainer request: it indents the next sentence. Rewriting it here
-    would change what a human approved in triage, so the whole batch is refused."""
+    would change what a human approved in triage, so the whole batch is refused.
+
+    Only the plain-space spellings are here now. A tab or a NBSP next to a newline is refused
+    earlier and harder by the invisible-character check, which names the codepoint — see
+    `test_an_invisible_character_never_reaches_the_file`.
+    """
     with pytest.raises(EmissionError) as caught:
         insert_entries(FIXTURE, [approved("com.example.app", description=description)])
     message = str(caught.value)
@@ -626,6 +629,78 @@ def test_output_carrying_the_wrong_entries_is_refused_rather_than_returned(monke
 # --- text that must never reach somebody else's repository ---------------------------------
 
 
+# Every codepoint that renders as nothing, renders as a plain space, or reorders what follows
+# it. Named by codepoint rather than embedded literally, because a test file carrying a raw RLO
+# is itself a document nobody can read.
+INVISIBLE = [
+    0x0085,  # NEL
+    0x2028,  # LINE SEPARATOR
+    0x2029,  # PARAGRAPH SEPARATOR
+    0x200B,  # ZERO WIDTH SPACE
+    0x202E,  # RIGHT-TO-LEFT OVERRIDE
+    0x202D,  # LEFT-TO-RIGHT OVERRIDE
+    0x00A0,  # NO-BREAK SPACE
+    0xFEFF,  # ZERO WIDTH NO-BREAK SPACE
+    0x00AD,  # SOFT HYPHEN
+    0x3000,  # IDEOGRAPHIC SPACE
+]
+
+
+@pytest.mark.parametrize("codepoint", INVISIBLE, ids=[f"U+{cp:04X}" for cp in INVISIBLE])
+@pytest.mark.parametrize("field", ["package", "description", "labels", "dependencies"])
+def test_an_invisible_character_never_reaches_the_file(field: str, codepoint: int):
+    """`com.a<ZWSP>b` is written raw by `ensure_ascii=False` and reads as `com.ab` in the diff
+    a maintainer approves; `com.a<RLO>b` reverses the rest of the line. Strictly worse than the
+    control-character case, which at least escapes to something visible.
+
+    Refused in all four fields including `description` and `labels`, which take no package
+    charset — the invisible classes are as invisible in free text as in an identifier.
+    """
+    char = chr(codepoint)
+    package = (
+        approved(f"com.a{char}b")
+        if field == "package"
+        else approved(
+            "com.a",
+            **{
+                "description": {"description": f"A vendor{char}component that does a thing."},
+                "labels": {"labels": (f"lab{char}",)},
+                "dependencies": {"dependencies": (f"com.dep{char}",)},
+            }[field],
+        )
+    )
+    with pytest.raises(EmissionError) as caught:
+        insert_entries(FIXTURE, [package])
+    assert f"U+{codepoint:04X}" in str(caught.value)
+
+
+def test_every_character_upstream_actually_uses_in_a_key_still_passes():
+    """The other half, and the reason an allow-list is defensible here rather than over-fitted:
+    the sample is the whole destination population. All 5372 live keys use exactly these 61
+    characters, so a rule refusing any of them would refuse a real upstream package name."""
+    observed = ".0123456789ABCDEFGHIKLMNOPQRSTUVWX_abcdefghijklmnopqrstuvwxyz"
+    assert len(set(observed)) == 61
+    for char in observed:
+        assert build_entry(approved(f"com.a{char}b"))
+    # Wider than what is observed: no live key uses a hyphen, and the charset admits one.
+    assert build_entry(approved("com.a-b"))
+
+
+def test_a_lookalike_key_cannot_be_spelled():
+    """The finding-11 class arriving through a different character set. That error message
+    reads "It reads identically to the unpadded name in a diff" — so does this one."""
+    lookalike = "com.android.settings" + chr(0x200B)
+    assert lookalike != "com.android.settings"
+    with pytest.raises(EmissionError, match=r"U\+200B"):
+        insert_entries(FIXTURE, [approved(lookalike)])
+
+
+@pytest.mark.parametrize("bad", ["com.a/b", "com.a b", "com.a:b", "com.a" + chr(0xE9), "com.a|b"])
+def test_a_package_name_outside_upstreams_charset_is_refused(bad: str):
+    with pytest.raises(EmissionError, match="no package name upstream uses"):
+        insert_entries(FIXTURE, [approved(bad)])
+
+
 @pytest.mark.parametrize("field", ["package", "description", "labels", "dependencies"])
 def test_an_unpaired_surrogate_is_refused_as_an_emission_error(field: str):
     """androguard decodes manifest strings out of AXML's UTF-16, so a lone surrogate is
@@ -651,13 +726,13 @@ def test_an_unpaired_surrogate_is_refused_as_an_emission_error(field: str):
 def test_a_control_character_in_a_description_is_refused(bad: str):
     """`_CONTROL_CHARACTERS` states the reason itself — it stays valid JSON and invisible in a
     diff — and that argument is strictest for the description, the entry's whole content."""
-    with pytest.raises(EmissionError, match="control character"):
+    with pytest.raises(EmissionError, match="invisible or direction-changing"):
         insert_entries(FIXTURE, [approved("com.a", description=f"A vendor{bad}component here.")])
 
 
 def test_a_newline_in_a_label_is_refused():
     """A label is an identifier, so it gets the identifier's check rather than the prose one."""
-    with pytest.raises(EmissionError, match="control character"):
+    with pytest.raises(EmissionError, match="invisible or direction-changing"):
         insert_entries(FIXTURE, [approved("com.a", labels=("one\ntwo",))])
 
 
@@ -823,6 +898,13 @@ def link_targets(markdown: str) -> list[str]:
     return re.findall(r"\]\(([^)]*)\)", strip_code_spans(markdown))
 
 
+def provenance_row(rendered: str, label: str) -> str:
+    """The provenance table's row for one field."""
+    rows = [line for line in rendered.splitlines() if line.startswith(f"| {label} | ")]
+    assert len(rows) == 1, f"expected one {label} row, got {len(rows)}"
+    return rows[0]
+
+
 def package_row(rendered: str) -> str:
     """The one table row for the package under test, never the provenance table's header."""
     rows = [line for line in rendered.splitlines() if line.startswith("| ") and "com." in line]
@@ -847,26 +929,34 @@ def code_span_content(cell: str) -> str:
 def test_every_character_the_cell_layer_handles_is_pinned(bad: str):
     """One case per character `_cell`/`_code` claim to handle. Deleting any one of those
     replacements has to red something; an escaping function with one pinned character is an
-    escaping function with two unpinned ones."""
-    name = f"com.a{bad}b"
-    rendered = body(packages=[approved(name)])
-    row = package_row(rendered)
+    escaping function with two unpinned ones.
+
+    Driven through `model` rather than through a package name: the package charset now refuses
+    every one of these outright, so the live injection vector into the cell layer is the
+    disclosure strings, which are free-form by necessity — a branch name carries slashes and a
+    model id is whatever the API answered with.
+    """
+    value = f"m{bad}odel"
+    rendered = body(packages=[approved("com.a", model=value)])
+    row = provenance_row(rendered, "model")
     cells = row_cells(row)
-    assert len(cells) == 6, f"row split into {len(cells) - 2} columns: {row!r}"
-    assert code_span_content(cells[1]) == name
+    assert len(cells) == 4, f"row split into {len(cells) - 2} columns: {row!r}"
+    assert code_span_content(cells[2]) == value
 
 
 @pytest.mark.parametrize("bad", ["\n", "\r", "\r\n", "\x0b", "\x0c", "\x85", "\u2028", "\u2029"])
 def test_the_cell_layer_collapses_every_line_ending_markdown_knows(bad: str):
     """Driven against `_code` directly, and that is the point rather than a shortcut.
 
-    Every field that reaches the body is now gated by `_check_text`, which refuses a control
-    character outright, so no public call can put a line ending into a cell any more — the
-    route this used to be tested through is closed. That leaves the collapse as the markdown
-    layer's own contract with nothing reachable to exercise it, and an unreachable guard with
-    no test is exactly what rots into a wrong claim. So the primitive is pinned as a primitive:
-    it holds for any string, which is what makes it still correct the day somebody adds a sixth
-    disclosure field and forgets to gate it.
+    An earlier version of this docstring claimed the field gating had closed every public route
+    to the cell layer. That was wrong, and measurably: `[\x00-\x1f\x7f]` does not match
+    U+0085, U+2028 or U+2029, so all three sat in this collapse class and in no refusal, and
+    reached `_cell` through `model`, `commit_sha` and `package`. The category-based check now
+    does close them, so the guard is unreachable through the public API today — but it is
+    reachable-or-not as a function of a check three functions away, which is exactly the kind
+    of claim that goes stale without anything failing. So the primitive is pinned as a
+    primitive: it holds for any string, which is what keeps it correct the day someone adds a
+    seventh disclosure field, or relaxes a category, and does not think about this line.
     """
     assert emission_module._code(f"m{bad}odel") == "`m odel`"
 
@@ -874,7 +964,7 @@ def test_the_cell_layer_collapses_every_line_ending_markdown_knows(bad: str):
 def test_a_control_character_in_a_disclosure_string_is_refused():
     """The reachable half of the same concern: through the public API a line ending in a
     disclosure string never gets as far as the cell layer."""
-    with pytest.raises(EmissionError, match="control character"):
+    with pytest.raises(EmissionError, match="invisible or direction-changing"):
         body(packages=[approved("com.a", model="m\rodel")])
 
 
@@ -887,7 +977,7 @@ def test_the_unhosted_body_links_to_nothing_at_all():
     the expected set is empty and any escape from any field shows up as a non-empty answer."""
     rendered = body(
         vendor="pixel",
-        packages=[approved(f"com.a{PAYLOAD}", model=f"m{PAYLOAD}")],
+        packages=[approved("com.a", model=f"m{PAYLOAD}")],
         pipeline_version=PAYLOAD,
         commit_sha=PAYLOAD,
         base_commit=PAYLOAD,
@@ -901,7 +991,7 @@ def test_the_hosted_body_links_only_to_the_bundle_url():
     links, so the assertion is the exact set rather than emptiness. A test that only ever
     expects zero cannot tell a working fence from a renderer that stopped emitting links."""
     rendered = body(
-        packages=[approved(f"com.a{PAYLOAD}", bundle_sha256=SHA_A, model=f"m{PAYLOAD}")],
+        packages=[approved("com.a", bundle_sha256=SHA_A, model=f"m{PAYLOAD}")],
         pipeline_version=PAYLOAD,
         commit_sha=PAYLOAD,
         base_commit=PAYLOAD,
@@ -920,25 +1010,24 @@ def test_the_commit_sha_is_fenced_in_the_prose_as_well_as_the_table():
     assert rendered.count(PAYLOAD) == 2
 
 
-def test_a_backtick_in_a_package_name_cannot_open_a_link():
-    """The whole reason `_code` sizes its fence: a name spelled with a backtick used to close
+def test_a_backtick_in_a_disclosure_string_cannot_open_a_link():
+    """The whole reason `_code` sizes its fence: a value spelled with a backtick used to close
     the span wrapping it, and the rest rendered as a real link a maintainer clicks."""
-    name = "com.a`[CLICK ME](https://phish.example)`b"
-    rendered = body(packages=[approved(name)])
-    row = package_row(rendered)
-    assert code_span_content(row_cells(row)[1]) == name
+    rendered = body(branch=PAYLOAD)
+    assert code_span_content(row_cells(provenance_row(rendered, "branch"))[2]) == PAYLOAD
+    assert link_targets(rendered) == []
 
 
-def test_a_pipe_in_a_package_name_cannot_end_the_table_row_early():
-    rendered = body(packages=[approved("com.a|evil")])
-    assert len(row_cells(package_row(rendered))) == 6
+def test_a_pipe_in_a_disclosure_string_cannot_end_the_table_row_early():
+    rendered = body(branch="main|evil")
+    assert len(row_cells(provenance_row(rendered, "branch"))) == 4
 
 
-def test_a_backslash_in_a_package_name_is_not_doubled():
-    """A code span does not process backslash escapes, so doubling one renders a name the
-    package does not have — a wrong claim in a document going to another repository."""
-    rendered = body(packages=[approved("com.a\\b")])
-    assert code_span_content(row_cells(package_row(rendered))[1]) == "com.a\\b"
+def test_a_backslash_in_a_disclosure_string_is_not_doubled():
+    """A code span does not process backslash escapes, so doubling one renders a value the
+    input does not have — a wrong claim in a document going to another repository."""
+    rendered = body(branch="main\\evil")
+    assert code_span_content(row_cells(provenance_row(rendered, "branch"))[2]) == "main\\evil"
 
 
 @pytest.mark.parametrize(

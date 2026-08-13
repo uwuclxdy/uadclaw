@@ -46,6 +46,7 @@ Three more things shape the module:
 
 import json
 import re
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -80,20 +81,30 @@ _FIELD_INDENT = "    "
 _JSON_WHITESPACE = " \t\n\r"
 
 # Upstream's literal formatting rule, from maintainer `@AnonymousWP` on PR #1180: no space
-# adjacent to a `\n` inside a description, because it indents the next sentence. Wider than
-# `classify._SPACE_NEXT_TO_NEWLINE`, which matches a literal space only: a tab or a NBSP
-# indents exactly the same and that pattern does not see it. Measured over the live file
-# 2026-08-13, the space-only spelling finds 42 violating entries and this one finds 43.
+# adjacent to a `\n` inside a description, because it indents the next sentence. Measured over
+# the live file 2026-08-13: 42 entries violate the plain-space spelling.
+#
+# The class is wider than a literal space, but that width is no longer what carries a tab or a
+# NBSP — `_invisible_character` runs first and refuses both outright, naming the codepoint.
+# What is left for this rule is the plain ASCII space, which is the only one of the three that
+# is legal text everywhere else in a description.
 _WHITESPACE_NEXT_TO_NEWLINE = re.compile(r"[^\S\n]\n|\n[^\S\n]")
 
-# Control characters, refused in every string this module writes into the file. `json.dumps`
-# would escape them into valid JSON, which is the problem: the file stays parseable and a
-# human reviewing the PR cannot see what they are approving. The description gets the second
-# pattern, which spares `\n` alone — a newline is legal and common there, and 3 of the 5308
-# live descriptions carry a tab, so this refuses a shape upstream tolerates. It refuses it for
-# the reason above: nobody reviewing a diff can see a tab.
-_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
-_CONTROL_CHARACTERS_ALLOWING_NEWLINE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+# Unicode categories nothing this module writes may contain: Cc control, Cf format, Zl line
+# separator, Zp paragraph separator, and any Zs space that is not a plain ASCII one.
+#
+# Stated as CATEGORIES rather than as a character list on purpose. A hand-listed set was wrong
+# here twice: `[\x00-\x1f\x7f]` missed U+0085 NEL, U+2028 and U+2029 — all three sat in the
+# markdown line-break class and in no refusal — and it never saw U+200B ZWSP, U+202E RLO,
+# U+00AD SHY, U+FEFF, U+00A0 or U+3000 at all. A key spelled `com.a<ZWSP>b` reads as `com.ab`
+# in the PR diff a maintainer approves, and `com.a<RLO>b` reverses the rest of the line.
+# `ensure_ascii=False` makes it worse than the control-character case: a control character at
+# least escapes to something visible, these land as raw bytes that render as nothing.
+#
+# Measured over the live file 2026-08-13, so this refuses nothing upstream carries: across all
+# 5308 non-empty descriptions the only characters in these classes are `\n` (6723) and `\t`
+# (3). The tab is refused deliberately — see `prose` in `_check_text`.
+_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 # A UTF-16 surrogate with no pair. `json.dumps` passes one straight through and `str.encode`
 # then raises `UnicodeEncodeError`, which is not an `EmissionError` and would escape a caller
@@ -127,7 +138,16 @@ _MAX_NAMES_PER_FIELD = 64
 # alone is one to CommonMark, so a bare carriage return splits the row exactly like `\n`. A
 # RUN collapses to a single space rather than one space per character: a CRLF is ONE line
 # ending, and rendering it as two spaces misstates the value it came from.
-_MARKDOWN_LINE_BREAK = re.compile(r"[\r\n\x0b\x0c\x85  ]+")
+_MARKDOWN_LINE_BREAK = re.compile("[\\r\\n\\x0b\\x0c\\x85\\u2028\\u2029]+")
+
+# What a package name may contain, applied to the `package` key and to every `dependencies`
+# and `neededBy` element. Measured against the whole destination population rather than a
+# sample, which is what makes an allow-list defensible here instead of over-fitted: all 5372
+# live keys and all 84 live dependency names use exactly 61 distinct characters, every one
+# ASCII, and 0 of either fall outside this class — which is itself wider than what is observed,
+# since no live key uses a hyphen at all. A name outside it is refused loudly, naming the
+# codepoint, so widening this is a one-line change somebody makes on purpose.
+_PACKAGE_NAME = re.compile(r"\A[A-Za-z0-9._-]+\Z")
 
 # A vendor is the driver half of a `device_key` or `SHARED_VENDOR`, so it is a registry name
 # from `firmware.py` rather than free text. Refused rather than escaped when it is not one: a
@@ -187,6 +207,21 @@ class ApprovedPackage:
     device_keys: tuple[str, ...]
 
 
+def _invisible_character(value: str, *, prose: bool) -> str | None:
+    """The first character that renders as nothing or reorders what follows it, or None.
+
+    `\\n` is exempt in prose and only there: it is legal in a description (6723 live uses) and
+    is the one separator a reviewer can actually see in a diff.
+    """
+    for char in value:
+        if prose and char == "\n":
+            continue
+        category = unicodedata.category(char)
+        if category in _INVISIBLE_CATEGORIES or (category == "Zs" and char != " "):
+            return char
+    return None
+
+
 def _check_text(value: object, *, subject: str, field: str, prose: bool = False) -> str:
     """One string this module writes into `uad_lists.json`, whatever field it came from.
 
@@ -207,20 +242,21 @@ def _check_text(value: object, *, subject: str, field: str, prose: bool = False)
             f"{subject}: {field} is {value!r}, which is not shippable text. Upstream reads "
             "these as `String`, and a blank one becomes an entry nobody can look up."
         )
+    found = _invisible_character(value, prose=prose)
+    if found is not None:
+        name = unicodedata.name(found, "unnamed")
+        raise EmissionError(
+            f"{subject}: {field} {value!r} carries U+{ord(found):04X} ({name}), an invisible "
+            "or direction-changing character. It renders as nothing, or reorders what follows "
+            "it, in the diff a maintainer approves, so the text they read is not the text that "
+            "ships; fix it in triage."
+        )
     if not prose and value != value.strip():
         raise EmissionError(
             f"{subject}: {field} {value!r} is padded with whitespace. It reads identically to "
             "the unpadded name in a diff and is a different key to every exact-string check "
             "here, so it would slip past the already-carried guard and add a second entry for "
             "one package; fix the triage row rather than trimming it on the way out."
-        )
-    pattern = _CONTROL_CHARACTERS_ALLOWING_NEWLINE if prose else _CONTROL_CHARACTERS
-    found = pattern.search(value)
-    if found is not None:
-        raise EmissionError(
-            f"{subject}: {field} {value!r} carries the control character "
-            f"{found.group()!r}. It would be escaped into valid JSON and stay invisible to "
-            "the reviewer reading the PR, so it is refused; fix it in triage."
         )
     surrogate = _LONE_SURROGATE.search(value)
     if surrogate is not None:
@@ -248,7 +284,7 @@ def _validate(package: ApprovedPackage, *, subject: str) -> None:
     first thing wrong rather than a consequence of it: the tiers are parsed before the floor
     is compared against one.
     """
-    _check_text(package.package, subject=subject, field="package")
+    _check_package_name(package.package, subject=subject, field="package")
     name = package.package
 
     if package.uad_list not in tuple(UadList):
@@ -304,7 +340,12 @@ def _validate(package: ApprovedPackage, *, subject: str) -> None:
                 "hundreds is a corpus-graph bug rather than an entry to ship."
             )
         for value in values:
-            _check_text(value, subject=subject, field=f"{name}'s {field_name} entry")
+            if field_name == "labels":
+                # Upstream free text rather than an identifier, so no package charset — but
+                # `_check_text` still refuses the invisible classes, which are as invisible here.
+                _check_text(value, subject=subject, field=f"{name}'s label")
+            else:
+                _check_package_name(value, subject=subject, field=f"{name}'s {field_name} entry")
 
     if not _SHA256.fullmatch(package.bundle_sha256):
         raise EmissionError(
@@ -323,6 +364,27 @@ def _validate(package: ApprovedPackage, *, subject: str) -> None:
     # a `str` a caller encodes, so an unpaired surrogate here raises `UnicodeEncodeError` in
     # the git lane rather than an `EmissionError` here.
     _check_text(package.model, subject=subject, field=f"{name}'s model")
+
+
+def _check_package_name(value: object, *, subject: str, field: str) -> str:
+    """A package name, which is an identifier rather than text.
+
+    Everything `_check_text` refuses, plus a charset. The charset is what makes a lookalike
+    key impossible rather than merely unlikely: `_check_text` catches the invisible classes,
+    and this catches everything else that is not what a package name is made of.
+    """
+    _check_text(value, subject=subject, field=field)
+    name = str(value)
+    if not _PACKAGE_NAME.fullmatch(name):
+        offender = next(char for char in name if not _PACKAGE_NAME.fullmatch(char))
+        raise EmissionError(
+            f"{subject}: {field} {name!r} carries U+{ord(offender):04X} "
+            f"({unicodedata.name(offender, 'unnamed')}), which no package name upstream uses. "
+            "All 5372 live keys and all 84 live dependency names are ASCII letters, digits, "
+            "dot, underscore or hyphen; a key outside that would be a lookalike of a real one "
+            "rather than a package. Re-extract the facts, or widen the charset on purpose."
+        )
+    return name
 
 
 def _vendor(device_keys: Sequence[str], *, subject: str) -> str:
