@@ -615,26 +615,75 @@ async def test_one_dead_host_costs_only_its_own_result():
     assert fetched[1].judged_text == "s2"
 
 
-async def test_the_fetcher_never_exceeds_its_concurrency_bound():
-    import asyncio
+# How long a handler waits at the barrier before deciding the overlap is never coming. Sized
+# against a loaded CI runner rather than against this box: it is only ever reached when the
+# test is already failing, and `abort()` below means the whole test pays it once, not once per
+# pair. The suite's per-test ceiling is 30s (`pyproject.toml`), so a regression reports in ~5s.
+OVERLAP_TIMEOUT_SECONDS = 5.0
 
+# How long the parties stay inside the handler after the barrier releases them, so a permit
+# count ABOVE the parties is observable as a surplus arrival. Unlike the barrier this is a
+# bounded wait by necessity — there is no event to await for an arrival that should never
+# happen — and it fails only in the safe direction: too short and a widened bound survives,
+# never a false red. 50ms measured 2026-08-13 as enough to kill `Semaphore(max_concurrency
+# + 1)` on both clients; the sleep it replaces caught the same widening by luck.
+SURPLUS_SETTLE_SECONDS = 0.05
+
+
+async def _bounded_overlap_handler(state, barrier, response):
+    """One handler call that cannot return until `barrier.parties` of them are inside at once.
+
+    The sleep this replaces only HOPED for the overlap: ten tasks against two permits and a
+    10ms `asyncio.sleep` need the second task scheduled inside that window, which a contended
+    runner does not guarantee. Both callers below failed exactly there on CI run 31677665642
+    with `peak == 1` against correct code, and twice locally in about twenty whole-suite runs
+    under parallel load. A barrier inverts it — the first arrival cannot leave until every
+    party the semaphore is supposed to admit has arrived — so the overlap is a consequence of
+    the permit count and nothing else.
+
+    The equality the callers assert needs both halves and the barrier only supplies one: too
+    FEW permits never fills it, too MANY is invisible to it, because it releases the moment
+    the parties arrive and the surplus task is admitted behind them. Measured 2026-08-13:
+    barrier alone, `Semaphore(max_concurrency + 1)` SURVIVED the whole suite. Hence the settle
+    window below, which is the upper half. What the timeout plus `abort()` buys is that a
+    too-few failure is an assertion in about five seconds rather than a hang, which this repo
+    has already paid for once elsewhere in this file.
+    """
+    state["live"] += 1
+    state["peak"] = max(state["peak"], state["live"])
+    try:
+        await asyncio.wait_for(barrier.wait(), timeout=OVERLAP_TIMEOUT_SECONDS)
+        await asyncio.sleep(SURPLUS_SETTLE_SECONDS)
+    except TimeoutError:
+        # Break it for everyone: the remaining callers fail fast instead of each waiting out
+        # their own timeout, and the peak assertion is what reports rather than the clock.
+        await barrier.abort()
+    except asyncio.BrokenBarrierError:
+        pass
+    state["live"] -= 1
+    return response()
+
+
+async def test_the_fetcher_never_exceeds_its_concurrency_bound():
+    bound = 2
     state = {"live": 0, "peak": 0}
+    barrier = asyncio.Barrier(bound)
 
     async def handler(request):
-        state["live"] += 1
-        state["peak"] = max(state["peak"], state["live"])
-        await asyncio.sleep(0.01)
-        state["live"] -= 1
-        return html_response("<html><body><p>a page body here</p></body></html>")
+        return await _bounded_overlap_handler(
+            state,
+            barrier,
+            lambda: html_response("<html><body><p>a page body here</p></body></html>"),
+        )
 
     merged = merge_results(
         envelope(web=[result(f"https://p{index}.test") for index in range(10)]), limit=10
     )
-    async with fetcher(handler, max_concurrency=2) as pages:
+    async with fetcher(handler, max_concurrency=bound) as pages:
         await pages.fetch_all(merged)
     # Exactly 2, not "at most 2": a fetcher that serialised everything would also satisfy an
     # upper bound while proving nothing about the semaphore.
-    assert state["peak"] == 2, state["peak"]
+    assert state["peak"] == bound, state["peak"]
 
 
 async def test_the_search_client_never_exceeds_its_concurrency_bound():
@@ -642,22 +691,24 @@ async def test_the_search_client_never_exceeds_its_concurrency_bound():
     creates one task per candidate against a ceiling of 500. Brave's measured policy is 50
     req/s and `_QueryBudget.take()` decrements BEFORE the request, so every 429 an unbounded
     fanout earns spends a query out of the job's ceiling for nothing."""
+    bound = 2
     state = {"live": 0, "peak": 0}
+    barrier = asyncio.Barrier(bound)
 
     async def handler(request):
-        state["live"] += 1
-        state["peak"] = max(state["peak"], state["live"])
-        await asyncio.sleep(0.01)
-        state["live"] -= 1
-        return httpx.Response(200, json=envelope(web=[result("https://a.test/1")]))
+        return await _bounded_overlap_handler(
+            state,
+            barrier,
+            lambda: httpx.Response(200, json=envelope(web=[result("https://a.test/1")])),
+        )
 
-    client, _ = brave([httpx.Response(200, json={})], max_concurrency=2)
+    client, _ = brave([httpx.Response(200, json={})], max_concurrency=bound)
     client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     async with client:
         await asyncio.gather(*(client.search(f"pkg{index}", limit=1) for index in range(10)))
     # Exactly 2, not "at most 2": a client that serialised everything would satisfy an upper
     # bound while proving nothing about the semaphore.
-    assert state["peak"] == 2, state["peak"]
+    assert state["peak"] == bound, state["peak"]
 
 
 # --- the fetch boundary: nothing may escape into the caller -------------------------------------
