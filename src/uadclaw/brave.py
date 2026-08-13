@@ -169,30 +169,56 @@ def is_fetchable_url(url: str) -> bool:
         return False
 
 
+# Two IPv6 transition blocks, refused by their own names rather than left to `is_private`.
+# Both wrap an IPv4 address the requester chooses inside an IPv6 literal, and neither is a
+# destination this pipeline ever wants: they are tunnelling mechanisms, not hosts that publish
+# pages about Android packages.
+#
+# Spelled out rather than delegated because `ipaddress`'s answer for 6to4 MOVED inside one
+# minor version. Measured 2026-08-13: on CPython 3.12.3 the whole of `2002::/16` is
+# `is_private` False, `is_global` True and carries no label at all, cloud metadata
+# (`2002:a9fe:a9fe::`) and loopback (`2002:7f00:1::`) included; on 3.12.13 every one of them is
+# `is_private`. That interpreter is below this project's floor as of the bump alongside this
+# change, so an explicit refusal is not what closes the gap — the floor is. What it closes is
+# the NEXT move of a stdlib classification table that a security boundary should not rest on.
+#
+# Deliberately NOT normalised to the embedded IPv4 the way `::ffff:` is, and that direction was
+# measured too: `2002:0808:0808::` carries `8.8.8.8`, which has no label, so normalising would
+# turn a 6to4 address the shipping interpreter refuses today into one this fetches. Refusing
+# each block whole is the narrower answer, and 3.12.13 already agrees with it.
+_TRANSITION_BLOCKS: tuple[tuple[str, ipaddress.IPv6Network], ...] = (
+    ("6to4", ipaddress.IPv6Network("2002::/16")),
+    ("teredo", ipaddress.IPv6Network("2001::/32")),
+)
+
+
 def _blocked_address(host: str) -> str | None:
     """Why this literal address must not be requested, or `None` if it is not a literal.
 
-    An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) is classified as the IPv4 address it
-    maps to, because `ipaddress`'s own answer for the mapped spelling is not stable across the
-    interpreters this project declares support for. Measured 2026-08-13 on
-    `ipaddress.ip_address("::ffff:127.0.0.1")`: CPython 3.12.3 answers `is_loopback` False and
-    `is_private` True, CPython 3.12.13 answers both True. Same for the other seven mapped
-    spellings this module is tested against — on 3.12.3 they collapse onto `private` or
-    `reserved`, on 3.12.13 they keep the label their plain IPv4 spelling has.
+    An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) is classified as the IPv4 address it maps
+    to. On every interpreter this project now admits (`requires-python = ">=3.12.13"`)
+    `ipaddress` already answers that way, so the two lines below change no verdict and no label
+    today — they are belt for the same reason `_TRANSITION_BLOCKS` above is: measured
+    2026-08-13, `ipaddress.ip_address("::ffff:127.0.0.1").is_loopback` is False on CPython
+    3.12.3 and True on 3.12.13, so this table has already moved once inside one minor version.
+    3.12.3 refused every mapped spelling anyway, under the wrong label; the loosening it would
+    have taken to matter is a version that stops refusing one.
 
-    Every one of them is refused under both, so the divergence was a wrong LABEL rather than a
-    hole; `::ffff:169.254.169.254` reading "private" is a fact the reader has to decode back.
-    Normalising first makes the label a property of the address instead of a property of the
-    patch level. `ipv4_mapped` covers `::ffff:0:0/96` and nothing else: a 6to4 or Teredo
-    address carrying an embedded IPv4 is a real IPv6 address that routes on its own terms, and
-    is left to the checks below.
+    `ipv4_mapped` covers `::ffff:0:0/96` and nothing else. The other two blocks that wrap an
+    IPv4 address are handled above, by name, and for the opposite reason — normalising those
+    would WIDEN the gate.
     """
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         return None
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        else:
+            for label, block in _TRANSITION_BLOCKS:
+                if address in block:
+                    return label
     # Ordered most specific first: `0.0.0.0` is unspecified AND private, and `127.0.0.1` is
     # loopback AND private, so a name-the-broadest-match order would label every one of them
     # "private" and lose the fact a reader needs.

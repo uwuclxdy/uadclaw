@@ -797,6 +797,8 @@ BLOCKED_TARGETS = (
     ("http://192.168.1.1/x", "private"),
     ("http://172.16.0.1/x", "private"),
     ("http://0.0.0.0/x", "unspecified"),
+    ("https://[2002:a9fe:a9fe::]/x", "6to4"),
+    ("https://[2001:0:53aa:64c:200:5efe:c000:201]/x", "teredo"),
 )
 
 
@@ -834,19 +836,24 @@ MAPPED_SPELLINGS = (
 
 
 @pytest.mark.parametrize("address", MAPPED_SPELLINGS)
-def test_an_ipv4_mapped_address_carries_its_own_ipv4_verdict_on_every_supported_python(address):
-    """The label must be a property of the address, never of the interpreter's patch level.
+def test_an_ipv4_mapped_address_carries_its_own_ipv4_verdict(address):
+    """A tripwire, and worth naming as one rather than banking it as a pin.
 
-    `ipaddress` disagrees with itself across the versions `requires-python = ">=3.12"` admits:
-    measured 2026-08-13, `::ffff:127.0.0.1` is loopback on CPython 3.12.13 and NOT loopback
-    (private instead) on 3.12.3, which is what CI's runner ships. Nothing was reachable that
-    should not have been — every one of these is refused under both — but the reason handed to
-    an operator changed, and `BLOCKED_TARGETS` above pins reasons.
+    What it pins: `_blocked_address` answers an `::ffff:` spelling exactly what it answers the
+    IPv4 address it wraps. What it CANNOT pin: that the normalisation in the module is what
+    makes that true. `ipaddress` already answers this way unaided on every interpreter
+    `requires-python = ">=3.12.13"` admits, so deleting those two lines leaves this green —
+    measured 2026-08-13, the whole file at 88 passed with them removed. Only CPython 3.12.3
+    reddened it, at 7 tests, and 3.12.3 is below the floor as of this round.
 
-    Written as an equality against the plain IPv4 spelling rather than as a literal label, so
-    it holds for whatever `ipaddress` decides an IPv4 address is next. `93.184.216.34` is in
-    the set as the control: it makes both spellings agree on `None`, so a `_blocked_address`
-    that refused everything would satisfy the other eight and die here.
+    Its value is what it catches LATER: `ipaddress`'s classification table moved once inside
+    one minor version already, and this fails the next time it moves. The pin with teeth on the
+    shipping interpreter is the transition-block test below, which asserts a label CPython does
+    not produce on its own.
+
+    "Every supported python" is deliberately not in the name any more. `>=3.12.13` admits 3.13
+    and 3.14, no gate in this repo runs either, and a name is a bad place to keep a promise no
+    job checks.
     """
     assert _blocked_address(f"::ffff:{address}") == _blocked_address(address)
 
@@ -856,6 +863,55 @@ def test_the_control_a_mapped_public_address_is_still_fetchable():
     something if `None` is what a public address gets."""
     assert _blocked_address("93.184.216.34") is None
     assert _blocked_address("::ffff:93.184.216.34") is None
+
+
+# A 6to4 or Teredo literal wraps an IPv4 address the requester picks, and the requester here is
+# whoever can rank a page for a package name. Refused by block, never normalised to the IPv4
+# inside: `2002:0808:0808::` wraps `8.8.8.8`, which carries no label, so normalising is the
+# repair that WIDENS the gate.
+TRANSITION_TARGETS = (
+    ("2002:a9fe:a9fe::", "6to4"),  # the cloud metadata address, tunnelled
+    ("2002:7f00:1::", "6to4"),  # loopback, tunnelled
+    ("2002:0a00:0005::", "6to4"),  # RFC1918, tunnelled
+    ("2002:0808:0808::", "6to4"),  # a PUBLIC IPv4, and still refused: the block is the reason
+    ("2002::", "6to4"),  # block floor
+    ("2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "6to4"),  # block ceiling
+    ("2001::1", "teredo"),
+    ("2001:0:53aa:64c:200:5efe:c000:201", "teredo"),  # teredo with an embedded IPv4
+    ("2001:0:ffff:ffff:ffff:ffff:ffff:ffff", "teredo"),  # block ceiling
+)
+
+
+@pytest.mark.parametrize(("address", "label"), TRANSITION_TARGETS)
+def test_a_tunnelled_ipv4_address_is_refused_by_its_block_and_named_for_it(address, label):
+    """The round's discriminating pin, because CPython answers `private` for all nine.
+
+    Measured 2026-08-13: on CPython 3.12.3 the whole of `2002::/16` is `is_private` False and
+    `is_global` True, so `2002:a9fe:a9fe::` — the cloud metadata address wearing a 6to4
+    literal — was FETCHABLE. On 3.12.13 it is `is_private`. That is a reachability divergence
+    rather than the labelling one the `::ffff:` case turned out to be, and raising the floor is
+    what closes it; this test is what keeps it closed when the table moves again.
+
+    Asserting the specific label rather than "refused" is what makes it discriminating on the
+    shipping interpreter: delete the block check and 3.12.13 still refuses all nine, as
+    `private`, so a `is not None` assertion here would be a tautology.
+    """
+    assert _blocked_address(address) == label
+
+
+@pytest.mark.parametrize(
+    "address",
+    (
+        "2003::",  # one bit above the 6to4 block
+        "2001:1::1",  # one /32 above the teredo block
+        "2606:4700:4700::1111",  # a real public resolver
+    ),
+)
+def test_the_control_an_address_outside_the_tunnel_blocks_keeps_its_own_verdict(address):
+    """Refusing `2002::/16` whole is only narrow if it stops at the block's edge — otherwise
+    the same test passes for a gate that refused every IPv6 address there is."""
+    assert _blocked_address(address) != "6to4"
+    assert _blocked_address(address) != "teredo"
 
 
 async def test_a_redirect_into_an_internal_address_is_refused_at_the_hop():
