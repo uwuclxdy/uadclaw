@@ -19,19 +19,33 @@ What state the clone is left in, per outcome:
 
 - `inspect_repo` and `branch_exists` are read-only. They never move HEAD, never write the index
   and never touch the working tree, so they are safe against a clone a human is sitting in.
-- `emit_branch` succeeds: the clone is ON the new branch with a clean tree and the new commit at
-  HEAD, because the human's next act is `git push` from there.
-- `emit_branch` fails, at any step: the ref that was checked out on entry is checked out again
-  and the created branch is deleted, so a failed emission leaves nothing behind for a later run
-  to refuse as already existing.
-- `emit_branch` fails AND the restore fails too: the raised error says so and names the branch
-  the clone is left on, because that is a different fix (a hand checkout) from the one the
-  original failure asks for.
+- `emit_branch` succeeds: the clone is ON the new branch with the new commit at HEAD, because
+  the human's next act is `git push` from there. The working tree is clean unless one of the
+  clone's own hooks writes into it AFTER the commit — a `post-commit` formatter does exactly
+  that, and the branch is still correct, so the emission reports success and the next one
+  refuses the clone until somebody cleans it up.
+- `emit_branch` fails, at any step: the emission's own edit to the list file is discarded, the
+  ref that was checked out on entry is checked out again, and the created branch is deleted, so
+  a failed emission leaves nothing behind for a later run to refuse as already existing. Only
+  the list file is discarded — anything else in the clone belongs to a human and is left alone,
+  even when leaving it alone is what makes the switch back fail.
+- `emit_branch` fails AND the restore fails too: the raised error carries the original failure
+  plus what could not be undone, and every claim in it about where HEAD is and whether the
+  branch survived is read back rather than assumed.
 
 The clone's own hooks run — no `--no-verify`, since disabling a hook the operator installed is
-their decision and not this module's. A hook that REWRITES `uad_lists.json` is caught instead:
-the committed blob is read back and compared against the bytes handed in, because a reformat of
-that file is a documented upstream rejection reason and would otherwise ship inside a content PR.
+their decision and not this module's. What a successful commit produced is therefore read back
+before the emission reports success, and all three checks are needed because they fail
+differently: the committed blob must equal the bytes handed in (a hook that reformats
+`uad_lists.json` is a documented upstream rejection reason), the commit must touch that path and
+nothing else, and its parent must be the commit the branch was cut from — the first two describe
+the COMMIT, while what a human pushes is the BRANCH, and a human committing into the clone
+mid-emission puts their work underneath ours where neither of the first two can see it.
+
+An emission also refuses a clone that is stopped inside a rebase, merge, cherry-pick, revert or
+bisect. That state is invisible to `status --porcelain` (a rebase stopped at an `edit` step
+stages nothing), and cutting a branch under it strands the operator's operation on the emission
+branch when they continue it.
 
 Synchronous on purpose, matching the API this module was specified against. The worker runs an
 event loop, so a stage calls these through `asyncio.to_thread` rather than inline.
@@ -52,6 +66,11 @@ logger = logging.getLogger(__name__)
 # Every git call gets one. A checkout of this repo is a few MB and every operation here is local,
 # so a call still running after this is a hung git (a credential or editor prompt, a wedged hook)
 # rather than slow work, and a worker blocked forever on it holds the job and its scratch lease.
+#
+# It bounds THIS MODULE'S WAIT and nothing else: `subprocess.run(timeout=...)` kills the direct
+# child and reaps it, so a hook the clone spawned keeps running — and can keep writing — while
+# the restore works around it. Reaping that would need a process group this module does not
+# create, and killing an operator's hooks is a decision nobody has taken.
 GIT_TIMEOUT_SECONDS = 120
 
 # Stripped from the environment every git call inherits. These override `git -C <path>` rather
@@ -66,6 +85,19 @@ _REDIRECTING_GIT_ENV = (
     "GIT_COMMON_DIR",
     "GIT_OBJECT_DIRECTORY",
     "GIT_NAMESPACE",
+)
+
+# A git operation the clone can be stopped in the middle of. Every one of these is invisible to
+# `status --porcelain` in at least one of its states — a rebase stopped at an `edit` step stages
+# nothing at all — so a clone mid-rebase reads as quiescent and an emission's checkout strands
+# that operation on the emission branch.
+_INTERRUPTED_OPERATIONS = (
+    "rebase-merge",
+    "rebase-apply",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
 )
 
 
@@ -248,8 +280,26 @@ def _work_tree_root(path: Path, *, context: str) -> Path:
     return Path(_text(_run_git(path, ["rev-parse", "--show-toplevel"], context=context)))
 
 
-def _current_head(root: Path) -> str:
-    """What `_restore` has to check out to put the clone back.
+def _interrupted_operation(root: Path, *, context: str) -> str | None:
+    """The git operation this clone is stopped in the middle of, if any.
+
+    Every path is resolved with `--git-path` rather than by joining `.git/` onto the work tree
+    root, because a linked worktree keeps these files somewhere else entirely and this module
+    otherwise supports one.
+    """
+    argv = ["rev-parse"]
+    for name in _INTERRUPTED_OPERATIONS:
+        argv += ["--git-path", name]
+    resolved = _text(_run_git(root, argv, context=context)).splitlines()
+    for name, path in zip(_INTERRUPTED_OPERATIONS, resolved, strict=True):
+        if (root / path).exists():
+            return name
+    return None
+
+
+def _head_position(root: Path) -> str | None:
+    """Where HEAD is, spelled the way `_restore` has to check it back out, or None when git
+    cannot say.
 
     The SHORT branch name, never `refs/heads/<name>`: checking out the full ref name detaches
     HEAD (measured on git 2.55), which would put the operator's clone back at the right commit
@@ -260,30 +310,68 @@ def _current_head(root: Path) -> str:
     )
     if symbolic.returncode == 0:
         return _text(symbolic)
-    return _text(_run_git(root, ["rev-parse", "HEAD"], context="emit_branch"))
+    detached = _run_git(root, ["rev-parse", "HEAD"], context="emit_branch", check=False)
+    return _text(detached) if detached.returncode == 0 else None
 
 
-def _restore(root: Path, *, original: str, branch: str) -> str | None:
+def _branch_ref_state(root: Path, branch: str, *, context: str) -> bool | None:
+    """Whether `refs/heads/<branch>` is there. None when git answered neither yes nor no, which
+    is not the same as "no" anywhere it gets reported to an operator."""
+    result = _run_git(
+        root,
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        context=context,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        return None
+    return result.returncode == 0
+
+
+def _restore(root: Path, *, original: str, branch: str, list_path: str) -> str | None:
     """Undo a failed emission, returning what could not be undone rather than raising.
 
-    `--force` is correct here and only here: `inspect_repo` refused a dirty tree on entry, so the
-    only changes this can discard are the ones the failed emission itself made. A plain checkout
-    would CARRY them onto the original branch — measured on git 2.55, a staged modification
-    survives the switch whenever the file matches on both sides — leaving the operator's clone
-    dirty and the next run refusing it for a mess this one made.
+    Surgical rather than forced, and the difference is somebody's unsaved work. This emission
+    owns exactly `list_path`, so exactly that path is discarded and the switch back is a PLAIN
+    checkout. A forced switch would delete a human's in-flight edit to any other file in the
+    clone, and nothing holds it — no stash, no reflog, no object ever written. A plain checkout
+    that refuses because their edit really does conflict with the target is the CORRECT outcome:
+    it is reported here rather than overridden.
+
+    The discard has to come first: measured on git 2.55, a staged edit survives a plain switch
+    whenever the file matches on both sides, so this emission's own edit would otherwise ride
+    back onto the operator's branch. It needs no `--force` — the pathspec form of `checkout`
+    overwrites index and working tree without one, which is the same footgun that makes
+    `git checkout <ref> -- <file>` lose an edit in everyday use.
+
+    Both checkouts are skipped when HEAD never moved. The emission writes nothing before its own
+    checkout, so there is nothing to undo, and a step that was never needed must not report a
+    failure the operator then goes looking for.
+
+    Deleting the branch orphans anything else that was committed onto it during the emission.
+    That is recoverable — the reflog holds it until gc — which is what separates it from an
+    unsaved edit, and is why the branch goes and the working tree stays.
     """
     problems: list[str] = []
-    try:
-        _run_git(root, ["checkout", "--force", "--quiet", original, "--"], context="_restore")
-    except UpstreamRepoError as exc:
-        logger.exception("_restore: could not check %s back out in %s", original, root)
-        problems.append(str(exc))
-    try:
-        _run_git(root, ["branch", "-D", branch], context="_restore")
-    except UpstreamRepoError as exc:
-        logger.exception("_restore: could not delete the half-made branch %s in %s", branch, root)
-        problems.append(str(exc))
-    return "; ".join(problems) if problems else None
+
+    def attempt(argv: list[str]) -> None:
+        try:
+            _run_git(root, argv, context="_restore")
+        except UpstreamRepoError as exc:
+            logger.exception("_restore: %s failed in %s", argv[0], root)
+            problems.append(str(exc))
+
+    if _head_position(root) != original:
+        attempt(["checkout", original, "--", list_path])
+        attempt(["checkout", "--quiet", original, "--"])
+    attempt(["branch", "-D", branch])
+    if not problems:
+        return None
+
+    head = _head_position(root) or "an unreadable HEAD"
+    remains = _branch_ref_state(root, branch, context="_restore")
+    verdict = {True: "still exists", False: "was deleted"}.get(remains, "could not be read")
+    return f"{'; '.join(problems)}. HEAD is on {head}, and {branch} {verdict}"
 
 
 def inspect_repo(path: Path, *, base_ref: str, list_path: str) -> RepoState:
@@ -294,9 +382,21 @@ def inspect_repo(path: Path, *, base_ref: str, list_path: str) -> RepoState:
     root = _work_tree_root(path, context="inspect_repo")
     posix_list_path, _ = _list_path_spec(root, list_path, context="inspect_repo")
 
-    # `--no-optional-locks` is what makes this actually read-only: a plain `git status` refreshes
-    # the index and takes `.git/index.lock` to do it, which is a write into a clone a human may be
-    # running their own git in at that moment.
+    # Before the dirty check, not after: a conflicted rebase is dirty too, and "you have
+    # uncommitted changes" would send the operator to fix the wrong thing.
+    interrupted = _interrupted_operation(root, context="inspect_repo")
+    if interrupted is not None:
+        raise UpstreamRepoError(
+            f"inspect_repo: the clone at {root} has a {interrupted} in progress. Its work tree "
+            "can be perfectly clean mid-rebase, and cutting a branch here would strand that "
+            "operation on the emission branch when it is continued. Finish or abort it "
+            "(`git rebase --abort`, `git merge --abort`, ...) first."
+        )
+
+    # `--no-optional-locks` is what makes this actually read-only. Measured on git 2.55 over 200
+    # files touched without changing their bytes: a plain `status --porcelain` refreshes the stale
+    # stat-cache and REWRITES `.git/index`, and with the flag it does not. That is a write into a
+    # clone a human may be running their own git in at that moment.
     status = _run_git(
         root, ["--no-optional-locks", "status", "--porcelain"], context="inspect_repo"
     )
@@ -366,18 +466,14 @@ def branch_exists(path: Path, branch: str) -> bool:
     """Whether the clone already carries this branch. Read-only, like `inspect_repo`."""
     root = _work_tree_root(path, context="branch_exists")
     _validate_branch_name(root, branch, context="branch_exists")
-    result = _run_git(
-        root,
-        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
-        check=False,
-        context="branch_exists",
-    )
-    if result.returncode not in (0, 1):
+    state = _branch_ref_state(root, branch, context="branch_exists")
+    if state is None:
         raise UpstreamRepoError(
-            f"branch_exists: could not read refs/heads/{branch} in {root} "
-            f"({_failure_tail(result)})."
+            f"branch_exists: could not read refs/heads/{branch} in {root}. An emission decides "
+            "whether to run on this answer, so an unreadable ref is refused rather than read as "
+            "absent."
         )
-    return result.returncode == 0
+    return state
 
 
 def emit_branch(
@@ -417,10 +513,31 @@ def emit_branch(
             "here, not an empty commit to make."
         )
 
-    original = _current_head(root)
+    original = _head_position(root)
+    if original is None:
+        raise UpstreamRepoError(
+            f"emit_branch: cannot read where HEAD is in {root}, so there is nothing to put the "
+            "clone back to if this fails. Refusing to move a checkout this cannot restore."
+        )
     _run_git(root, ["branch", branch, state.base_commit], context="emit_branch")
     try:
         _run_git(root, ["checkout", "--quiet", branch, "--"], context="emit_branch")
+        # The one thing `git checkout <name>` does not promise is that it checked out THAT name.
+        # `@` passes every name check and is git's own synonym for HEAD, so the checkout succeeds,
+        # moves nothing, and the whole emission lands on the operator's own branch with both
+        # read-backs passing (measured on git 2.55). Asserted here because it is the last moment
+        # nothing has been written yet, and because a name blocklist only ever knows the names
+        # somebody already found.
+        attached = _run_git(
+            root, ["symbolic-ref", "--quiet", "HEAD"], context="emit_branch", check=False
+        )
+        if _text(attached) != f"refs/heads/{branch}":
+            raise UpstreamRepoError(
+                f"emit_branch: checking out {branch!r} did not check out refs/heads/{branch} — "
+                f"HEAD is on {_text(attached) or 'a detached commit'}. git read that name as "
+                "something other than the branch just created, so the emission would have "
+                "committed onto whatever the operator was sitting on. Nothing was written."
+            )
         # Resolved after the checkout rather than before it, because the checkout is what decides
         # which bytes sit at that path: containment is asserted against the tree being written.
         destination = _list_path_spec(root, state.list_path, context="emit_branch")[1]
@@ -438,38 +555,70 @@ def emit_branch(
         if committed != new_bytes:
             raise UpstreamRepoError(
                 f"emit_branch: the commit on {branch} does not carry the bytes it was given "
-                f"({len(committed)} bytes committed against {len(new_bytes)} handed in). A hook "
-                f"in {root} rewrote {state.list_path}; upstream rejects a reformat of that file, "
-                "so the branch is discarded rather than pushed."
+                f"({len(committed)} bytes committed against {len(new_bytes)} handed in). "
+                f"Something in {root} — a commit hook, or another process writing to this clone "
+                f"— changed {state.list_path} between the write and the commit; upstream rejects "
+                "a reformat of that file, so the branch is discarded rather than pushed."
             )
         # The commit is read back rather than assumed, because a commit that SUCCEEDED is the
         # failure nothing else here can see: a hook in the operator's clone can edit the index
         # between `add` and `commit`, and the resulting PR is the artifact upstream reads.
-        touched = _text(
-            _run_git(
+        #
+        # `-z` because `--name-only` C-quotes any path outside plain ASCII under the default
+        # `core.quotePath` (measured: `resources/assets/uad_lïsts.json` comes back as
+        # `"resources/assets/uad_l\303\257sts.json"`), which would fail a correct commit after
+        # making it.
+        touched = [
+            path
+            for path in _run_git(
                 root,
-                ["diff-tree", "--no-commit-id", "--name-only", "-r", head],
+                ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", head],
                 context="emit_branch",
             )
-        ).splitlines()
+            .stdout.decode("utf-8", "replace")
+            .split("\0")
+            if path
+        ]
         if touched != [state.list_path]:
             raise UpstreamRepoError(
                 f"emit_branch: the commit on {branch} touches {touched} rather than only "
                 f"{state.list_path}. A branch this pipeline emits carries one file and nothing "
                 f"else; something in {root} added to the index. The branch is discarded."
             )
+        # Both checks above describe the COMMIT. What a human pushes is the BRANCH, and a human
+        # committing in this clone during the emission puts their commit underneath ours, where
+        # every check that reads only HEAD's own diff calls the emission perfect. The parent is
+        # what bounds the branch: exactly one commit, on exactly the commit it was cut from.
+        lineage = _text(
+            _run_git(root, ["rev-list", "--parents", "-n", "1", head], context="emit_branch")
+        ).split()
+        if lineage[1:] != [state.base_commit]:
+            raise UpstreamRepoError(
+                f"emit_branch: the commit on {branch} sits on {lineage[1:] or 'no parent'}, which "
+                f"is not the commit the branch was cut from ({state.base_commit}). Something else "
+                "committed into this clone during the emission and would be pushed as part of "
+                "this batch. The branch is discarded; `git reflog` in that clone still holds "
+                "whatever was committed onto it."
+            )
     except BaseException as exc:
-        restore_failure = _restore(root, original=original, branch=branch)
+        restore_failure = _restore(
+            root, original=original, branch=branch, list_path=state.list_path
+        )
         if restore_failure is None:
             raise
         if not isinstance(exc, Exception):
             # An interrupt is never converted into a domain error: the caller asked to stop.
-            logger.error("emit_branch: %s is left on %s: %s", root, branch, restore_failure)
+            logger.error("emit_branch: %s could not be put back: %s", root, restore_failure)
             raise
+        # `exc` already carries the operation name when it came from here; anything else gets one.
+        detail = (
+            str(exc)
+            if isinstance(exc, UpstreamRepoError)
+            else f"emit_branch: {type(exc).__name__}: {exc}"
+        )
         raise UpstreamRepoError(
-            f"emit_branch: {exc} — and the clone could not be put back: {restore_failure}. "
-            f"{root} is left on {branch}; check {original} out by hand and delete that branch "
-            "before running another emission."
+            f"{detail} — and the clone could not be put back: {restore_failure}. Put it right by "
+            f"hand ({original} is where it started) before running another emission."
         ) from exc
 
     logger.info(

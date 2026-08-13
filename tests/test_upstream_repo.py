@@ -257,6 +257,39 @@ def test_a_stray_git_dir_in_the_environment_cannot_retarget_the_clone(clone, tmp
     assert state.list_bytes == _bytes(BASE_LIST)
 
 
+def _index_identity(index_file: Path) -> tuple[int, int, int]:
+    stat = index_file.stat()
+    return (stat.st_mtime_ns, stat.st_ino, stat.st_size)
+
+
+def test_inspecting_a_clone_does_not_rewrite_its_index(tmp_path):
+    """The read-only claim, pinned on the thing an operator would actually notice: a plain
+    `git status` refreshes a stale stat-cache and REWRITES `.git/index` doing it.
+
+    The fixture has to be stale in mtime ONLY — same bytes, backdated stamp — and wide enough
+    that the refresh has something to do; one file proves nothing. Measured on git 2.55: plain
+    `status --porcelain` rewrites the index here, `--no-optional-locks status --porcelain` does
+    not. A read-only `.git` does NOT separate the two (both exit 0 and git degrades quietly), so
+    the write is the observable and the lock is not.
+    """
+    clone = make_clone(tmp_path / "wide")
+    bulk = clone / "many"
+    bulk.mkdir()
+    for number in range(200):
+        (bulk / f"f{number}.txt").write_text(f"{number}\n", encoding="utf-8")
+    git(clone, "add", "--", "many")
+    git(clone, "commit", "--quiet", "-m", "many files")
+    stale = 1_600_000_000
+    for path in sorted(bulk.iterdir()):
+        os.utime(path, (stale, stale))
+    index_file = clone / ".git" / "index"
+    before = _index_identity(index_file)
+
+    inspect_repo(clone, base_ref="base", list_path=LIST_PATH)
+
+    assert _index_identity(index_file) == before
+
+
 def test_inspecting_a_clone_never_moves_head_or_touches_the_tree(clone):
     """Safe against a clone a human is sitting in."""
     before = (git(clone, "rev-parse", "HEAD"), git(clone, "symbolic-ref", "HEAD"))
@@ -353,9 +386,13 @@ def test_it_leaves_the_clone_on_the_new_branch_with_a_clean_tree(clone):
 
 
 def test_the_base_branch_is_left_carrying_its_own_content(clone):
+    """Both halves, because the "nothing moved" half is true of an `emit_branch` that did
+    nothing at all: an emission that returns a constant as its first statement passes every
+    assertion below the positive two. That stub is also the exact shape of the `@` bug this test
+    is named for, which moved `base` precisely because nothing else was watching it."""
     base_commit = git(clone, "rev-parse", "base")
 
-    emit_branch(
+    head = emit_branch(
         clone,
         branch="uadclaw/untouched-base",
         base_ref="base",
@@ -364,6 +401,8 @@ def test_the_base_branch_is_left_carrying_its_own_content(clone):
         message="feat(lists): a batch",
     )
 
+    assert branch_exists(clone, "uadclaw/untouched-base") is True
+    assert head != base_commit
     assert git(clone, "rev-parse", "base") == base_commit
     assert git(clone, "show", f"base:{LIST_PATH}").encode("utf-8") == _bytes(BASE_LIST).strip()
 
@@ -389,6 +428,34 @@ def test_a_file_that_appears_mid_emission_is_not_swept_into_the_commit(clone):
     assert git(clone, "diff-tree", "--no-commit-id", "--name-only", "-r", head) == LIST_PATH
     assert (clone / "theirs.txt").read_text() == "theirs"
     assert git(clone, "status", "--porcelain") == "?? theirs.txt"
+
+
+def test_a_hook_writing_after_the_commit_leaves_the_branch_right_and_the_tree_dirty(clone):
+    """A `post-commit` formatter writes into the working tree after the commit is already made.
+    The COMMIT is what gets pushed and it is correct, so the emission reports success rather
+    than discarding a good branch over a worktree-only edit — and the next emission then refuses
+    the clone for dirt this one left, which is why the module docstring says so out loud instead
+    of promising a clean tree unconditionally.
+    """
+    install_hook(clone, f"printf 'REFORMATTED BY HOOK' > {LIST_PATH}", name="post-commit")
+
+    head = emit_branch(
+        clone,
+        branch="uadclaw/post-commit-hook",
+        base_ref="base",
+        list_path=LIST_PATH,
+        new_bytes=_bytes(NEW_LIST),
+        message="feat(lists): a batch",
+    )
+
+    assert (
+        git(clone, "cat-file", "blob", f"{head}:{LIST_PATH}").encode("utf-8")
+        == _bytes(NEW_LIST).strip()
+    )
+    assert (clone / LIST_PATH).read_bytes() == b"REFORMATTED BY HOOK"
+    # `git()` strips, which eats porcelain's leading worktree-column space; a STAGED change
+    # would leave two spaces here and still read differently.
+    assert git(clone, "status", "--porcelain") == f"M {LIST_PATH}"
 
 
 def test_the_identity_comes_from_the_clones_own_config(clone):
@@ -616,12 +683,185 @@ def test_a_hook_that_adds_a_second_file_is_caught_and_the_branch_discarded(clone
     assert (clone / LIST_PATH).read_bytes() == _bytes(BASE_LIST)
 
 
+def test_a_branch_name_git_resolves_elsewhere_never_commits_onto_the_operators_branch(clone):
+    """`@` passes `check-ref-format --branch` AND echoes itself, so the shorthand guard at 170
+    lets it through; `git branch @` then creates `refs/heads/@` while `git checkout @` resolves
+    `@` as the HEAD SYNONYM and moves nothing. Measured on git 2.55: the write, the add and the
+    commit all land on whatever branch the operator was sitting on, and both read-backs pass
+    because they only ever describe the commit that was made.
+
+    So the guard cannot be a bigger name blocklist — it has to be "HEAD is attached to the ref
+    this emission created", asserted before a single byte is written.
+    """
+    base_before = git(clone, "rev-parse", "base")
+
+    with pytest.raises(UpstreamRepoError, match="did not check out") as raised:
+        emit_branch(
+            clone,
+            branch="@",
+            base_ref="base",
+            list_path=LIST_PATH,
+            new_bytes=_bytes(NEW_LIST),
+            message="feat(lists): a batch",
+        )
+
+    assert "'@'" in str(raised.value)
+    assert git(clone, "rev-parse", "base") == base_before
+    assert git_code(clone, "show-ref", "--verify", "--quiet", "refs/heads/@") == 1
+    assert git(clone, "symbolic-ref", "--short", "HEAD") == "base"
+    assert git(clone, "status", "--porcelain") == ""
+    assert (clone / LIST_PATH).read_bytes() == _bytes(BASE_LIST)
+
+
+def test_a_commit_that_lands_on_the_branch_mid_emission_is_refused(clone):
+    """The two read-backs bound the COMMIT; the artifact a human pushes is the BRANCH. A human
+    committing in the clone during the window puts their commit under ours, and every check that
+    reads only `HEAD`'s own diff against its parent says the emission was perfect.
+
+    The pin is the parent: exactly one commit on top of `base_commit`, so a second one cannot
+    ride along.
+
+    The hook deletes itself as its first act. `post-checkout` fires again during the restore's
+    own checkout, and a second firing would commit onto `base` — which would be the probe moving
+    the thing the assertion is watching, not the module.
+    """
+    install_hook(
+        clone,
+        'rm -f -- "$0"\n'
+        "printf 'notes\\n' > README.md\n"
+        "git add -- README.md\n"
+        "git commit --quiet -m 'human wip'",
+        name="post-checkout",
+    )
+    base_before = git(clone, "rev-parse", "base")
+
+    with pytest.raises(UpstreamRepoError, match="is not the commit the branch was cut from"):
+        emit_branch(
+            clone,
+            branch="uadclaw/ridden",
+            base_ref="base",
+            list_path=LIST_PATH,
+            new_bytes=_bytes(NEW_LIST),
+            message="feat(lists): a batch",
+        )
+
+    assert branch_exists(clone, "uadclaw/ridden") is False
+    assert git(clone, "rev-parse", "base") == base_before
+
+
+def test_a_humans_in_flight_edit_to_another_file_survives_a_failed_emission(clone):
+    """`--force` on the way back would delete work no git object holds: no stash, no reflog, no
+    recovery. The emission owns exactly `list_path`, so the restore discards exactly that path
+    and then switches back with a PLAIN checkout.
+
+    `pre-commit` rather than `post-checkout` for the writer: `post-checkout` fires a second time
+    during the restore's own checkout and re-creates the file, which reads as a pass while
+    proving nothing.
+    """
+    (clone / "README.md").write_text("ORIGINAL COMMITTED\n", encoding="utf-8")
+    git(clone, "add", "--", "README.md")
+    git(clone, "commit", "--quiet", "-m", "readme")
+    before = git(clone, "rev-parse", "HEAD")
+    install_hook(clone, "printf 'HUMAN UNSAVED WORK\\n' > README.md\nexit 1")
+
+    with pytest.raises(UpstreamRepoError):
+        emit_branch(
+            clone,
+            branch="uadclaw/keeps-their-work",
+            base_ref="base",
+            list_path=LIST_PATH,
+            new_bytes=_bytes(NEW_LIST),
+            message="feat(lists): a batch",
+        )
+
+    assert (clone / "README.md").read_text() == "HUMAN UNSAVED WORK\n"
+    assert (clone / LIST_PATH).read_bytes() == _bytes(BASE_LIST)
+    assert git(clone, "symbolic-ref", "--short", "HEAD") == "base"
+    assert git(clone, "rev-parse", "HEAD") == before
+    assert branch_exists(clone, "uadclaw/keeps-their-work") is False
+
+
+def test_a_clone_stopped_mid_rebase_is_refused_even_though_its_tree_is_clean(clone):
+    """`status --porcelain` is empty at a rebase stop, so the dirty check waves it through and
+    the emission's checkout strands the operator's rebase on the emission branch."""
+    git(clone, "checkout", "--quiet", "-b", "topic")
+    (clone / "topic.txt").write_text("t", encoding="utf-8")
+    git(clone, "add", "--", "topic.txt")
+    git(clone, "commit", "--quiet", "-m", "topic work")
+    assert git_code(clone, "rebase", "--exec", "false", "base") != 0
+    assert git(clone, "status", "--porcelain") == ""
+
+    with pytest.raises(UpstreamRepoError, match="has a rebase-merge in progress") as raised:
+        inspect_repo(clone, base_ref="base", list_path=LIST_PATH)
+    assert "rebase" in str(raised.value)
+
+
+def test_a_restore_that_only_partly_finished_reports_the_state_it_measured(clone):
+    """A stale `.git/index.lock` — what a SIGKILLed git or the live human leaves — fails every
+    checkout with 128 while `git branch` and `git branch -D` both succeed without one. The old
+    wording named the clone as "left on <branch>" and told the operator to check `base` out by
+    hand; both were already true. Nothing may be claimed here that was not read back."""
+    lock = clone / ".git" / "index.lock"
+    lock.write_text("", encoding="utf-8")
+    try:
+        with pytest.raises(UpstreamRepoError) as raised:
+            emit_branch(
+                clone,
+                branch="uadclaw/locked",
+                base_ref="base",
+                list_path=LIST_PATH,
+                new_bytes=_bytes(NEW_LIST),
+                message="feat(lists): a batch",
+            )
+    finally:
+        lock.unlink(missing_ok=True)
+
+    message = str(raised.value)
+    assert git(clone, "symbolic-ref", "--short", "HEAD") == "base"
+    assert branch_exists(clone, "uadclaw/locked") is False
+    # The positive leg, and the one that discriminates: the restore had nothing to undo because
+    # HEAD never moved, so it reports NO problem and the original failure is raised as itself.
+    # Without the skip, both checkouts run, both fail on the lock, and the operator is handed a
+    # restore failure for work that was never done.
+    assert "could not be put back" not in message
+    assert "checkout" in message and "exited 128" in message
+
+
+def test_a_non_ascii_list_path_is_not_read_as_a_rewritten_commit(clone, tmp_path):
+    """`diff-tree --name-only` C-quotes a non-ASCII path under the default `core.quotePath`, so
+    a correct commit compares unequal to `[list_path]` and is rolled back — after the commit,
+    which is the expensive place to be wrong."""
+    accented = "resources/assets/uad_lïsts.json"
+    git(clone, "mv", LIST_PATH, accented)
+    git(clone, "commit", "--quiet", "-m", "rename the list")
+
+    head = emit_branch(
+        clone,
+        branch="uadclaw/accented",
+        base_ref="base",
+        list_path=accented,
+        new_bytes=_bytes(NEW_LIST),
+        message="feat(lists): a batch",
+    )
+
+    assert (
+        git(clone, "cat-file", "blob", f"{head}:{accented}").encode("utf-8")
+        == _bytes(NEW_LIST).strip()
+    )
+
+
 def test_a_restore_that_cannot_finish_names_the_branch_the_clone_is_left_on(clone, monkeypatch):
     """The operator's fix differs from the one the original failure asks for, so it cannot live
     in a log line the dashboard never shows."""
     import uadclaw.upstreamrepo as module
 
-    monkeypatch.setattr(module, "_restore", lambda root, *, original, branch: "checkout refused")
+    monkeypatch.setattr(
+        module,
+        "_restore",
+        lambda root, *, original, branch, list_path: (
+            f"could not check {original} back out. HEAD is on {branch}, and {branch} still exists"
+        ),
+    )
     install_hook(clone, "exit 1")
 
     with pytest.raises(UpstreamRepoError, match="could not be put back") as raised:
@@ -634,5 +874,8 @@ def test_a_restore_that_cannot_finish_names_the_branch_the_clone_is_left_on(clon
             message="feat(lists): a batch",
         )
 
-    assert "uadclaw/stuck" in str(raised.value)
-    assert "base" in str(raised.value)
+    message = str(raised.value)
+    assert "uadclaw/stuck" in message
+    assert "base" in message
+    # The wrapper carries the original failure's own text, which already names the operation.
+    assert message.count("emit_branch:") == 1
