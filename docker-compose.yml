@@ -100,6 +100,16 @@ services:
       POSTGRES_PORT: "5432"
       POSTGRES_USER: uadclaw
       POSTGRES_DB: uadclaw
+      # Where the operator's clone is mounted below. Only the worker sets it: the web service
+      # has no route that emits and a read-only rootfs besides.
+      UPSTREAM_REPO_PATH: /upstream
+      # Which commit of this pipeline produced an emission, for the disclosure upstream's
+      # CONTRIBUTING requires. The image carries no `.git` — the build copies the source tree,
+      # not the repository — so it cannot be derived at runtime, and branch emission REFUSES
+      # while it is unset rather than opening a PR whose provenance names nothing. Set it from
+      # the deploying checkout:
+      #   PIPELINE_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d
+      PIPELINE_COMMIT_SHA: "${PIPELINE_COMMIT_SHA:-}"
     secrets:
       # `postgres_password` is not optional here and was missing until 2026-08-11: with no
       # secrets mounted, /run/secrets is empty, POSTGRES_PASSWORD is unset, and `Settings()`
@@ -159,3 +169,27 @@ services:
       #     Universal-Debloater-Alliance/universal-android-debloater-next-generation/main/\
       #     resources/assets/uad_lists.json
       - ./data:/data:ro
+      # The operator's own clone of the upstream repo (a fork is fine — it is identified by the
+      # list file it carries, never by its remote), READ-WRITE and mounted into the worker
+      # ALONE: branch emission commits a branch there, and the web service neither emits nor
+      # could write anything with its read-only rootfs.
+      #
+      # Nothing in this stack pushes, fetches or authenticates. The deliverable is a local
+      # branch plus the PR body on the emission row; a human pushes it by hand.
+      #
+      # UPSTREAM_REPO_DIR repoints it without editing this file, and the default sits OUTSIDE
+      # this checkout on purpose: a clone under `./` would show up in this repo's own
+      # `git status` as thousands of untracked files, and `deploy.sh` rsyncs git-tracked files
+      # only.
+      #
+      # Same bind-mount ownership trap as /scratch above, and it bites HARDER here: git refuses
+      # a repository whose owner differs from the running uid at all, so a clone owned by your
+      # login is not merely unwritable inside the container, it is unreadable. Measured
+      # 2026-08-13 against a real clone owned by uid 1000: `git -C /upstream rev-parse` as
+      # 65532 exits 128 with `fatal: detected dubious ownership in repository at '/upstream'`,
+      # and a write to it is `Permission denied`. One chown fixes both, and it is the fix
+      # rather than `safe.directory` because the emission has to write:
+      #   sudo git clone https://github.com/<you>/\
+      #     universal-android-debloater-next-generation /mnt/ssd-1/upstream
+      #   sudo chown -R 65532:65532 /mnt/ssd-1/upstream
+      - ${UPSTREAM_REPO_DIR:-/mnt/ssd-1/upstream}:/upstream
