@@ -700,8 +700,9 @@ def test_a_valid_drawable_over_the_cap_is_refused_at_the_cap():
 def test_an_oversized_drawable_is_refused_before_any_decode_at_the_element_seam(monkeypatch):
     """The decode-order half at the element() seam, mirroring the top-level pin above:
     the input cap exists because the decode, render and encode all happen before the 64
-    KB output cap is consulted, and a gate that checks the size AFTER decoding still
-    refuses (the return value looks identical) while allocating the unbounded document.
+    KB output cap is consulted downstream, and a gate that checks the size AFTER
+    decoding still refuses (the return value looks identical) while allocating the
+    unbounded document.
     Asserting the decoder was never reached is the discriminating half — reordering the
     gate keeps every other assertion green and this one red. The fixture is the real
     oversized vector, so a reordered gate would not merely call the decoder but succeed
