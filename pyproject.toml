@@ -47,6 +47,7 @@ dev = [
   "pytest-timeout",
   "httpx",
   "ruff",
+  "playwright>=1.62.0",
 ]
 
 [build-system]
