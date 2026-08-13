@@ -782,6 +782,42 @@ async def test_the_search_client_never_exceeds_its_concurrency_bound():
     _assert_the_bound_was_exactly_reached(state, bound, requests)
 
 
+# --- the from_settings wiring feeds the bound -----------------------------------------------------
+
+
+async def test_brave_from_settings_wires_brave_max_concurrency_into_the_semaphore(monkeypatch):
+    """The two concurrency tests above construct `BraveClient` DIRECTLY with the bound, so they
+    observe the semaphore and never the `from_settings` wiring that feeds it — a mutation
+    replacing `settings.brave_max_concurrency` with a literal survived the whole suite (M6,
+    measured 2026-08-13)."""
+    monkeypatch.setenv("POSTGRES_PASSWORD", "x")
+    monkeypatch.setenv("AUTH_PASSWORD", "y")
+    monkeypatch.setenv("SESSION_SECRET", "z")
+    monkeypatch.setenv("BRAVE_KEY", "BSA-test-not-a-real-token-0000")
+    monkeypatch.setenv("BRAVE_MAX_CONCURRENCY", "7")
+    api = BraveClient.from_settings(Settings())
+    try:
+        assert api._semaphore._value == 7
+    finally:
+        await api.aclose()
+
+
+async def test_page_fetcher_from_settings_wires_page_fetch_max_concurrency_into_the_semaphore(
+    monkeypatch,
+):
+    """The same pin for the fetcher: `from_settings` is the only thing that feeds
+    `page_fetch_max_concurrency` into the semaphore the concurrency tests observe."""
+    monkeypatch.setenv("POSTGRES_PASSWORD", "x")
+    monkeypatch.setenv("AUTH_PASSWORD", "y")
+    monkeypatch.setenv("SESSION_SECRET", "z")
+    monkeypatch.setenv("PAGE_FETCH_MAX_CONCURRENCY", "7")
+    pages = PageFetcher.from_settings(Settings())
+    try:
+        assert pages._semaphore._value == 7
+    finally:
+        await pages.aclose()
+
+
 # --- the fetch boundary: nothing may escape into the caller -------------------------------------
 
 

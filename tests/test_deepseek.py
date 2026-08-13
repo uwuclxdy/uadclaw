@@ -401,3 +401,21 @@ def test_the_client_refuses_to_be_built_with_an_empty_key():
             request_timeout_seconds=1.0,
             thinking=True,
         )
+
+
+async def test_deepseek_from_settings_wires_deepseek_max_concurrency_into_the_semaphore(
+    monkeypatch,
+):
+    """The concurrency tests construct `DeepSeekClient` directly with the bound, so they observe
+    the semaphore and never the `from_settings` wiring that feeds it — a mutation replacing
+    `settings.deepseek_max_concurrency` with a literal would survive the whole suite."""
+    monkeypatch.setenv("POSTGRES_PASSWORD", "x")
+    monkeypatch.setenv("AUTH_PASSWORD", "y")
+    monkeypatch.setenv("SESSION_SECRET", "z")
+    monkeypatch.setenv("DEEPSEEK_KEY", "sk-test-not-a-real-key-0000")
+    monkeypatch.setenv("DEEPSEEK_MAX_CONCURRENCY", "7")
+    api = DeepSeekClient.from_settings(Settings())
+    try:
+        assert api._semaphore._value == 7
+    finally:
+        await api.aclose()
