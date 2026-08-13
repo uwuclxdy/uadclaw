@@ -1411,6 +1411,16 @@ async def _forget_if_rolled_back(
         )
 
 
+# One upstream clone, one work tree, and `worker_pool_size` is a documented tuning knob that
+# can exceed 1. Two `branch_emission` jobs driven at once both checkout-and-commit into that
+# one clone and fail each other's read-backs, each blaming "a commit hook, or another process"
+# without naming the other job — the cause an operator cannot guess. `JOB_KIND_NEEDS_SCRATCH`
+# does not serialize them (BRANCH_EMISSION is False by design: emission writes the clone, not
+# scratch), so this lock is the seam. The worker runs every job in one asyncio loop, so
+# `async with` awaits rather than blocks the loop, exactly as the `asyncio.to_thread` calls do.
+_emission_clone_lock = asyncio.Lock()
+
+
 async def branch_stage(ctx: StageContext) -> None:
     """Commit one vendor's approved entries onto a branch in the operator's own clone.
 
@@ -1495,9 +1505,10 @@ async def branch_stage(ctx: StageContext) -> None:
         )
         return
     if recorded is not None:
-        if await asyncio.to_thread(branch_exists, repo, recorded.branch):
-            await _reconcile_emission(ctx, repo=repo, recorded=recorded)
-            return
+        async with _emission_clone_lock:
+            if await asyncio.to_thread(branch_exists, repo, recorded.branch):
+                await _reconcile_emission(ctx, repo=repo, recorded=recorded)
+                return
         raise StageInputError(
             f"job {ctx.job_id} branch: this job recorded an emission of {recorded.branch} into "
             f"{recorded.repo_path} whose outcome was never written, and that branch is not "
@@ -1523,9 +1534,10 @@ async def branch_stage(ctx: StageContext) -> None:
     branch = branch_name(
         prefix=settings.emission_branch_prefix, vendor=vendor, job_id=str(ctx.job_id)
     )
-    state: RepoState = await asyncio.to_thread(
-        inspect_repo, repo, base_ref=settings.upstream_base_ref, list_path=list_path
-    )
+    async with _emission_clone_lock:
+        state: RepoState = await asyncio.to_thread(
+            inspect_repo, repo, base_ref=settings.upstream_base_ref, list_path=list_path
+        )
     # Nothing retires an approved package once it has shipped — the classification row and the
     # human's `approve` both survive emission — so a vendor's SECOND batch still carries its
     # first, and `insert_entries` refuses a batch carrying an already-carried key WHOLE. That
@@ -1587,25 +1599,26 @@ async def branch_stage(ctx: StageContext) -> None:
             at=datetime.now(UTC),
         )
 
-    try:
-        commit_oid = await asyncio.to_thread(
-            emit_branch,
-            repo,
-            branch=branch,
-            # The resolved object id, never the ref: see the docstring. A fetch landing between
-            # the inspection above and this call would otherwise move what the branch is cut
-            # from.
-            base_ref=state.base_commit,
-            list_path=state.list_path,
-            new_bytes=new_bytes,
-            message=message,
-        )
-    except BaseException:
-        # An ordinary failed attempt has to stay retryable, and it is the ROLLBACK — read back,
-        # never assumed — that separates it from the crash window this stage refuses. Discard
-        # the intent only once the branch is confirmed gone; anything else keeps it.
-        await _forget_if_rolled_back(ctx, repo=repo, emission_id=emission_id, branch=branch)
-        raise
+    async with _emission_clone_lock:
+        try:
+            commit_oid = await asyncio.to_thread(
+                emit_branch,
+                repo,
+                branch=branch,
+                # The resolved object id, never the ref: see the docstring. A fetch landing between
+                # the inspection above and this call would otherwise move what the branch is cut
+                # from.
+                base_ref=state.base_commit,
+                list_path=state.list_path,
+                new_bytes=new_bytes,
+                message=message,
+            )
+        except BaseException:
+            # An ordinary failed attempt has to stay retryable, and it is the ROLLBACK — read back,
+            # never assumed — that separates it from the crash window this stage refuses. Discard
+            # the intent only once the branch is confirmed gone; anything else keeps it.
+            await _forget_if_rolled_back(ctx, repo=repo, emission_id=emission_id, branch=branch)
+            raise
     async with ctx.session_factory() as session, session.begin():
         await record_commit(
             session,

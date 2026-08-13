@@ -14,6 +14,7 @@ here, and the property under all of them is the same — a re-run neither cuts a
 nor wedges the job, and the row says plainly which of the two ways it reached its commit.
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -400,6 +401,34 @@ async def test_the_emission_is_pinned_to_one_commit_not_to_a_moving_ref(
     branch = branch_name(prefix="uadclaw", vendor="pixel", job_id=str(job_id))
     assert git(clone, "rev-parse", f"{branch}^") == base
     assert git(clone, "rev-parse", "main") != base
+
+
+# --- concurrent emissions -----------------------------------------------------------------------
+
+
+async def test_two_concurrent_emissions_for_different_vendors_both_succeed(
+    db_env, emission_db, emission_env
+):
+    """Both jobs write into the ONE clone, so without a lock they interleave their
+    checkout-and-commit and each fails the other's read-back with a message blaming "a commit
+    hook, or another process". Serialized, the second waits and both branches land.
+    """
+    clone = emission_env
+    await approve(emission_db, "com.example.pixel")
+    await approve(emission_db, "com.example.samsung", device_key="samsung:SM-S911U")
+    pixel_job = await make_job(emission_db, vendor="pixel")
+    samsung_job = await make_job(emission_db, vendor="samsung")
+
+    await asyncio.gather(
+        branch_stage(context(pixel_job, emission_db)),
+        branch_stage(context(samsung_job, emission_db)),
+    )
+
+    pixel_branch = branch_name(prefix="uadclaw", vendor="pixel", job_id=str(pixel_job))
+    samsung_branch = branch_name(prefix="uadclaw", vendor="samsung", job_id=str(samsung_job))
+    assert branches(clone) == sorted(
+        ["refs/heads/main", f"refs/heads/{pixel_branch}", f"refs/heads/{samsung_branch}"]
+    )
 
 
 # --- what the stage refuses ----------------------------------------------------------------------
