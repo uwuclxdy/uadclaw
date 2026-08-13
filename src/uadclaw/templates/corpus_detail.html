@@ -63,6 +63,38 @@
       </table>
     </div>
 
+    {% if standing and (standing.decision or standing.shipped_branch) %}
+      {# The package's triage standing, which this screen shows for the first time: neither
+         the current decision nor the shipped state was reachable here, and this is the
+         screen that claims to show a package's full standing. The shipped branch is derived
+         from `branch_emission_package` and is untrusted text only in the sense every other
+         value on this page is — it is autoescaped by default like everything else. #}
+      <div class="card" style="margin-bottom:var(--space-5)">
+        <div class="card-title" style="margin-bottom:var(--space-3)">triage standing</div>
+        {% if standing.shipped_branch and standing.decision and standing.decision.action == "approve" %}
+          <div>
+            <span class="tag tag-success">shipped → {{ standing.shipped_branch }}</span>
+            <span style="color:var(--text-dim);font-size:var(--text-sm)">this approval went out on that branch.</span>
+          </div>
+        {% elif standing.decision and standing.decision.action == "approve" %}
+          <div>
+            <span class="tag tag-success">approved</span>
+            <span style="color:var(--text-dim);font-size:var(--text-sm)">approved, awaiting the next emission.</span>
+          </div>
+        {% elif standing.decision and standing.decision.action == "reject" %}
+          <div>
+            <span class="tag tag-danger">rejected</span>
+            <span style="color:var(--text-dim);font-size:var(--text-sm)">{{ standing.decision.reason }}</span>
+          </div>
+        {% elif standing.decision and standing.decision.action == "defer" %}
+          <div>
+            <span class="tag tag-default">skipped</span>
+            <span style="color:var(--text-dim);font-size:var(--text-sm)">deferred, not decided.</span>
+          </div>
+        {% endif %}
+      </div>
+    {% endif %}
+
     {% if fact.has_conflict %}
     <div class="card" style="margin-bottom:var(--space-5)">
       <div class="card-title" style="margin-bottom:var(--space-2)">conflicts</div>

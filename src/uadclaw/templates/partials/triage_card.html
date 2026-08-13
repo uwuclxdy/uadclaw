@@ -69,6 +69,19 @@
     </div>
   {% endif %}
 
+  {% if c.shipped_branch %}
+    {# The one state the card must not look like: a shipped approval is not awaiting the next
+       batch, and the buttons below say it is. The banner sits above the actions for that
+       reason, so the reviewer sees it before the approve keybind invites them to re-approve
+       something that already went out. #}
+    <div class="callout callout-success" style="margin-bottom:var(--space-4)">
+      <div class="callout-body">
+        <span class="callout-title">shipped</span>
+        this approval went out on <code>{{ c.shipped_branch }}</code>. it is not awaiting the next emission.
+      </div>
+    </div>
+  {% endif %}
+
   {# --- the actions, first: this is the work, and everything below is the evidence for it --- #}
   <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center;margin-bottom:var(--space-3)">
     {% for action, key, label, variant in action_buttons %}

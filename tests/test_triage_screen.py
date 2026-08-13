@@ -23,6 +23,8 @@ from uadclaw.facts import ApkFacts
 from uadclaw.factstore import store_device_facts
 from uadclaw.ladder import Removal
 from uadclaw.models import (
+    BranchEmission,
+    BranchEmissionPackage,
     PackageAnalysis,
     PackageClassification,
     PackageCorroboration,
@@ -160,6 +162,44 @@ async def act(client, **form) -> str:
     )
     assert resp.status_code == 200, resp.text[:400]
     return resp.text
+
+
+async def _seed_emission(
+    session_factory, packages: list[str], *, branch: str = "uadclaw/pixel-000000000001"
+) -> None:
+    """A completed emission (the git commit landed) carrying `packages`, the state the board
+    has to read as shipped. Seeded straight into the run tables the way `test_dashboard_emission`
+    does, because the git half is out of scope here."""
+    async with session_factory() as session, session.begin():
+        row = BranchEmission(
+            vendor="pixel",
+            branch=branch,
+            repo_path="/srv/uadclaw/upstream",
+            list_path="resources/assets/uad_lists.json",
+            base_commit="a" * 40,
+            list_sha256="b" * 64,
+            pipeline_version="0.1.0",
+            pipeline_commit_sha="c" * 40,
+            package_count=len(packages),
+            pr_body="## pixel: 1 package addition(s)\n",
+            created_at=NOW,
+            commit_oid="e" * 40,
+            committed_at=NOW,
+            reconciled=False,
+        )
+        session.add(row)
+        await session.flush()
+        for package in packages:
+            session.add(
+                BranchEmissionPackage(
+                    emission_id=row.id,
+                    package=package,
+                    bundle_sha256=BUNDLE,
+                    uad_list="Misc",
+                    removal="Advanced",
+                    floor="Advanced",
+                )
+            )
 
 
 # --- the queue ------------------------------------------------------------------------------
@@ -492,6 +532,51 @@ async def test_a_rejected_candidate_persists_with_its_reason_and_does_not_reappe
     decided = await screen(client, "?view=decided")
     assert "com.example.two" in decided
     assert "description names a vendor the evidence never did" in decided
+
+
+async def test_a_shipped_package_leaves_decided_and_renders_in_shipped_with_its_branch(
+    db_env, triage_env, triage_db, client
+):
+    """§19's verify line, through the screen: an approval that went out on a branch must not
+    sit in `decided` indistinguishable from one still waiting — it leaves that list and
+    renders in its own view carrying the branch it went out on."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+    await act(client, package="com.example.one", action="approve", view="queue")
+    # Two shipments, the older first: the board must show the NEWEST branch, not the first.
+    await _seed_emission(triage_db, ["com.example.one"], branch="uadclaw/pixel-000000000001")
+    await _seed_emission(triage_db, ["com.example.one"], branch="uadclaw/pixel-000000000007")
+
+    decided = await screen(client, "?view=decided")
+    assert "com.example.one" not in decided
+
+    shipped = await screen(client, "?view=shipped")
+    assert "com.example.one" in shipped
+    assert "uadclaw/pixel-000000000007" in shipped
+    assert "uadclaw/pixel-000000000001" not in shipped
+
+
+async def test_an_approval_with_no_emission_row_stays_decided_and_is_still_offered(
+    db_env, triage_env, triage_db, client
+):
+    """§19's second half: an approval made after a batch has no emission row yet, so it must
+    stay in `decided` (offerable) and still reach the next emission. The emission half is
+    asserted through `load_approved` — the seam that builds the batch — not by re-deriving
+    the shipped predicate in the test."""
+    await login(client)
+    await seed(triage_db, {"com.example.one": 1})
+    await act(client, package="com.example.one", action="approve", view="queue")
+
+    decided = await screen(client, "?view=decided")
+    assert "com.example.one" in decided
+    shipped = await screen(client, "?view=shipped")
+    assert "com.example.one" not in shipped
+
+    from uadclaw.emissionstore import load_approved
+
+    async with triage_db() as session:
+        approved = await load_approved(session, vendor="pixel")
+    assert [item.package for item in approved] == ["com.example.one"]
 
 
 async def test_deferring_leaves_the_queue_and_stays_behind_the_filter(
@@ -1370,7 +1455,13 @@ async def test_the_tab_strip_reads_in_the_round_s_words_and_not_the_database_s(
     body = await screen(client)
 
     tabs = [text.strip() for text in re.findall(r'class="tab-box[^"]*"[^>]*>([^<]*)<', body)]
-    assert [tab.rsplit(" ", 1)[0] for tab in tabs] == ["queue", "skipped", "decided", "no answer"]
+    assert [tab.rsplit(" ", 1)[0] for tab in tabs] == [
+        "queue",
+        "skipped",
+        "decided",
+        "shipped",
+        "no answer",
+    ]
     assert 'href="/triage?view=deferred"' in body
     assert 'href="/triage?view=parked"' in body
 

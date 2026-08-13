@@ -92,6 +92,7 @@ VIEW_LABELS: dict[str, str] = {
     "queue": "queue",
     "deferred": "skipped",
     "decided": "decided",
+    "shipped": "shipped",
     "parked": "no answer",
 }
 
@@ -125,6 +126,7 @@ def corroboration_label(status: str | None, sources: int) -> str:
 BADGE_MEANINGS: tuple[tuple[str, str], ...] = (
     ("removal", "the rating this entry would ship with, never below the minimum rating."),
     ("no answer", "deepseek could not answer. read the reason, then edit or reject."),
+    ("shipped", "this approval already went out on a branch. no longer awaiting emission."),
     ("conflict", "devices disagree on a fact. shown, never filtered on."),
     ("n sources", "how many sources back the description. 13.6% of packages have any."),
 )

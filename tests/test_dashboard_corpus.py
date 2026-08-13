@@ -11,7 +11,14 @@ import re
 import pytest
 
 from conftest import utcnow
-from uadclaw.models import PackageAnalysis, PackageFact
+from uadclaw.models import (
+    BranchEmission,
+    BranchEmissionPackage,
+    PackageAnalysis,
+    PackageClassification,
+    PackageFact,
+    PackageTriageDecision,
+)
 from uadclaw.views import corpus as corpus_view
 
 PASSWORD = "test-only-admin-password"
@@ -98,6 +105,72 @@ def _analysis(
 async def _seed(session_factory, *rows) -> None:
     async with session_factory() as session, session.begin():
         session.add_all(rows)
+
+
+def _classification(package: str) -> PackageClassification:
+    now = utcnow()
+    return PackageClassification(
+        package=package,
+        created_at=now,
+        updated_at=now,
+        bundle_sha256="b" * 64,
+        model="deepseek-v4-flash",
+        thinking=True,
+        description=f"Vendor application {package}. Removing it loses its local data.",
+        uad_list="Misc",
+        removal="Advanced",
+        confidence="medium",
+        unknown_fields=[],
+        reasoning_brief="No privileged surface.",
+        provenance={"description": "llm:deepseek-v4-flash"},
+        usage={},
+        attempts=1,
+        parked=False,
+    )
+
+
+def _approve(package: str) -> PackageTriageDecision:
+    return PackageTriageDecision(
+        package=package,
+        bundle_sha256="b" * 64,
+        action="approve",
+        reason=None,
+        edited_fields={},
+        decided_at=utcnow(),
+    )
+
+
+async def _seed_emission(session_factory, package: str, *, branch: str) -> None:
+    now = utcnow()
+    async with session_factory() as session, session.begin():
+        row = BranchEmission(
+            vendor="pixel",
+            branch=branch,
+            repo_path="/srv/uadclaw/upstream",
+            list_path="resources/assets/uad_lists.json",
+            base_commit="a" * 40,
+            list_sha256="b" * 64,
+            pipeline_version="0.1.0",
+            pipeline_commit_sha="c" * 40,
+            package_count=1,
+            pr_body="## pixel: 1 package addition(s)\n",
+            created_at=now,
+            commit_oid="e" * 40,
+            committed_at=now,
+            reconciled=False,
+        )
+        session.add(row)
+        await session.flush()
+        session.add(
+            BranchEmissionPackage(
+                emission_id=row.id,
+                package=package,
+                bundle_sha256="b" * 64,
+                uad_list="Misc",
+                removal="Advanced",
+                floor="Advanced",
+            )
+        )
 
 
 # --- auth ---------------------------------------------------------------------------------
@@ -580,6 +653,97 @@ async def test_detail_for_a_missing_package_reads_as_not_found_not_as_an_error(
     assert resp.status_code == 200
     assert "no package named" in resp.text
     assert "could not load" not in resp.text
+
+
+# --- triage standing: the decision and the shipped state ------------------------------------
+
+
+async def test_detail_renders_a_shipped_package_with_the_branch_it_went_out_on(
+    db_env, db_session_factory, client
+):
+    """§19's corpus half: this screen shows a package's full standing, and a package whose
+    approval went out on a branch has to say so, with the branch."""
+    await _seed(
+        db_session_factory,
+        _fact("com.example.shipped"),
+        _analysis("com.example.shipped", floor="Advanced", floor_rule="default"),
+        _classification("com.example.shipped"),
+        _approve("com.example.shipped"),
+    )
+    # Two shipments, the older first: the detail must show the NEWEST branch, not the first.
+    await _seed_emission(
+        db_session_factory, "com.example.shipped", branch="uadclaw/pixel-000000000001"
+    )
+    await _seed_emission(
+        db_session_factory, "com.example.shipped", branch="uadclaw/pixel-000000000002"
+    )
+    await _login(client)
+
+    resp = await client.get("/corpus/com.example.shipped", headers={"accept": "text/html"})
+
+    assert resp.status_code == 200
+    assert "triage standing" in resp.text
+    assert "shipped → uadclaw/pixel-000000000002" in resp.text
+    assert "shipped → uadclaw/pixel-000000000001" not in resp.text
+
+
+async def test_detail_renders_an_approval_still_awaiting_emission(
+    db_env, db_session_factory, client
+):
+    """An approval with no emission row is not shipped, and the corpus screen must not call
+    it one: it shows the decision and that it is still awaiting the next batch."""
+    await _seed(
+        db_session_factory,
+        _fact("com.example.waiting"),
+        _analysis("com.example.waiting", floor="Advanced", floor_rule="default"),
+        _classification("com.example.waiting"),
+        _approve("com.example.waiting"),
+    )
+    await _login(client)
+
+    resp = await client.get("/corpus/com.example.waiting", headers={"accept": "text/html"})
+
+    assert resp.status_code == 200
+    assert "triage standing" in resp.text
+    assert "approved" in resp.text
+    assert "awaiting the next emission" in resp.text
+    assert "shipped →" not in resp.text
+
+
+async def test_detail_renders_a_rejection_even_when_the_package_once_shipped(
+    db_env, db_session_factory, client
+):
+    """A package that shipped, then was reopened and rejected, is a rejection: the current
+    decision wins on this screen too, and the old emission must not read as 'shipped'."""
+    await _seed(
+        db_session_factory,
+        _fact("com.example.rejected"),
+        _analysis("com.example.rejected", floor="Advanced", floor_rule="default"),
+        _classification("com.example.rejected"),
+        _approve("com.example.rejected"),
+    )
+    await _seed_emission(
+        db_session_factory, "com.example.rejected", branch="uadclaw/pixel-000000000001"
+    )
+    await _seed(
+        db_session_factory,
+        PackageTriageDecision(
+            package="com.example.rejected",
+            bundle_sha256="b" * 64,
+            action="reject",
+            reason="changed my mind",
+            edited_fields={},
+            decided_at=utcnow(),
+        ),
+    )
+    await _login(client)
+
+    resp = await client.get("/corpus/com.example.rejected", headers={"accept": "text/html"})
+
+    assert resp.status_code == 200
+    assert "triage standing" in resp.text
+    assert "rejected" in resp.text
+    assert "shipped →" not in resp.text
 
 
 async def test_a_zero_library_edge_count_is_not_rendered_as_an_error(

@@ -33,7 +33,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Request
 from sqlalchemy import Select, case, func, select
 
-from uadclaw import web
+from uadclaw import triagestore, web
 from uadclaw.db import get_session_factory
 from uadclaw.filters import FilterVerdict
 from uadclaw.ladder import DANGER_ORDER, Removal, danger_rank
@@ -347,6 +347,7 @@ async def corpus_detail(request: Request, package: str):
         try:
             fact = await session.get(PackageFact, package)
             analysis = await session.get(PackageAnalysis, package)
+            standing = await triagestore.load_standing(session, package)
         except web.DB_UNREACHABLE:
             # Same catch as the list view above, for the same reason.
             logger.exception("corpus detail query failed for %s", package)
@@ -363,6 +364,7 @@ async def corpus_detail(request: Request, package: str):
 
     context["fact"] = fact
     context["analysis"] = analysis
+    context["standing"] = standing
     context["has_icon"] = _has_icon(fact)
     context["dependency_links"] = _package_links(analysis.dependencies if analysis else [])
     context["needed_by_links"] = _package_links(analysis.needed_by if analysis else [])

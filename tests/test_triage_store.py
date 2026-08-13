@@ -30,7 +30,13 @@ from uadclaw.classifystore import (
 from uadclaw.facts import ApkFacts
 from uadclaw.factstore import store_device_facts
 from uadclaw.ladder import Removal
-from uadclaw.models import PackageAnalysis, PackageClassification, PackageTriageDecision
+from uadclaw.models import (
+    BranchEmission,
+    BranchEmissionPackage,
+    PackageAnalysis,
+    PackageClassification,
+    PackageTriageDecision,
+)
 from uadclaw.upstream import UpstreamEntry, UpstreamList
 
 NOW = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
@@ -147,6 +153,49 @@ async def queue(session_factory, view: str = "queue") -> list[str]:
         return [row.package for row in await triagestore.load_queue(session, view=view)]
 
 
+async def _seed_emission(
+    session_factory,
+    packages: list[str],
+    *,
+    branch: str = "uadclaw/pixel-000000000001",
+    committed: bool = True,
+) -> None:
+    """A completed emission carrying `packages`, seeded straight into the run tables — the
+    state the shipped view has to read. `committed=False` seeds a pending one (intent written,
+    commit not landed), which must NOT read as shipped. The git half that normally produces
+    these rows is exercised by the emission suite, not here."""
+    async with session_factory() as session, session.begin():
+        row = BranchEmission(
+            vendor="pixel",
+            branch=branch,
+            repo_path="/srv/uadclaw/upstream",
+            list_path="resources/assets/uad_lists.json",
+            base_commit="a" * 40,
+            list_sha256="b" * 64,
+            pipeline_version="0.1.0",
+            pipeline_commit_sha="c" * 40,
+            package_count=len(packages),
+            pr_body="## pixel: 1 package addition(s)\n",
+            created_at=NOW,
+            commit_oid="e" * 40 if committed else None,
+            committed_at=NOW if committed else None,
+            reconciled=False,
+        )
+        session.add(row)
+        await session.flush()
+        for package in packages:
+            session.add(
+                BranchEmissionPackage(
+                    emission_id=row.id,
+                    package=package,
+                    bundle_sha256=BUNDLE,
+                    uad_list="Misc",
+                    removal="Advanced",
+                    floor="Recommended",
+                )
+            )
+
+
 # --- ranking --------------------------------------------------------------------------------
 
 
@@ -261,6 +310,84 @@ async def test_an_approved_package_leaves_the_queue(db_env, triage_db):
 
     assert await queue(triage_db) == ["com.example.one"]
     assert await queue(triage_db, "decided") == ["com.example.two"]
+
+
+async def test_an_approval_with_no_emission_row_stays_decided_and_offerable(db_env, triage_db):
+    """The pre-§19 shape must keep working: an approval that has not shipped yet is still a
+    decided package, still offerable to the next emission."""
+    await seed(triage_db, {"com.example.one": 1})
+
+    await decide(triage_db, "com.example.one", "approve")
+
+    assert await queue(triage_db, "decided") == ["com.example.one"]
+    assert await queue(triage_db, "shipped") == []
+
+
+async def test_a_shipped_package_leaves_decided_and_enters_shipped(db_env, triage_db):
+    """§19's verify line at the store: an `approve` with a `branch_emission_package` row is
+    its own state, not a decided one — the board must stop offering something already gone."""
+    await seed(triage_db, {"com.example.one": 1})
+
+    await decide(triage_db, "com.example.one", "approve")
+    await _seed_emission(triage_db, ["com.example.one"], branch="uadclaw/pixel-000000000007")
+
+    assert await queue(triage_db, "decided") == []
+    assert await queue(triage_db, "shipped") == ["com.example.one"]
+
+
+async def test_a_rejected_package_with_an_emission_row_stays_decided(db_env, triage_db):
+    """`shipped` requires the CURRENT verdict to be `approve`. A package that shipped, was
+    reopened and then rejected is a rejection: the emission row must not drag it into the
+    shipped view, and it must stay visible in decided."""
+    await seed(triage_db, {"com.example.one": 1})
+
+    await decide(triage_db, "com.example.one", "approve", at=NOW)
+    await _seed_emission(triage_db, ["com.example.one"])
+    await decide(triage_db, "com.example.one", "reopen", at=NOW + timedelta(minutes=1))
+    await decide(
+        triage_db,
+        "com.example.one",
+        "reject",
+        reason="changed my mind",
+        at=NOW + timedelta(minutes=2),
+    )
+
+    assert await queue(triage_db, "shipped") == []
+    assert await queue(triage_db, "decided") == ["com.example.one"]
+
+
+async def test_a_pending_emission_is_not_shipped(db_env, triage_db):
+    """The emission row is written BEFORE the git commit, so a `commit_oid IS NULL` row is an
+    intent whose outcome is unknown and whose branch may never have been cut. It must not read
+    as shipped — the package stays decided until the commit actually lands."""
+    await seed(triage_db, {"com.example.one": 1})
+    await decide(triage_db, "com.example.one", "approve")
+    await _seed_emission(triage_db, ["com.example.one"], committed=False)
+
+    assert await queue(triage_db, "shipped") == []
+    assert await queue(triage_db, "decided") == ["com.example.one"]
+
+
+async def test_a_package_that_shipped_twice_shows_the_latest_branch(db_env, triage_db):
+    """An approval can ship more than once (a re-approval after re-classification), and the
+    branch shown is the latest emission's. Both readers are asserted — the row derives it via
+    the bulk query, the standing via the single-package one — because the two are separate
+    queries and either could independently pick the wrong emission."""
+    await seed(triage_db, {"com.example.one": 1})
+    await decide(triage_db, "com.example.one", "approve")
+    await _seed_emission(triage_db, ["com.example.one"], branch="uadclaw/pixel-000000000001")
+    await _seed_emission(triage_db, ["com.example.one"], branch="uadclaw/pixel-000000000009")
+
+    async with triage_db() as session:
+        rows = await triagestore.load_rows(session)
+        standing = await triagestore.load_standing(session, "com.example.one")
+
+    assert [row.shipped_branch for row in rows] == ["uadclaw/pixel-000000000009"], (
+        "the row must show the NEWEST emission's branch, not the first"
+    )
+    assert standing.shipped_branch == "uadclaw/pixel-000000000009", (
+        "the standing must agree with the row about which emission is latest"
+    )
 
 
 async def test_a_rejection_persists_with_its_reason_and_does_not_come_back(db_env, triage_db):

@@ -32,6 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from uadclaw.bundle import nearest_entries
 from uadclaw.classifystore import ClassificationStoreError, store_human_edit
 from uadclaw.models import (
+    BranchEmission,
+    BranchEmissionPackage,
     PackageAnalysis,
     PackageClassification,
     PackageCorroboration,
@@ -51,9 +53,13 @@ VERDICTS: frozenset[str] = frozenset({"approve", "reject"})
 OPEN_ACTIONS: frozenset[str] = frozenset({"edit", "reopen"})
 REASON_REQUIRED: frozenset[str] = frozenset({"reject"})
 
-# The views the screen offers, in the order it shows them. `queue` is the work; the other
-# three are how a decided, deferred or unanswerable package stays reachable.
-VIEWS: tuple[str, ...] = ("queue", "deferred", "decided", "parked")
+# The views the screen offers, in the order it shows them. `queue` is the work; the rest are
+# how a decided, deferred, shipped or unanswerable package stays reachable. `shipped` is its
+# own view rather than a badge inside `decided` because the two states it separates are both
+# `approve` and only the emission record tells them apart: a decided list that mixes an
+# approval still waiting to go out with one that already did cannot answer "how many still
+# need the next batch", which is the whole question the decided list exists for.
+VIEWS: tuple[str, ...] = ("queue", "deferred", "decided", "shipped", "parked")
 
 # How many existing upstream entries the card shows for comparison. Same default as the
 # bundle's style anchors, and the same rule, so the reviewer compares a proposal against what
@@ -97,6 +103,10 @@ class QueueRow:
     unknown: bool
     parked: bool
     decision: Decision | None
+    # The branch the package most recently went out on, or None when it never shipped. Derived
+    # from `branch_emission_package` rather than stored, because that row is the record of the
+    # emission that actually happened and nothing on this side survives it.
+    shipped_branch: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +147,8 @@ class Candidate:
 
     anchors: tuple[UpstreamEntry, ...]
     decision: Decision | None
+    # The branch this approval went out on, or None. Same derivation as `QueueRow.shipped_branch`.
+    shipped_branch: str | None
     history: tuple[Decision, ...]
     missing: tuple[str, ...]
 
@@ -175,6 +187,48 @@ async def _latest_decisions(session: AsyncSession) -> dict[str, DecisionRow]:
     }
 
 
+async def _shipped_branches(session: AsyncSession) -> dict[str, str]:
+    """Package -> the branch it most recently went out on.
+
+    `DISTINCT ON` the package ordered by emission id, the same tie-break `list_emissions`
+    uses, so a package that shipped more than once (a re-approval after re-classification)
+    shows the newest branch. Only committed emissions count: `branch_emission` is written
+    BEFORE the git commit, so a row whose `commit_oid` is still NULL is an intent whose
+    outcome is unknown, and its branch may never have been cut — not "shipped". The shipped
+    state is DERIVED here rather than stored on the triage side: `branch_emission_package` is
+    the record that an approval left this pipeline, and nothing on the classification or
+    decision rows ever says so.
+    """
+    statement = (
+        select(BranchEmissionPackage.package, BranchEmission.branch)
+        .join(BranchEmission, BranchEmission.id == BranchEmissionPackage.emission_id)
+        .where(BranchEmission.commit_oid.is_not(None))
+        .order_by(BranchEmissionPackage.package, BranchEmission.id.desc())
+        .distinct(BranchEmissionPackage.package)
+    )
+    result = await session.execute(statement)
+    return {package: branch for package, branch in result}
+
+
+async def load_shipped_branch(session: AsyncSession, package: str) -> str | None:
+    """One package's most recent emission branch, or None when it never shipped.
+
+    The single-package form of `_shipped_branches`, for a screen that reads one card rather
+    than the whole queue. Same ordering and the same committed-only filter, so the two cannot
+    disagree about "latest".
+    """
+    return (
+        await session.execute(
+            select(BranchEmission.branch)
+            .join(BranchEmissionPackage, BranchEmissionPackage.emission_id == BranchEmission.id)
+            .where(BranchEmissionPackage.package == package)
+            .where(BranchEmission.commit_oid.is_not(None))
+            .order_by(BranchEmission.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
 async def load_rows(session: AsyncSession) -> tuple[QueueRow, ...]:
     """Every package the model has answered, ranked, with its current decision attached.
 
@@ -201,6 +255,7 @@ async def load_rows(session: AsyncSession) -> tuple[QueueRow, ...]:
     )
     result = await session.execute(statement)
     latest = await _latest_decisions(session)
+    shipped = await _shipped_branches(session)
 
     rows: list[QueueRow] = []
     for classification, device_count, has_conflict, floor, corroboration, icon_mime in result:
@@ -219,6 +274,7 @@ async def load_rows(session: AsyncSession) -> tuple[QueueRow, ...]:
                 decision=_decision(
                     latest.get(classification.package), classification.bundle_sha256
                 ),
+                shipped_branch=shipped.get(classification.package),
             )
         )
     return tuple(rows)
@@ -257,9 +313,15 @@ def in_view(row: QueueRow, view: str) -> bool:
     A decision only counts against the proposal it was made about, which is what lets a
     re-classification return a decided package to the queue with nobody deleting anything: the
     bundle hash moves, the old verdict stops being current, and the history is untouched.
+
+    `shipped` is an `approve` that went out: its current verdict is `approve` and it has a
+    `branch_emission_package` row. It leaves `decided`, so an approval that already shipped is
+    not indistinguishable from one still waiting for the next batch — the two are both
+    `approve`, and only the emission record tells them apart.
     """
     counting = current_decision(row.decision)
     verdict = counting.action if counting else None
+    shipped = verdict == "approve" and row.shipped_branch is not None
     if view == "parked":
         return row.parked
     if row.parked:
@@ -267,7 +329,9 @@ def in_view(row: QueueRow, view: str) -> bool:
     if view == "deferred":
         return verdict == "defer"
     if view == "decided":
-        return verdict in VERDICTS
+        return verdict in VERDICTS and not shipped
+    if view == "shipped":
+        return shipped
     if view == "queue":
         return verdict is None or verdict in OPEN_ACTIONS
     raise TriageError(f"load_queue: {view!r} is not a view. Views: {', '.join(VIEWS)}")
@@ -487,9 +551,47 @@ async def load_candidate(
         sources=_sources(corroboration),
         anchors=anchors,
         decision=current_decision(history[0] if history else None),
+        shipped_branch=await load_shipped_branch(session, package),
         history=history,
         missing=_missing(fact, analysis, classification, corroboration, anchors),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class Standing:
+    """A package's triage standing: its current decision and, when it shipped, the branch.
+
+    Rendered by the corpus detail screen, which shows a package's full standing and until now
+    showed neither half of it. `decision` uses the same `current_decision` the triage screen
+    uses, so the two screens cannot disagree about what the current decision is, and
+    `shipped_branch` is derived from `branch_emission_package` exactly as the queue derives it.
+    """
+
+    decision: Decision | None
+    shipped_branch: str | None
+
+
+async def load_standing(session: AsyncSession, package: str) -> Standing:
+    """One package's current decision and shipped branch, for the corpus detail screen."""
+    classification = await session.get(PackageClassification, package)
+    decision: Decision | None = None
+    if classification is not None:
+        row = (
+            await session.execute(
+                select(PackageTriageDecision)
+                .where(PackageTriageDecision.package == package)
+                .order_by(PackageTriageDecision.decided_at.desc(), PackageTriageDecision.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            decision = current_decision(
+                _decision(
+                    (row.bundle_sha256, row.action, row.reason, row.decided_at),
+                    classification.bundle_sha256,
+                )
+            )
+    return Standing(decision, await load_shipped_branch(session, package))
 
 
 # --- writing -------------------------------------------------------------------------------

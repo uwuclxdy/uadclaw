@@ -48,10 +48,14 @@
               </div>
               {# Two badges at most, and only for the states that need a DIFFERENT decision.
                  A rating, a confidence and a corroboration badge on every row is five chips
-                 per row over a corpus-length list, which is where they stop being read. #}
-              {% if row.parked or row.has_conflict %}
+                 per row over a corpus-length list, which is where they stop being read.
+                 The shipped badge carries the branch it went out on — the one thing the
+                 row has to show that is not a decision, so the reviewer can tell an
+                 approval that left from one still waiting for the next batch. #}
+              {% if row.parked or row.shipped_branch or row.has_conflict %}
                 <div class="badge-row" style="margin-top:var(--space-1)">
                   {% if row.parked %}<span class="tag tag-danger">no answer</span>{% endif %}
+                  {% if row.shipped_branch %}<span class="tag tag-success">shipped → {{ row.shipped_branch }}</span>{% endif %}
                   {% if row.has_conflict %}<span class="tag tag-info">conflict</span>{% endif %}
                 </div>
               {% endif %}

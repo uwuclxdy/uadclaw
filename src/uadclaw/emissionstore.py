@@ -17,7 +17,7 @@ already carries rather than a preference:
   `edit` and `reopen` are not verdicts and never reach a branch.
 
 - **The read is one snapshot, and here that is not a cosmetic concern.** `load_rows` issues
-  two statements and Postgres reads committed per statement, so a decision landing between
+  several statements and Postgres reads committed per statement, so a decision landing between
   them is visible to one and not the other. On the triage screen that is a stale count; here
   it decides what gets committed into somebody else's repository, so the whole read runs in a
   REPEATABLE READ transaction and every statement in it sees one instant.
