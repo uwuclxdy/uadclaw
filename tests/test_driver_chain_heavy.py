@@ -9,23 +9,28 @@ Only the transport is replaced. Each driver's `list_available` reads the committ
 fixture and its `fetch` runs verbatim: Xiaomi's md5 is checked against the digest its real
 index published for this exact build, Nothing's three volumes are joined by the driver's
 own join, and Samsung's `.enc4` is decrypted in place with the key the committed inform
-fixture resolves, its encrypted body's CRC32 checked over every byte. What the mock does NOT
-do is re-download 13 GB on every run.
+fixture resolves, its encrypted body's CRC32 checked over every byte. Oppo's update endpoint
+answers the mock's plain-`2004` envelope and the driver's own fallback downloads the
+catalogue's gate, its md5 checked over every one of the 9.1 GB. What the mock does NOT do is
+re-download 13 GB on every run.
 
     UADCLAW_HEAVY_TESTS=1 \\
       UADCLAW_HEAVY_XIAOMI_ZIP=/path/to/miui_WATERGlobal_V14.0.24.0.TGOMIXM_....zip \\
       UADCLAW_HEAVY_NOTHING_DIR=/path/holding/FroggerPro_B4.1-260723-1820-image-logical.7z.00N \\
       UADCLAW_HEAVY_MOTOROLA_ZIP=/path/to/RTWO_RETAIL_15_V1TRS35H.60-33-7....zip \\
       UADCLAW_HEAVY_SAMSUNG_ENC4=/path/to/SM-S911U_2_..._fac.zip.enc4 \\
+      UADCLAW_HEAVY_OPPO_ZIP=/path/to/PLK110_..._CN.zip \\
       UADCLAW_HEAVY_UPSTREAM_LIST=/path/to/uad_lists.json \\
       UADCLAW_HEAVY_WORKDIR=/var/tmp/uadclaw-heavy \\
       uv run pytest -n0 -m heavy tests/test_driver_chain_heavy.py
 
 Every count below was measured and is asserted exactly — the first three rows on 2026-08-11,
 Samsung's chain figures with `test_samsung_fetch_heavy.py` on 2026-08-12 and its upstream
-columns on this file's first Samsung run 2026-08-13. A chain that quietly stops extracting
-returns a smaller number, never an exception: the Xiaomi build's three EROFS partitions and
-the Motorola super's six are the whole point of pinning them per partition.
+columns on this file's first Samsung run 2026-08-13, and Oppo's on its first run 2026-08-13,
+the first time the catalogue's md5 was ever checked against a real transfer. A chain that
+quietly stops extracting returns a smaller number, never an exception: the Xiaomi build's
+three EROFS partitions, the Motorola super's six and the Oppo payload's dumped partitions are
+the whole point of pinning them per partition.
 """
 
 import json
@@ -41,6 +46,7 @@ from uadclaw import firmware as firmware_module
 from uadclaw import jobs as jobs_module
 from uadclaw.drivers.motorola import MotorolaDriver
 from uadclaw.drivers.nothing import NothingDriver
+from uadclaw.drivers.oppo import OppoDriver
 from uadclaw.drivers.samsung import SamsungDriver
 from uadclaw.drivers.xiaomi import XiaomiDriver
 from uadclaw.models import JobKind, PackageAnalysis, PackageFact, PackageObservation
@@ -61,7 +67,8 @@ FIXTURES = Path(__file__).parent / "fixtures"
 UPSTREAM_LIST = os.environ.get("UADCLAW_HEAVY_UPSTREAM_LIST", "")
 
 # Peak on the Motorola run: the 5.8 GB zip, its 6.4 GB of sparse chunks, the ~7 GB raw super
-# lpunpack reads, and the partitions it writes. The other two peak lower.
+# lpunpack reads, and the partitions it writes. Xiaomi and Nothing peak lower; Samsung and
+# Oppo carry their own constants beside their rows.
 REQUIRED_FREE_BYTES = 40 * 1024**3
 
 pytestmark = [
@@ -475,6 +482,119 @@ async def test_samsung_sm_s911u_end_to_end_with_upstream_figures(
     assert state.archive_sha256 == SAMSUNG_ARCHIVE_SHA256
     assert await _apk_partitions(db_session_factory) == SAMSUNG_APKS_BY_PARTITION
     assert await _queue_counts(db_session_factory) == SAMSUNG_QUEUE
+    assert state.archive_path is None
+    assert not list((work / "unpack").rglob("*.img"))
+    assert not list((work / ARTIFACTS_DIRNAME).rglob("*.apk"))
+
+
+# --- Oppo: zip -> payload.bin -> payload-dumper-go -> dumped partition images ----------------
+
+OPPO_DEVICE = "PLK110"
+# The build id carries the region: the catalogue publishes 12 `ota_version`s twice with
+# different bytes, and the row's own region is the only field that separates them.
+OPPO_BUILD = "PLK110_11.A.72_0720_202607301131_CN"
+# The catalogue row's published md5 and size, checked against a real transfer for the first
+# time on this row's first run (2026-08-13).
+OPPO_MD5 = "2cbe1af4dece932fff62c81f5e6dbb68"
+OPPO_SIZE = 9_146_672_362
+OPPO_ARCHIVE_SHA256 = "cb1a491d594b818101497b2015973dca5489c4644aaf77d8be674663a26b8b71"
+OPPO_APKS_BY_PARTITION = {
+    "my_product": 62,
+    "my_region": 2,
+    "my_stock": 145,
+    "odm": 1,
+    "product": 30,
+    "system": 42,
+    "system_ext": 129,
+    "vendor": 16,
+}
+OPPO_CHAIN = {"apks": 427, "artifacts": 742, "packages": 426, "parse_failures": 0}
+OPPO_QUEUE = {
+    # Measured on this row's first heavy run (2026-08-13) over the real `uad_lists.json` and
+    # the real archive; the run produced no `auto_generated_rro` verdict, hence no such key.
+    "already_upstream": 309,
+    "queued": 117,
+    "merged_packages": 426,
+}
+# Measured 2026-08-13 on the real chain: during the dump the archive (9.15 GB), the
+# stored-uncompressed `payload.bin` copy (9.15 GB) and the partitions payload-dumper-go dumps
+# from it (~11 GB) all coexist, and the peak comes slightly later — the extraction stages one
+# more EROFS image at a time on top of the archive, the dumps and the APKs it has already
+# harvested, a sampled 29.74 GiB.
+OPPO_REQUIRED_FREE_BYTES = 36 * 1024**3
+
+
+async def test_oppo_plk110_end_to_end(db_env, db_session_factory, monkeypatch, tmp_path):
+    """The first Oppo device through the real chain, and the first time the catalogue's md5
+    is checked against a real transfer. The mock serves the committed catalogue, answers the
+    update endpoint's POST with a plain `2004` — a non-200 code carries no sealed body, so no
+    crypto in the handler — and the driver's own fallback then downloads the catalogue's
+    durable gate through its real download loop, checking the md5 over all 9.1 GB.
+    """
+    _require_toolchain()
+    archive = _local_source("UADCLAW_HEAVY_OPPO_ZIP")
+    work = _require_workdir("oppo", required_bytes=OPPO_REQUIRED_FREE_BYTES)
+    monkeypatch.setenv("UPSTREAM_LIST_PATH", _upstream_list())
+    get_settings.cache_clear()
+
+    # The committed fixture is what the driver mints the ref from — the md5 it verifies
+    # against and the size the transfer is checked against — so it has to still describe the
+    # build these numbers were measured on.
+    catalogue_text = (FIXTURES / "oppo_catalogue.json").read_text(encoding="utf-8")
+    catalogue = json.loads(catalogue_text)
+    row = next(
+        release
+        for release in catalogue["releases"]
+        if release.get("model") == OPPO_DEVICE and release.get("region") == "CN"
+    )
+    assert row["ota_version"] == "PLK110_11.A.72_0720_202607301131"
+    assert row["md5"] == OPPO_MD5
+    assert row["size"] == OPPO_SIZE
+
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, str(request.url)))
+        if request.url.path == "/api/ota.php":
+            return httpx.Response(200, text=catalogue_text)
+        if request.method == "POST" and request.url.path == "/update/v3":
+            # A non-200 code carries no sealed body, so the envelope is plain JSON and this
+            # handler holds no crypto. From here the driver's real fallback runs: the gate
+            # the ref carries is downloaded and its md5 checked over all 9.1 GB.
+            return httpx.Response(200, json={"responseCode": 2004})
+        return _stream(archive)
+
+    _register(
+        monkeypatch,
+        "oppo",
+        lambda settings: OppoDriver(
+            settings, client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        ),
+    )
+    job_id = await _make_job(
+        db_session_factory,
+        {"driver": "oppo", "device": OPPO_DEVICE, "build": OPPO_BUILD},
+    )
+    ctx = StageContext(
+        job_id=job_id, attempt=1, scratch_dir=work, session_factory=db_session_factory
+    )
+
+    counts = await _run_chain(ctx)
+
+    state = read_state(work)
+    # The catalogue's md5, checked against a real 9.1 GB transfer for the first time.
+    assert state.integrity_verified is True
+    assert state.archive_sha256 == OPPO_ARCHIVE_SHA256
+    assert counts == OPPO_CHAIN
+    # The CN endpoint was consulted once and answered 2004, so the real fallback ran: the
+    # gate the ref carries was downloaded and its md5 checked over all 9.1 GB.
+    assert ("POST", "https://component-otapc-cn.allawntech.com/update/v3") in seen
+    assert any(
+        method == "GET" and url.startswith("https://component-ota-cn.allawntech.com/downloadCheck")
+        for method, url in seen
+    )
+    assert await _apk_partitions(db_session_factory) == OPPO_APKS_BY_PARTITION
+    assert await _queue_counts(db_session_factory) == OPPO_QUEUE
     assert state.archive_path is None
     assert not list((work / "unpack").rglob("*.img"))
     assert not list((work / ARTIFACTS_DIRNAME).rglob("*.apk"))
