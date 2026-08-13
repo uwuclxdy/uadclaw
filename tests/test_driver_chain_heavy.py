@@ -21,13 +21,11 @@ do is re-download 13 GB on every run.
       UADCLAW_HEAVY_WORKDIR=/var/tmp/uadclaw-heavy \\
       uv run pytest -n0 -m heavy tests/test_driver_chain_heavy.py
 
-Every count below was measured on 2026-08-11 and is asserted exactly. A chain that quietly
-stops extracting returns a smaller number, never an exception: the Xiaomi build's three EROFS
-partitions and the Motorola super's six are the whole point of pinning them per partition.
-Samsung is the one exception to "asserted exactly": its chain figures were measured with
-`test_samsung_fetch_heavy.py` on 2026-08-12, but `filter` and `rule_ladder` have never run for
-a Samsung build, so `SAMSUNG_QUEUE`'s two upstream columns are placeholders that red on
-purpose until a heavy run measures them and pins the columns.
+Every count below was measured and is asserted exactly — the first three rows on 2026-08-11,
+Samsung's chain figures with `test_samsung_fetch_heavy.py` on 2026-08-12 and its upstream
+columns on this file's first Samsung run 2026-08-13. A chain that quietly stops extracting
+returns a smaller number, never an exception: the Xiaomi build's three EROFS partitions and
+the Motorola super's six are the whole point of pinning them per partition.
 """
 
 import json
@@ -380,11 +378,10 @@ SAMSUNG_ARCHIVE_SHA256 = "fc563d5b8bff839eaacdf0f9d5674ee043309fb5153d9b73542251
 SAMSUNG_APKS_BY_PARTITION = {"product": 79, "system": 407, "system_ext": 13, "vendor": 10}
 SAMSUNG_CHAIN = {"apks": 509, "artifacts": 1143, "packages": 491, "parse_failures": 0}
 SAMSUNG_QUEUE = {
-    # MEASURED: pinned after the first heavy run; this placeholder reds on purpose, and the
-    # failure diff carries the real dict — copy its KEY SET too, since `group_by` omits
-    # zero-count groups and a Samsung run may add an `auto_generated_rro` key.
-    "already_upstream": 0,
-    "queued": 0,
+    # Measured on this row's first heavy run (2026-08-13) over the real `uad_lists.json` and
+    # the real archive; the run produced no `auto_generated_rro` verdict, hence no such key.
+    "already_upstream": 441,
+    "queued": 50,
     "merged_packages": 491,
 }
 # Measured 2026-08-12 on the real chain: the decrypted archive (11.57 GB), the LZ4-decoded
