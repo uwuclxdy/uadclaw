@@ -239,8 +239,30 @@ _TOOL_PROVIDERS = {
 # rather than per-vendor. All three list files and match none of the patterns, so all three
 # still need to be here once the two rules are separated; what the separation buys is that a
 # vendor whose `odm` extraction produces nothing is loud again.
+#
+# OPlus payload dumps carry six more, measured on the first Oppo device (PLK110,
+# PLK110_11.A.72_0720_202607301131_CN, 2026-08-13): `dsp` is the DSP firmware filesystem
+# (121 files, every one under cdsp/), and the five `my_*` ones are ColorOS metadata
+# partitions — `my_bigball` and `my_heytap` hold build.prop alone, `my_carrier` 5 files,
+# `my_engineering` 10, `my_manifest` 17 — with not one artifact among them. `my_carrier` is a
+# carrier-customization partition whose CN stub holds no app, so it is waived the same way
+# `prism` and `optics` are, with the same silent-loss trade a carrier build could expose.
 PARTITIONS_ALLOWED_EMPTY = frozenset(
-    {"system_other", "cache", "metadata", "userdata", "prism", "optics", "odm"}
+    {
+        "system_other",
+        "cache",
+        "metadata",
+        "userdata",
+        "prism",
+        "optics",
+        "odm",
+        "dsp",
+        "my_bigball",
+        "my_carrier",
+        "my_engineering",
+        "my_heytap",
+        "my_manifest",
+    }
 )
 
 

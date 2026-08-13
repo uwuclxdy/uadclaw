@@ -1184,7 +1184,21 @@ async def test_a_partition_that_never_carries_apps_may_be_empty(tmp_path, monkey
 
 # Spelled out rather than imported, for the same reason `NO_APP_PARTITIONS` above is: a
 # fixture derived from the set under test shrinks with it.
-ALLOWED_EMPTY = ("system_other", "cache", "metadata", "userdata", "prism", "optics", "odm")
+ALLOWED_EMPTY = (
+    "system_other",
+    "cache",
+    "metadata",
+    "userdata",
+    "prism",
+    "optics",
+    "odm",
+    "dsp",
+    "my_bigball",
+    "my_carrier",
+    "my_engineering",
+    "my_heytap",
+    "my_manifest",
+)
 
 
 def test_the_allowed_empty_set_is_exactly_what_the_test_below_pins():
