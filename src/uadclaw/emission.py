@@ -90,21 +90,35 @@ _JSON_WHITESPACE = " \t\n\r"
 # is legal text everywhere else in a description.
 _WHITESPACE_NEXT_TO_NEWLINE = re.compile(r"[^\S\n]\n|\n[^\S\n]")
 
-# Unicode categories nothing this module writes may contain: Cc control, Cf format, Zl line
-# separator, Zp paragraph separator, and any Zs space that is not a plain ASCII one.
+# The Unicode categories nothing this module writes may contain — Cc control, Cf format, Zl
+# line separator, Zp paragraph separator, and any Zs that is not the plain ASCII space —
+# mapped to what each actually looks like to a human reading the diff.
 #
 # Stated as CATEGORIES rather than as a character list on purpose. A hand-listed set was wrong
 # here twice: `[\x00-\x1f\x7f]` missed U+0085 NEL, U+2028 and U+2029 — all three sat in the
 # markdown line-break class and in no refusal — and it never saw U+200B ZWSP, U+202E RLO,
 # U+00AD SHY, U+FEFF, U+00A0 or U+3000 at all. A key spelled `com.a<ZWSP>b` reads as `com.ab`
 # in the PR diff a maintainer approves, and `com.a<RLO>b` reverses the rest of the line.
-# `ensure_ascii=False` makes it worse than the control-character case: a control character at
-# least escapes to something visible, these land as raw bytes that render as nothing.
+# `ensure_ascii=False` makes it worse than a bare control character, which at least escapes to
+# something visible: these land as raw bytes.
 #
-# Measured over the live file 2026-08-13, so this refuses nothing upstream carries: across all
-# 5308 non-empty descriptions the only characters in these classes are `\n` (6723) and `\t`
-# (3). The tab is refused deliberately — see `prose` in `_check_text`.
-_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+# The descriptions are not interchangeable and the message quotes the right one. A TAB and a
+# NBSP both render as ordinary horizontal space, so telling a reviewer their pasted tab is
+# "invisible" sends them hunting for something they can already see. Only Cf is invisible in
+# the literal sense. One dict rather than a set plus a lookup table, so widening the refusal
+# means writing the description in the same edit, and so the lookup is total — a category
+# refused with no entry here would raise `KeyError` instead of `EmissionError`.
+#
+# Measured over the live file 2026-08-13, so this refuses almost nothing upstream carries:
+# across all 5308 non-empty descriptions the only characters in these classes are `\n` (6723,
+# exempt in prose) and `\t` (3, refused deliberately — see `prose` in `_check_text`).
+_REFUSED_CATEGORIES: dict[str, str] = {
+    "Cc": "a control character",
+    "Cf": "an invisible formatting character",
+    "Zl": "a line separator",
+    "Zp": "a paragraph separator",
+    "Zs": "a space that is not the plain ASCII space",
+}
 
 # A UTF-16 surrogate with no pair. `json.dumps` passes one straight through and `str.encode`
 # then raises `UnicodeEncodeError`, which is not an `EmissionError` and would escape a caller
@@ -208,7 +222,11 @@ class ApprovedPackage:
 
 
 def _invisible_character(value: str, *, prose: bool) -> str | None:
-    """The first character that renders as nothing or reorders what follows it, or None.
+    """The first character a diff cannot show for what it is, or None.
+
+    Not "invisible": the class spans characters that render as nothing (Cf), as an ordinary
+    space (a TAB, a NBSP), and as a line break (Zl, Zp, U+0085). What they share is that the
+    text a maintainer reads is not the text that ships, which is the whole refusal.
 
     `\\n` is exempt in prose and only there: it is legal in a description (6723 live uses) and
     is the one separator a reviewer can actually see in a diff.
@@ -217,7 +235,7 @@ def _invisible_character(value: str, *, prose: bool) -> str | None:
         if prose and char == "\n":
             continue
         category = unicodedata.category(char)
-        if category in _INVISIBLE_CATEGORIES or (category == "Zs" and char != " "):
+        if category in _REFUSED_CATEGORIES and not (category == "Zs" and char == " "):
             return char
     return None
 
@@ -244,13 +262,21 @@ def _check_text(value: object, *, subject: str, field: str, prose: bool = False)
         )
     found = _invisible_character(value, prose=prose)
     if found is not None:
-        name = unicodedata.name(found, "unnamed")
+        # No `unicodedata.name` exists for ANY control character, so the parenthetical is
+        # dropped rather than filled with a placeholder: "U+0009 (unnamed)" reads like a
+        # lookup failure in this module rather than a property of the codepoint.
+        name = unicodedata.name(found, "")
+        spelled = f"U+{ord(found):04X}" + (f" {name}" if name else "")
         raise EmissionError(
-            f"{subject}: {field} {value!r} carries U+{ord(found):04X} ({name}), an invisible "
-            "or direction-changing character. It renders as nothing, or reorders what follows "
-            "it, in the diff a maintainer approves, so the text they read is not the text that "
-            "ships; fix it in triage."
+            f"{subject}: {field} {value!r} carries {spelled}, "
+            f"{_REFUSED_CATEGORIES[unicodedata.category(found)]}. The diff a maintainer "
+            "approves does not show it for what it is, so the text they read is not the text "
+            "that ships; fix it in triage."
         )
+    # Runs AFTER the character check, and that order is load-bearing. `str.strip()` removes
+    # any character `str.isspace()` accepts, which is five of the refused set — U+0009, U+0085,
+    # U+2028, U+2029 and every non-ASCII Zs (U+00A0, U+3000) — so a name ending in one of those
+    # would report as merely "padded" and never name the codepoint that made it a lookalike.
     if not prose and value != value.strip():
         raise EmissionError(
             f"{subject}: {field} {value!r} is padded with whitespace. It reads identically to "

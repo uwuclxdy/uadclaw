@@ -239,7 +239,7 @@ def test_a_blank_package_name_is_refused():
 
 
 def test_a_control_character_in_a_dependency_is_refused():
-    with pytest.raises(EmissionError, match="invisible or direction-changing"):
+    with pytest.raises(EmissionError, match="does not show it for what it is"):
         build_entry(approved("com.example.app", dependencies=("com.example\x00.other",)))
 
 
@@ -674,6 +674,53 @@ def test_an_invisible_character_never_reaches_the_file(field: str, codepoint: in
     assert f"U+{codepoint:04X}" in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    ("codepoint", "expected"),
+    [
+        (0x0009, "a control character"),
+        (0x0000, "a control character"),
+        (0x0085, "a control character"),
+        (0x200B, "an invisible formatting character"),
+        (0x202E, "an invisible formatting character"),
+        (0x2028, "a line separator"),
+        (0x2029, "a paragraph separator"),
+        (0x00A0, "a space that is not the plain ASCII space"),
+        (0x3000, "a space that is not the plain ASCII space"),
+    ],
+    ids=lambda value: f"U+{value:04X}" if isinstance(value, int) else "",
+)
+def test_the_refusal_says_what_the_character_actually_looks_like(codepoint: int, expected: str):
+    """A TAB and a NBSP render as ordinary horizontal space. Calling either "invisible" sends
+    a reviewer hunting for something they can already see, so the message names the class."""
+    with pytest.raises(EmissionError) as caught:
+        insert_entries(FIXTURE, [approved("com.a", labels=(f"lab{chr(codepoint)}",))])
+    message = str(caught.value)
+    assert expected in message
+    assert f"U+{codepoint:04X}" in message
+    if codepoint not in (0x200B, 0x202E):
+        assert "an invisible formatting character" not in message
+
+
+@pytest.mark.parametrize("codepoint", [0x0009, 0x0000, 0x0085])
+def test_a_control_character_is_named_by_codepoint_and_not_as_unnamed(codepoint: int):
+    """No control character has a `unicodedata.name`, so a placeholder would read like a lookup
+    failure in this module rather than a property of the codepoint."""
+    with pytest.raises(EmissionError) as caught:
+        insert_entries(FIXTURE, [approved("com.a", labels=(f"lab{chr(codepoint)}",))])
+    assert "unnamed" not in str(caught.value)
+
+
+@pytest.mark.parametrize("codepoint", [0x0009, 0x0085, 0x2028, 0x2029, 0x00A0, 0x3000])
+def test_a_strip_eaten_character_is_still_named_rather_than_reported_as_padding(codepoint: int):
+    """The five-plus-one set `str.strip()` removes. Ordering regression guard: if the padding
+    check ran first these would report as merely "padded" and never name the codepoint that
+    made the name a lookalike. U+2029 belongs here and was missing from my own written list."""
+    assert (f"x{chr(codepoint)}").strip() == "x"
+    with pytest.raises(EmissionError) as caught:
+        insert_entries(FIXTURE, [approved("com.a", labels=(f"lab{chr(codepoint)}",))])
+    assert f"U+{codepoint:04X}" in str(caught.value)
+
+
 def test_every_character_upstream_actually_uses_in_a_key_still_passes():
     """The other half, and the reason an allow-list is defensible here rather than over-fitted:
     the sample is the whole destination population. All 5372 live keys use exactly these 61
@@ -726,13 +773,13 @@ def test_an_unpaired_surrogate_is_refused_as_an_emission_error(field: str):
 def test_a_control_character_in_a_description_is_refused(bad: str):
     """`_CONTROL_CHARACTERS` states the reason itself — it stays valid JSON and invisible in a
     diff — and that argument is strictest for the description, the entry's whole content."""
-    with pytest.raises(EmissionError, match="invisible or direction-changing"):
+    with pytest.raises(EmissionError, match="does not show it for what it is"):
         insert_entries(FIXTURE, [approved("com.a", description=f"A vendor{bad}component here.")])
 
 
 def test_a_newline_in_a_label_is_refused():
     """A label is an identifier, so it gets the identifier's check rather than the prose one."""
-    with pytest.raises(EmissionError, match="invisible or direction-changing"):
+    with pytest.raises(EmissionError, match="does not show it for what it is"):
         insert_entries(FIXTURE, [approved("com.a", labels=("one\ntwo",))])
 
 
@@ -964,7 +1011,7 @@ def test_the_cell_layer_collapses_every_line_ending_markdown_knows(bad: str):
 def test_a_control_character_in_a_disclosure_string_is_refused():
     """The reachable half of the same concern: through the public API a line ending in a
     disclosure string never gets as far as the cell layer."""
-    with pytest.raises(EmissionError, match="invisible or direction-changing"):
+    with pytest.raises(EmissionError, match="does not show it for what it is"):
         body(packages=[approved("com.a", model="m\rodel")])
 
 
