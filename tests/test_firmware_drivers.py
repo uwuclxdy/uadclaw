@@ -100,7 +100,7 @@ def mock_client(handler) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-# --- the registry carries all four drivers, and each disables on its own -------------------
+# --- the registry carries all six drivers, and each disables on its own -------------------
 
 
 def test_every_driver_is_registered_and_resolvable():
