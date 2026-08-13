@@ -30,7 +30,15 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.12"
+          # Deliberately no python-version. That input exports UV_PYTHON, which is a hard
+          # request rather than a hint: with `python-version: "3.12"` uv resolved the runner's
+          # preinstalled /usr/bin/python3.12 (3.12.3) and then refused it against the project
+          # floor instead of looking for a newer patch, failing run 31684038235 with "the
+          # requested interpreter resolved to Python 3.12.3, which is incompatible". Unset, uv
+          # reads .python-version and requires-python and downloads what they ask for, so the
+          # interpreter has one source of truth and the number lives in one place. It has to
+          # match the image: python:3.12-slim ships 3.12.13, CI was testing 3.12.3, and
+          # `ipaddress` classifies a tunnelled address differently between the two.
           enable-cache: true
 
       - name: uv sync
