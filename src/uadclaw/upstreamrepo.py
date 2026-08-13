@@ -17,8 +17,9 @@ on some other branch cannot silently contribute its own copy.
 
 What state the clone is left in, per outcome:
 
-- `inspect_repo` and `branch_exists` are read-only. They never move HEAD, never write the index
-  and never touch the working tree, so they are safe against a clone a human is sitting in.
+- `inspect_repo`, `branch_exists` and `verify_emitted_branch` are read-only. They never move
+  HEAD, never write the index and never touch the working tree, so they are safe against a
+  clone a human is sitting in.
 - `emit_branch` succeeds: the clone is ON the new branch with the new commit at HEAD, because
   the human's next act is `git push` from there. The working tree is clean unless one of the
   clone's own hooks writes into it AFTER the commit — a `post-commit` formatter does exactly
@@ -51,6 +52,7 @@ Synchronous on purpose, matching the API this module was specified against. The 
 event loop, so a stage calls these through `asyncio.to_thread` rather than inline.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -479,6 +481,115 @@ def branch_exists(path: Path, branch: str) -> bool:
             "absent."
         )
     return state
+
+
+@dataclass(frozen=True, slots=True)
+class EmittedBranch:
+    """A branch this module emitted, read back off the clone after the fact."""
+
+    # The clone's own work-tree root, so a caller holding a recorded path can tell whether it
+    # is looking at the checkout its emission actually happened in.
+    root: str
+    commit: str
+
+
+def verify_emitted_branch(
+    path: Path, *, branch: str, base_commit: str, list_path: str, list_sha256: str
+) -> EmittedBranch:
+    """Assert that `branch` is exactly the branch one emission produced, and return its commit.
+
+    Read-only, like `inspect_repo` and `branch_exists`: nothing here moves HEAD, writes the
+    index or touches the working tree, and it does not run `status` at all — a clone somebody
+    is editing is not a reason to refuse a question about a ref.
+
+    **This exists because a caller recovering from a crash cannot re-derive the answer more
+    weakly than `emit_branch` checked it in the first place.** An emission that dies between
+    its commit and whatever records it leaves a branch behind, and the recovering run has to
+    decide whether that branch is its own. Deciding it on the list file's bytes alone is the
+    mistake this module already made once and fixed inside `emit_branch`: `emit_branch` leaves
+    the clone ON the emission branch, so a human working in their own clone during that window
+    commits onto it, their commit does not touch the list file, and every content check still
+    passes. The branch then carries somebody's unrelated work into a PR disclosed as this
+    pipeline's batch.
+
+    So the same three read-backs `emit_branch` makes about its own commit are made here, and
+    for the same reasons — they fail differently and none implies another:
+
+    - the PARENT bounds the branch. Exactly one commit, sitting on exactly the commit the
+      emission recorded cutting from. A commit riding along underneath or on top fails here.
+    - the TOUCHED PATHS bound that commit. One file, the list. This is what catches the
+      remaining shape the parent check cannot: a human who `commit --amend`s the emission's own
+      commit to add a file keeps the parent and the list bytes both.
+    - the BYTES bound the content, by digest rather than by comparison, because a recovering
+      caller holds what it recorded and not the 1.6 MB it recorded it from.
+
+    The ref is named as `refs/heads/<branch>` throughout rather than by its short name, which a
+    tag of the same name would otherwise make ambiguous.
+    """
+    context = "verify_emitted_branch"
+    root = _work_tree_root(path, context=context)
+    _validate_branch_name(root, branch, context=context)
+    posix_list_path, _ = _list_path_spec(root, list_path, context=context)
+
+    present = _branch_ref_state(root, branch, context=context)
+    if present is None:
+        raise UpstreamRepoError(
+            f"{context}: could not read refs/heads/{branch} in {root}. A recovery decides "
+            "whether an emission already happened on this answer, so an unreadable ref is "
+            "refused rather than read as absent."
+        )
+    if not present:
+        raise UpstreamRepoError(
+            f"{context}: {root} carries no branch {branch!r}, so there is nothing to verify."
+        )
+
+    lineage = _text(
+        _run_git(
+            root, ["rev-list", "--parents", "-n", "1", f"refs/heads/{branch}"], context=context
+        )
+    ).split()
+    head, parents = lineage[0], lineage[1:]
+    if parents != [base_commit]:
+        raise UpstreamRepoError(
+            f"{context}: {branch} in {root} is at {head} whose parent(s) are "
+            f"{parents or ['none']}, not the single commit {base_commit} the emission recorded "
+            "cutting from. That branch is not one commit of ours on the recorded base — "
+            "somebody else committed onto it, or it was rebased or amended — so it is not "
+            "adopted as this emission's outcome. Nothing was changed; read it with "
+            f"`git log --oneline {base_commit}..{branch}` and delete it if it is not wanted."
+        )
+
+    touched = [
+        entry
+        for entry in _run_git(
+            root,
+            ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", head],
+            context=context,
+        )
+        .stdout.decode("utf-8", "replace")
+        .split("\0")
+        if entry
+    ]
+    if touched != [posix_list_path]:
+        raise UpstreamRepoError(
+            f"{context}: the commit on {branch} in {root} touches {touched} rather than only "
+            f"{posix_list_path}. A branch this pipeline emits carries one file and nothing "
+            "else, so this one is not adopted as its outcome. Nothing was changed; inspect it "
+            "by hand."
+        )
+
+    committed = _run_git(
+        root, ["cat-file", "blob", f"{head}:{posix_list_path}"], context=context
+    ).stdout
+    digest = hashlib.sha256(committed).hexdigest()
+    if digest != list_sha256:
+        raise UpstreamRepoError(
+            f"{context}: {branch} in {root} carries {posix_list_path} at sha256 {digest}, not "
+            f"the {list_sha256} the emission recorded committing. A hook rewrote the file after "
+            "the commit, or this is not that branch; upstream rejects a reformat of that file, "
+            "so it is not adopted. Nothing was changed."
+        )
+    return EmittedBranch(root=str(root), commit=head)
 
 
 def emit_branch(

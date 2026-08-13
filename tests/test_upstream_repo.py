@@ -11,6 +11,7 @@ this box does set — otherwise runs a commit-message linter inside every test r
 would pass or fail on whichever machine ran it.
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -23,6 +24,7 @@ from uadclaw.upstreamrepo import (
     branch_exists,
     emit_branch,
     inspect_repo,
+    verify_emitted_branch,
 )
 
 LIST_PATH = "resources/assets/uad_lists.json"
@@ -910,3 +912,180 @@ def test_a_restore_that_cannot_finish_names_the_branch_the_clone_is_left_on(clon
     assert "base" in message
     # The wrapper carries the original failure's own text, which already names the operation.
     assert message.count("emit_branch:") == 1
+
+
+# --- verify_emitted_branch: reading back a branch this module already emitted -----------------
+
+
+def _emitted(clone: Path, *, branch: str = "uadclaw/pixel-0123456789ab") -> tuple[str, str, str]:
+    """Emit for real, and return what a caller would have recorded about it."""
+    base = git(clone, "rev-parse", "base")
+    new_bytes = _bytes(NEW_LIST)
+    commit = emit_branch(
+        clone,
+        branch=branch,
+        base_ref=base,
+        list_path=LIST_PATH,
+        new_bytes=new_bytes,
+        message="pkg(pixel): add 1 package(s)",
+    )
+    return base, commit, hashlib.sha256(new_bytes).hexdigest()
+
+
+def test_a_branch_this_module_emitted_verifies(clone):
+    base, commit, digest = _emitted(clone)
+
+    verified = verify_emitted_branch(
+        clone,
+        branch="uadclaw/pixel-0123456789ab",
+        base_commit=base,
+        list_path=LIST_PATH,
+        list_sha256=digest,
+    )
+
+    assert verified.commit == commit
+    assert verified.root == str(clone)
+
+
+def test_verifying_is_read_only_over_a_clone_somebody_is_working_in(clone):
+    """It answers a question about a ref, so a dirty work tree is not a reason to refuse — and
+    a recovery running while a human has edits open is exactly when it is needed. Deliberately
+    unlike `inspect_repo`, which refuses a dirty clone because it is about to be committed
+    into."""
+    base, commit, digest = _emitted(clone)
+    (clone / "someone-elses-edit.txt").write_text("in progress\n", encoding="utf-8")
+
+    verified = verify_emitted_branch(
+        clone,
+        branch="uadclaw/pixel-0123456789ab",
+        base_commit=base,
+        list_path=LIST_PATH,
+        list_sha256=digest,
+    )
+
+    assert verified.commit == commit
+    assert git(clone, "status", "--porcelain") != ""
+
+
+def test_a_commit_riding_along_on_the_branch_fails_the_parent_check(clone):
+    """The blocker this function exists for. `emit_branch` leaves the clone ON the branch, so a
+    human committing during the window that follows lands on it — and their commit touches
+    nothing this pipeline wrote, so every content check still passes. Only the parent bounds
+    the BRANCH rather than the commit."""
+    base, _, digest = _emitted(clone)
+    (clone / "NOTES.md").write_text("my own work\n", encoding="utf-8")
+    git(clone, "add", "--", "NOTES.md")
+    git(clone, "commit", "--quiet", "-m", "my own work")
+
+    with pytest.raises(UpstreamRepoError, match="not the single commit"):
+        verify_emitted_branch(
+            clone,
+            branch="uadclaw/pixel-0123456789ab",
+            base_commit=base,
+            list_path=LIST_PATH,
+            list_sha256=digest,
+        )
+
+
+def test_an_amended_commit_adding_a_file_fails_the_touched_paths_check(clone):
+    """What the parent check alone cannot see: amending keeps the parent and the list bytes."""
+    base, _, digest = _emitted(clone)
+    (clone / "NOTES.md").write_text("my own work\n", encoding="utf-8")
+    git(clone, "add", "--", "NOTES.md")
+    git(clone, "commit", "--quiet", "--amend", "--no-edit")
+
+    with pytest.raises(UpstreamRepoError, match="touches"):
+        verify_emitted_branch(
+            clone,
+            branch="uadclaw/pixel-0123456789ab",
+            base_commit=base,
+            list_path=LIST_PATH,
+            list_sha256=digest,
+        )
+
+
+def test_a_rewritten_list_fails_the_byte_check(clone):
+    base, _, _ = _emitted(clone)
+
+    with pytest.raises(UpstreamRepoError, match="sha256"):
+        verify_emitted_branch(
+            clone,
+            branch="uadclaw/pixel-0123456789ab",
+            base_commit=base,
+            list_path=LIST_PATH,
+            list_sha256="d" * 64,
+        )
+
+
+def test_a_branch_cut_from_a_different_base_is_refused(clone):
+    """A branch of the right name in the wrong place. Reachable because the name is derived
+    from the job and a human can create any ref they like in their own clone."""
+    _emitted(clone)
+    git(clone, "branch", "uadclaw/pixel-cafecafecafe", "base")
+
+    with pytest.raises(UpstreamRepoError, match="not the single commit"):
+        verify_emitted_branch(
+            clone,
+            branch="uadclaw/pixel-cafecafecafe",
+            base_commit=git(clone, "rev-parse", "base"),
+            list_path=LIST_PATH,
+            list_sha256=hashlib.sha256(_bytes(NEW_LIST)).hexdigest(),
+        )
+
+
+def test_a_branch_that_is_not_there_is_refused_rather_than_answered(clone):
+    with pytest.raises(UpstreamRepoError, match="carries no branch"):
+        verify_emitted_branch(
+            clone,
+            branch="uadclaw/pixel-000000000000",
+            base_commit=git(clone, "rev-parse", "base"),
+            list_path=LIST_PATH,
+            list_sha256="d" * 64,
+        )
+
+
+def test_a_tag_shadowing_the_branch_name_does_not_answer_for_it(clone):
+    """Every read here names `refs/heads/<branch>`, so a tag of the same name cannot stand in
+    for the branch. git resolves a bare ambiguous name to the TAG, which would let a tag
+    pointing at a well-formed commit satisfy a check about a branch that does not exist."""
+    base, commit, digest = _emitted(clone)
+    git(clone, "checkout", "--quiet", "base", "--")
+    git(clone, "branch", "--delete", "--force", "uadclaw/pixel-0123456789ab")
+    git(clone, "tag", "uadclaw/pixel-0123456789ab", commit)
+
+    with pytest.raises(UpstreamRepoError, match="carries no branch"):
+        verify_emitted_branch(
+            clone,
+            branch="uadclaw/pixel-0123456789ab",
+            base_commit=base,
+            list_path=LIST_PATH,
+            list_sha256=digest,
+        )
+
+
+def test_a_tag_and_a_branch_sharing_a_name_are_not_the_same_ref(clone):
+    """The dangerous half of the ambiguity, and the reason every read here is spelled
+    `refs/heads/<branch>`.
+
+    git resolves a BARE name through `refs/tags/` before `refs/heads/`, so with both present a
+    bare read answers about the tag. Here the branch carries a rogue commit and the tag points
+    at the clean one: read as a branch this refuses, and read bare it would adopt a commit that
+    is not on the branch anybody would push. The presence check alone cannot catch this — the
+    branch really does exist — so it needs its own leg.
+    """
+    base, commit, digest = _emitted(clone)
+    (clone / "NOTES.md").write_text("my own work\n", encoding="utf-8")
+    git(clone, "add", "--", "NOTES.md")
+    git(clone, "commit", "--quiet", "-m", "my own work")
+    git(clone, "tag", "uadclaw/pixel-0123456789ab", commit)
+    assert git(clone, "rev-parse", "refs/heads/uadclaw/pixel-0123456789ab") != commit
+    assert git(clone, "rev-parse", "refs/tags/uadclaw/pixel-0123456789ab") == commit
+
+    with pytest.raises(UpstreamRepoError, match="not the single commit"):
+        verify_emitted_branch(
+            clone,
+            branch="uadclaw/pixel-0123456789ab",
+            base_commit=base,
+            list_path=LIST_PATH,
+            list_sha256=digest,
+        )
