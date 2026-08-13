@@ -181,6 +181,7 @@ def test_the_registry_wires_the_stages_the_worker_runs():
         "rule_ladder",
         "llm",
         "corroborate",
+        "branch",
     }
     # Every registered name is a real pipeline stage: a typo here is a handler the worker
     # silently never calls, because it no-ops any stage it has no entry for.
@@ -190,6 +191,11 @@ def test_the_registry_wires_the_stages_the_worker_runs():
     # registry is the vocabulary and `JOB_KIND_STAGES` is the pipeline.
     assert "llm" not in JOB_KIND_STAGES[JobKind.FIRMWARE_ANALYSIS]
     assert "corroborate" not in JOB_KIND_STAGES[JobKind.FIRMWARE_ANALYSIS]
+    # `branch` is the sharpest case of the same rule and it changed character when it gained a
+    # handler: it used to be a stage every firmware job no-opped through. Under one global walk
+    # a firmware job would now commit into somebody else's repository the moment it finished.
+    assert "branch" not in JOB_KIND_STAGES[JobKind.FIRMWARE_ANALYSIS]
+    assert "branch" not in JOB_KIND_STAGES[JobKind.CLASSIFICATION]
     assert JOB_KIND_STAGES[JobKind.CLASSIFICATION] == ("llm", "corroborate")
 
 

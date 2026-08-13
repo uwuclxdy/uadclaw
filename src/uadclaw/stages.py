@@ -1,16 +1,18 @@
 """The real pipeline stage handlers, wired to the worker's `StageHandler` signature.
 
-Two job kinds run through here and they share nothing but the signature. `firmware_analysis`
+Three job kinds run through here and they share nothing but the signature. `firmware_analysis`
 walks `acquire` → `unpack` → `extract_facts` → `corpus_graph` → `filter` → `rule_ladder` and
 lives on disk; `classification` walks `llm` → `corroborate`, holds no scratch lease, and is
 the only kind in this repo that spends money — the model on both stages, plus a search quota
-on the second. Which stages a kind walks is `models.JOB_KIND_STAGES`, and it is per kind
-precisely so a firmware job cannot wander into `llm`.
+on the second; `branch_emission` walks `branch` alone and is the only one that writes outside
+this project, into a git clone the operator supplies. Which stages a kind walks is
+`models.JOB_KIND_STAGES`, and it is per kind precisely so a firmware job cannot wander into
+`llm` — nor, now that `branch` has a real handler, into somebody else's repository.
 
-Every stage writes only inside the job's own `ctx.scratch_dir`, and none of them writes a job
-row: job state is the worker's, fenced on `(job_id, worker_id, attempt)`. The handoff between
-stages is a small JSON file in scratch rather than a database column, because it describes
-files on disk and dies with them.
+Every firmware stage writes only inside the job's own `ctx.scratch_dir`, and none of them
+writes a job row: job state is the worker's, fenced on `(job_id, worker_id, attempt)`. The
+handoff between stages is a small JSON file in scratch rather than a database column, because
+it describes files on disk and dies with them.
 
 Retention is enforced as the stages go, not only at the end: `unpack` deletes the firmware
 archive and every multi-GB intermediate the moment the files worth keeping are out, and
@@ -20,6 +22,8 @@ retention) is what makes the Samsung and Oppo scope affordable at all.
 """
 
 import asyncio
+import hashlib
+import importlib.metadata
 import json
 import logging
 import os
@@ -88,6 +92,19 @@ from uadclaw.deepseek import (
     DeepSeekMalformedError,
     DeepSeekUnavailableError,
 )
+from uadclaw.emission import (
+    BranchEmissionJobParams,
+    branch_name,
+    insert_entries,
+    render_pr_body,
+)
+from uadclaw.emissionstore import (
+    EmissionRecord,
+    load_approved,
+    load_emission,
+    record_commit,
+    record_intent,
+)
 from uadclaw.etcconfig import parse_config_inputs
 from uadclaw.facts import ApkFacts, ApkParseError, parse_apk
 from uadclaw.factstore import record_device_scan, store_device_facts
@@ -104,6 +121,7 @@ from uadclaw.models import Job
 from uadclaw.settings import Settings, get_settings
 from uadclaw.unpack import canonical_device_path, extract_artifacts, unpack_to_partitions
 from uadclaw.upstream import load_upstream_list
+from uadclaw.upstreamrepo import RepoState, branch_exists, emit_branch, inspect_repo
 from uadclaw.worker import StageContext, StageHandler
 
 logger = logging.getLogger(__name__)
@@ -1270,6 +1288,227 @@ async def corroborate_stage(ctx: StageContext) -> None:
         )
 
 
+async def _branch_params(ctx: StageContext) -> BranchEmissionJobParams:
+    async with ctx.session_factory() as session:
+        job = await session.get(Job, ctx.job_id)
+        params = dict(job.params) if job is not None else None
+    if params is None:
+        raise StageInputError(f"_branch_params: job {ctx.job_id} no longer exists")
+    try:
+        return BranchEmissionJobParams.model_validate(params)
+    except ValidationError as exc:
+        raise StageInputError(
+            f"_branch_params: job {ctx.job_id} carries params a branch_emission job cannot run "
+            f"from ({params!r}). It needs the vendor to emit, e.g. {{'vendor': 'pixel'}}: {exc}"
+        ) from exc
+
+
+def _pipeline_version() -> str:
+    """This package's own version, for the disclosure. Read from the installed distribution
+    because there is no `__version__` in the tree and a second copy of the number is a second
+    thing to forget to bump."""
+    return importlib.metadata.version("uadclaw")
+
+
+async def _reconcile_emission(ctx: StageContext, *, repo: Path, recorded: EmissionRecord) -> None:
+    """Recover the outcome of an emission whose recording never landed.
+
+    Reached only when this job already wrote an intent, that intent carries no commit, and the
+    branch it named is present in the clone. That combination means the git commit succeeded
+    and the write after it did not — `emit_branch` deletes the branch it created on every
+    failure path, so a rolled-back emission leaves no branch to find.
+
+    The branch's committed bytes are read back with `inspect_repo` pointed at the BRANCH, which
+    is the same public call the fresh path uses against the base ref, and compared against the
+    digest the intent recorded. Against the recorded digest and never against a freshly derived
+    batch: a reviewer approving one more package between the crash and the retry would
+    otherwise make a perfectly good branch look wrong.
+    """
+    state = await asyncio.to_thread(
+        inspect_repo, repo, base_ref=recorded.branch, list_path=recorded.list_path
+    )
+    digest = hashlib.sha256(state.list_bytes).hexdigest()
+    if digest != recorded.list_sha256:
+        raise StageInputError(
+            f"job {ctx.job_id} branch: {recorded.branch} already exists in {repo} and carries "
+            f"{recorded.list_path} at sha256 {digest}, not the {recorded.list_sha256} this "
+            "job's own emission recorded. Something else wrote that branch, or a hook rewrote "
+            "the file after the commit. Nothing was changed; inspect the branch by hand and "
+            "delete it if it is not wanted."
+        )
+    async with ctx.session_factory() as session, session.begin():
+        await record_commit(
+            session,
+            emission_id=recorded.id,
+            commit_oid=state.base_commit,
+            at=datetime.now(UTC),
+            reconciled=True,
+        )
+    logger.warning(
+        "job %s branch: %s was already committed at %s by an earlier attempt whose recording "
+        "did not land; recovered the commit rather than cutting a second branch",
+        ctx.job_id,
+        recorded.branch,
+        state.base_commit[:12],
+    )
+
+
+async def branch_stage(ctx: StageContext) -> None:
+    """Commit one vendor's approved entries onto a branch in the operator's own clone.
+
+    The pipeline's last act, and the only one that writes outside this project. Nothing here
+    pushes or authenticates — there is no GitHub credential in this stack (design decision 8)
+    — so the deliverable is a local branch plus a PR body on the emission row, and a human
+    pushes it.
+
+    **Every `upstreamrepo` call goes through `asyncio.to_thread`.** That module is synchronous
+    subprocess work by design, `GIT_TIMEOUT_SECONDS` is 120 per git call and `inspect_repo`
+    makes several, so an inline call would block the worker's event loop — heartbeat included
+    — for minutes against a clone with a wedged hook, and the job would be reclaimed out from
+    under itself.
+
+    **The whole emission is pinned to one object id.** `inspect_repo` resolves the base ref
+    once and `emit_branch` is then handed `state.base_commit` rather than the ref name, so the
+    bytes are spliced from the same blob the branch is cut from. Passing the ref twice would
+    let a `git fetch` landing between the two calls rebase the emission onto a newer commit
+    while the bytes still came from the older one, which reverts whatever arrived in between
+    and looks exactly like a correct branch.
+
+    **The intent is written and COMMITTED before a single git command runs, and this is the
+    crash-resumability decision.** The alternative — emit first, record after — was rejected
+    because of what each ordering can lose. Recording first can lose only the OUTCOME, and the
+    outcome is still readable off the clone: the branch is there or it is not, and its
+    committed bytes say whether it is ours. Emitting first loses the BATCH — which packages,
+    at which ratings, against which floors, with which body — and nothing in the clone records
+    that; worse, `emit_branch` refuses a branch that already exists, so the retry would have no
+    way to tell its own previous emission from somebody else's branch of the same name and
+    would be wedged on a refusal with no record to resolve it against. So the row goes first,
+    `commit_oid IS NULL` marks the window, and the four states a retry can meet are:
+
+    - no row: nothing happened, emit.
+    - a row with a commit: this job is done, no-op, and no second branch is cut.
+    - a row with no commit and no branch in the clone: the emission rolled back, so the intent
+      is replaced and the batch is re-derived from what is approved NOW.
+    - a row with no commit and the branch present: the commit landed and the recording did
+      not. `_reconcile_emission` recovers the oid and marks the row `reconciled`, so the row
+      says which of the two ways it got there rather than claiming the pipeline watched it.
+    """
+    settings = get_settings()
+    params = await _branch_params(ctx)
+    vendor = params.vendor
+
+    repo = settings.upstream_repo_dir
+    if repo is None:
+        raise StageInputError(
+            f"job {ctx.job_id} branch: no upstream clone is configured. Branch emission commits "
+            "into a local clone of the upstream repo (a fork is fine); clone one and set "
+            "UPSTREAM_REPO_PATH to it. Nothing else in this pipeline needs it, which is why it "
+            "is blank by default."
+        )
+    commit_sha = settings.pipeline_commit_sha.strip()
+    if not commit_sha:
+        raise StageInputError(
+            f"job {ctx.job_id} branch: PIPELINE_COMMIT_SHA is unset, so the PR body cannot say "
+            "which commit of this pipeline produced these entries. Upstream's CONTRIBUTING "
+            "requires the disclosure and the evidence bundles are only reproducible from a "
+            "named commit, so this is refused rather than emitted without it. The worker image "
+            "carries no .git: set it from the deploying checkout's `git rev-parse HEAD`."
+        )
+    list_path = settings.upstream_repo_list_path
+
+    async with ctx.session_factory() as session:
+        recorded = await load_emission(session, job_id=ctx.job_id)
+    if recorded is not None and recorded.commit_oid is not None:
+        logger.info(
+            "job %s branch: %s was already emitted at %s; nothing to do",
+            ctx.job_id,
+            recorded.branch,
+            recorded.commit_oid[:12],
+        )
+        return
+    if recorded is not None and await asyncio.to_thread(branch_exists, repo, recorded.branch):
+        await _reconcile_emission(ctx, repo=repo, recorded=recorded)
+        return
+
+    async with ctx.session_factory() as session:
+        packages = await load_approved(session, vendor=vendor)
+    if not packages:
+        raise StageInputError(
+            f"job {ctx.job_id} branch: nothing is approved under vendor {vendor!r}, so there is "
+            "no batch to emit. A branch with no diff on it is not the artifact this stage "
+            "makes; approve candidates for that vendor in triage first, and check the vendor "
+            "against a device_key's driver half rather than against a package-name prefix."
+        )
+
+    branch = branch_name(
+        prefix=settings.emission_branch_prefix, vendor=vendor, job_id=str(ctx.job_id)
+    )
+    state: RepoState = await asyncio.to_thread(
+        inspect_repo, repo, base_ref=settings.upstream_base_ref, list_path=list_path
+    )
+    new_bytes = insert_entries(state.list_bytes, packages)
+    digest = hashlib.sha256(new_bytes).hexdigest()
+    body = render_pr_body(
+        vendor=vendor,
+        packages=packages,
+        pipeline_version=_pipeline_version(),
+        commit_sha=commit_sha,
+        base_commit=state.base_commit,
+        branch=branch,
+        bundle_base_url=settings.emission_bundle_url,
+    )
+    # Upstream's own convention for a package addition, from the merged `pkg(...)` PRs rather
+    # than from this repo's commit style: the message is read by that project's maintainers.
+    message = f"pkg({vendor}): add {len(packages)} package(s)"
+
+    async with ctx.session_factory() as session, session.begin():
+        emission_id = await record_intent(
+            session,
+            job_id=ctx.job_id,
+            vendor=vendor,
+            branch=branch,
+            repo_path=state.path,
+            list_path=state.list_path,
+            base_commit=state.base_commit,
+            list_sha256=digest,
+            pipeline_version=_pipeline_version(),
+            pipeline_commit_sha=commit_sha,
+            pr_body=body,
+            packages=packages,
+            at=datetime.now(UTC),
+        )
+
+    commit_oid = await asyncio.to_thread(
+        emit_branch,
+        repo,
+        branch=branch,
+        # The resolved object id, never the ref: see the docstring. A fetch landing between
+        # the inspection above and this call would otherwise move what the branch is cut from.
+        base_ref=state.base_commit,
+        list_path=state.list_path,
+        new_bytes=new_bytes,
+        message=message,
+    )
+    async with ctx.session_factory() as session, session.begin():
+        await record_commit(
+            session,
+            emission_id=emission_id,
+            commit_oid=commit_oid,
+            at=datetime.now(UTC),
+            reconciled=False,
+        )
+    logger.info(
+        "job %s branch: emitted %d %s package(s) onto %s at %s in %s, based on %s",
+        ctx.job_id,
+        len(packages),
+        vendor,
+        branch,
+        commit_oid[:12],
+        state.path,
+        state.base_commit[:12],
+    )
+
+
 def pipeline_stage_handlers() -> dict[str, StageHandler]:
     """The stages that have real implementations, across every job kind. The worker no-ops
     any stage missing from this mapping, and `models.JOB_KIND_STAGES` decides which of them
@@ -1283,4 +1522,5 @@ def pipeline_stage_handlers() -> dict[str, StageHandler]:
         "rule_ladder": rule_ladder_stage,
         "llm": llm_stage,
         "corroborate": corroborate_stage,
+        "branch": branch_stage,
     }

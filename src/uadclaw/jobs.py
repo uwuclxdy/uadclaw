@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from uadclaw.classify import ClassificationJobParams
+from uadclaw.emission import BranchEmissionJobParams
 from uadclaw.firmware import FirmwareJobParams
 from uadclaw.models import (
     JOB_KIND_NEEDS_SCRATCH,
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 JOB_KIND_PARAM_MODELS: dict[JobKind, type[BaseModel]] = {
     JobKind.FIRMWARE_ANALYSIS: FirmwareJobParams,
     JobKind.CLASSIFICATION: ClassificationJobParams,
+    JobKind.BRANCH_EMISSION: BranchEmissionJobParams,
 }
 
 

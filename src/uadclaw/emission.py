@@ -51,6 +51,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
 from uadclaw.classify import UadList
 from uadclaw.ladder import Removal, danger_rank
 
@@ -178,6 +180,24 @@ _BUNDLE_URL_SCHEMES = ("http://", "https://")
 _UNSAFE_IN_LINK_TARGET = re.compile(r"[()\s]")
 
 
+# How much of the job's uuid goes into a branch name. Twelve hex characters is 48 bits, which
+# is not a uniqueness argument and is not meant as one — the branch only has to be unique
+# inside one clone, and a collision is REFUSED by `emit_branch` rather than silently reused, so
+# the failure mode is a visible error and not a wrong branch.
+_BRANCH_JOB_DIGITS = 12
+
+# A branch-name prefix, checked here as well as by git so the message names what to fix. git
+# has the final say — `_validate_branch_name` in `upstreamrepo` asks `check-ref-format` and
+# additionally refuses a name git EXPANDS — but a prefix carrying a space or a leading dash
+# would otherwise surface from there as a complaint about a branch name nobody typed.
+_BRANCH_PREFIX = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+
+# Anything that is not a hex digit, stripped from a job id before it becomes a branch segment.
+# A uuid arrives spelled either way (`3f2a1b9c-4d5e-...` or its `.hex`) and a dash mid-segment
+# would make a name that reads like two fields.
+_NOT_HEX = re.compile(r"[^0-9a-f]")
+
+
 class EmissionError(RuntimeError):
     """A batch could not be emitted. Bad input to emission — an approved row that is not
     shippable, or a `uad_lists.json` that is not the file it claims to be — never a bug here,
@@ -219,6 +239,72 @@ class ApprovedPackage:
     # `<driver>:<device>`, from `device_scans.device_key`. The vendor grouping reads the
     # driver half of these and nothing else.
     device_keys: tuple[str, ...]
+
+
+class BranchEmissionJobParams(BaseModel):
+    """A `branch_emission` job's target: which vendor batch to cut a branch for.
+
+    Beside the pure module for the reason `ClassificationJobParams` sits in `classify.py` and
+    `FirmwareJobParams` in `firmware.py` — the params model belongs with the vocabulary it
+    names, and here that vocabulary is the vendor `group_by_vendor` keys on.
+
+    `extra="forbid"` for the reason those two carry it: a misspelt key is a 422 at creation
+    rather than a job that claims a worker and only then discovers it was asked for something
+    else. What is validated is the vendor's SHAPE and not its existence — a driver that has
+    never scanned anything is indistinguishable here from one that does not exist, and both
+    end as "nothing approved under that vendor" at the stage, where the corpus can actually be
+    consulted. What the shape check buys is the thing shape can decide: the vendor reaches the
+    PR body as a heading and a branch name as a segment, so a newline or a slash in it is
+    refused before either.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    vendor: str = Field(min_length=1, max_length=64)
+
+    @field_validator("vendor")
+    @classmethod
+    def _is_a_vendor_name(cls, value: str) -> str:
+        # Through `_VENDOR` rather than a `pattern=` of its own, so there is one definition of
+        # what a vendor may be spelled like and `render_pr_body` cannot drift from it.
+        if not _VENDOR.fullmatch(value):
+            raise ValueError(
+                "must be a driver name or the shared marker — the driver half of a device_key, "
+                f"or {SHARED_VENDOR!r} — which is what `group_by_vendor` keys on"
+            )
+        return value
+
+
+def branch_name(*, prefix: str, vendor: str, job_id: str) -> str:
+    """The branch one job emits, derived from that job and from nothing else.
+
+    Deterministic from the JOB rather than from the batch or the date, and that is the whole
+    property: a job that is retried — a reclaim after a stale heartbeat, a worker that died
+    mid-emission — recomputes the same name, so its second attempt meets its own branch and
+    the recovery path recognises it instead of cutting a second one. A date would collide
+    between two batches for one vendor on one day, and a digest of the batch would move the
+    moment a reviewer approved one more package, which is exactly when a retry must not.
+    """
+    if not _BRANCH_PREFIX.fullmatch(prefix):
+        raise EmissionError(
+            f"branch_name: prefix {prefix!r} is not a branch-name prefix. It leads a git ref, "
+            "so it starts with a letter or digit and carries no whitespace; `uadclaw` is the "
+            "default."
+        )
+    if not _VENDOR.fullmatch(vendor):
+        raise EmissionError(
+            f"branch_name: vendor {vendor!r} is not a driver name. It becomes a segment of a "
+            "git ref, so a slash or a space in it would silently name a different branch than "
+            "the one recorded. Pass what `group_by_vendor` keyed on."
+        )
+    digits = _NOT_HEX.sub("", job_id.lower())
+    if len(digits) < _BRANCH_JOB_DIGITS:
+        raise EmissionError(
+            f"branch_name: job id {job_id!r} carries {len(digits)} hex digits, fewer than the "
+            f"{_BRANCH_JOB_DIGITS} a branch name needs. The name has to be derivable from the "
+            "job so a retry cannot cut a second branch; pass the job's uuid."
+        )
+    return f"{prefix}/{vendor}-{digits[:_BRANCH_JOB_DIGITS]}"
 
 
 def _invisible_character(value: str, *, prose: bool) -> str | None:
