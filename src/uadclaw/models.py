@@ -34,6 +34,7 @@ from uadclaw.db import Base
 class JobKind(enum.StrEnum):
     FIRMWARE_ANALYSIS = "firmware_analysis"
     CLASSIFICATION = "classification"
+    BRANCH_EMISSION = "branch_emission"
 
 
 # Whether a job kind occupies the scratch lease. FIRMWARE_ANALYSIS unpacks firmware onto
@@ -41,9 +42,14 @@ class JobKind(enum.StrEnum):
 # the DB and the network, never scratch. The requirement lives on the kind, not on the
 # worker loop, so the pool stays meaningful — a classification job runs concurrently with a
 # firmware job rather than queueing behind its lease.
+#
+# BRANCH_EMISSION writes into the OPERATOR'S git clone, which is a bind mount of its own and
+# not scratch at all. Taking the lease would queue a branch behind a multi-hour Samsung
+# unpack for a directory that unpack never touches.
 JOB_KIND_NEEDS_SCRATCH: dict[JobKind, bool] = {
     JobKind.FIRMWARE_ANALYSIS: True,
     JobKind.CLASSIFICATION: False,
+    JobKind.BRANCH_EMISSION: False,
 }
 
 
@@ -100,6 +106,12 @@ JOB_KIND_STAGES: dict[JobKind, tuple[str, ...]] = {
     # queue. It stays out of the FIRMWARE_ANALYSIS walk for the reason `llm` does — it spends
     # money, on a search quota and on the judge both.
     JobKind.CLASSIFICATION: ("llm", "corroborate"),
+    # Its own kind rather than a tail on either walk, for the reason `llm` is one: emission
+    # commits into somebody else's repository, so a human decides that a vendor batch is ready
+    # and queues it. Appending `branch` to the classification walk would cut a branch the
+    # moment a corroboration run finished, out of whatever happened to be approved at that
+    # instant, with nobody having looked.
+    JobKind.BRANCH_EMISSION: ("branch",),
 }
 
 # Bound the log tail kept on the job row; older lines fall off rather than growing the row
@@ -626,6 +638,115 @@ class PackageTriageDecision(Base):
             "action <> 'reject' OR (reason IS NOT NULL AND btrim(reason) <> '')",
             name="ck_package_triage_decision_reject_reason",
         ),
+    )
+
+
+class BranchEmission(Base):
+    """One emission run: a vendor batch committed onto a branch in the operator's own clone.
+
+    The only row in this schema that describes something OUTSIDE this project, which is what
+    shapes it. Nothing here can be recovered by re-reading this database — the branch lives in
+    a clone this pipeline does not own, a human pushes it, and once the PR is open the only
+    record of what went into it is upstream's diff. So the row is written for the question
+    asked a month later: which packages, at what ratings, against which floors, from which
+    base commit, disclosed with which body.
+
+    **`commit_oid IS NULL` means the emission's outcome is not known**, and that state is a
+    designed one rather than a corrupt row. The row is committed BEFORE the git commit is
+    attempted, so a worker killed between the two leaves exactly this: an intent whose outcome
+    is still readable off the clone. `stages.branch_stage` resolves it on the next run — see
+    that function for why the write goes first and how the outcome is recovered.
+
+    `reconciled` is how the row says which of the two ways it reached its commit oid: `false`
+    is the oid `emit_branch` returned, `true` is one a later run read back off a branch a
+    crashed run had already cut. They are not the same claim and a reader has to be able to
+    tell them apart.
+
+    `list_sha256` is the digest of the bytes handed to `emit_branch`, and it is the whole
+    reconciliation key: a branch found on disk carrying exactly those bytes is this emission's
+    branch, whatever the approved set has done since. Comparing against a re-derived batch
+    instead would refuse a perfectly good branch whenever a reviewer approved one more package
+    in the meantime.
+    """
+
+    __tablename__ = "branch_emission"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # Unique: one emission per job, which is what makes the branch name derivable from the job
+    # and a retry idempotent. SET NULL rather than CASCADE — the job row is operational and
+    # prunable, while this row describes bytes that left the box.
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    vendor: Mapped[str] = mapped_column(String(64), nullable=False)
+    branch: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Where the clone was and which file inside it, recorded rather than re-read from settings:
+    # a later reader has to know which checkout this happened in, and the setting can move.
+    repo_path: Mapped[str] = mapped_column(Text, nullable=False)
+    list_path: Mapped[str] = mapped_column(Text, nullable=False)
+    # The object id the branch was cut from, never the ref name. A ref moves; an oid does not,
+    # and the whole emission is pinned to this one so a fetch mid-run cannot rebase it.
+    base_commit: Mapped[str] = mapped_column(String(64), nullable=False)
+    list_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    pipeline_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    pipeline_commit_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    package_count: Mapped[int] = mapped_column(nullable=False)
+    # The disclosure, stored rather than written to disk. The web container has a read-only
+    # rootfs and a second on-disk copy is somewhere this row can drift out of agreement with.
+    pr_body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    commit_oid: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reconciled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        UniqueConstraint("job_id", name="uq_branch_emission_job_id"),
+        Index("ix_branch_emission_vendor", "vendor"),
+        # The pair, held in the schema for the reason the icon pair is: a row carrying a commit
+        # oid with no timestamp, or a timestamp with no oid, is a half-written outcome, and the
+        # recovery path reads `commit_oid IS NULL` as "the outcome is unknown". A future writer
+        # setting one column would make that read answer wrongly for a row that is actually
+        # finished, which is the one mistake here that ends in a second branch.
+        CheckConstraint(
+            "(commit_oid IS NULL) = (committed_at IS NULL)", name="ck_branch_emission_commit_pair"
+        ),
+        # A reconciled row is one that RECOVERED an outcome, so it must carry one. Without this
+        # the flag could be set on a pending row, where it would claim a recovery that found
+        # nothing.
+        CheckConstraint(
+            "NOT reconciled OR commit_oid IS NOT NULL", name="ck_branch_emission_reconciled_commit"
+        ),
+    )
+
+
+class BranchEmissionPackage(Base):
+    """One package that shipped in one emission, as it shipped.
+
+    A copy of values that also live on `package_classification` and `package_analysis`, and
+    that duplication is the point: those two rows are CURRENT state and get overwritten by the
+    next classification run, while this one has to answer "what exactly went into that PR"
+    after the corpus has moved on. `floor` in particular is the number the rating was checked
+    against at emission time, which is the only way to audit the check later.
+    """
+
+    __tablename__ = "branch_emission_package"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    emission_id: Mapped[int] = mapped_column(
+        ForeignKey("branch_emission.id", ondelete="CASCADE"), nullable=False
+    )
+    package: Mapped[str] = mapped_column(String(255), nullable=False)
+    bundle_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Upstream's key is `list` and the attribute cannot be: a `list:` mapped_column rebinds the
+    # name for the rest of the class body. Same rename `PackageClassification` carries.
+    uad_list: Mapped[str] = mapped_column(String(16), nullable=False)
+    removal: Mapped[str] = mapped_column(String(16), nullable=False)
+    floor: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("emission_id", "package", name="uq_branch_emission_package"),
+        Index("ix_branch_emission_package_package", "package"),
     )
 
 
