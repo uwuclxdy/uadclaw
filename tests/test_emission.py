@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from uadclaw import emission as emission_module
 from uadclaw.classify import UadList
 from uadclaw.emission import (
     DOMINANT_KEY_ORDER,
@@ -104,8 +105,18 @@ def prefix_through_last_entry(raw: bytes) -> bytes:
 
 
 def upstream_list_path() -> Path | None:
+    """The real list, or None when this box does not have it.
+
+    An override that points at nothing FAILS rather than skipping: asking for the heavy input
+    by name and silently getting the empty path back is how an operator reads a skip line as
+    normal and believes a gate ran that never did.
+    """
     override = os.environ.get("UADCLAW_HEAVY_UPSTREAM_LIST")
-    path = Path(override) if override else REPO_ROOT / "data" / "uad_lists.json"
+    if override:
+        path = Path(override)
+        assert path.is_file(), f"UADCLAW_HEAVY_UPSTREAM_LIST is set but not a file: {path}"
+        return path
+    path = REPO_ROOT / "data" / "uad_lists.json"
     return path if path.is_file() else None
 
 
@@ -209,21 +220,21 @@ def test_every_declared_list_category_is_accepted():
 @pytest.mark.parametrize("value", ["Unlisted", "recommended", "", "Safe"])
 def test_a_removal_tier_the_ladder_does_not_carry_is_refused(value: str):
     with pytest.raises(EmissionError, match="not one of"):
-        build_entry(approved("com.example.app", removal=value, floor=None))
+        build_entry(approved("com.example.app", removal=value, floor="Recommended"))
 
 
 def test_every_ladder_tier_is_accepted():
     for tier in Removal:
-        assert build_entry(approved("com.example.app", removal=str(tier), floor=None))
+        assert build_entry(approved("com.example.app", removal=str(tier), floor="Recommended"))
 
 
 def test_a_blank_description_is_refused():
-    with pytest.raises(EmissionError, match="blank description"):
+    with pytest.raises(EmissionError, match="not shippable text"):
         build_entry(approved("com.example.app", description="   "))
 
 
 def test_a_blank_package_name_is_refused():
-    with pytest.raises(EmissionError, match="not a package name"):
+    with pytest.raises(EmissionError, match="not shippable text"):
         build_entry(approved("  "))
 
 
@@ -269,7 +280,9 @@ def test_the_floor_comparison_is_not_the_enums_own_string_order():
 
 
 def test_a_floor_that_is_not_a_tier_is_refused():
-    with pytest.raises(EmissionError, match="floor"):
+    """Matched on the clause only this error carries: both floor errors say "floor", so the
+    input would decide which one fired and the assertion would not notice."""
+    with pytest.raises(EmissionError, match="A floor that cannot be read"):
         build_entry(approved("com.example.app", floor="Safe"))
 
 
@@ -281,9 +294,8 @@ def test_a_floor_that_is_not_a_tier_is_refused():
     [
         "A vendor component.\n Removing it is safe.",
         "A vendor component. \nRemoving it is safe.",
-        "A vendor component.\n\tRemoving it is safe.",
-        "A vendor component.\t\nRemoving it is safe.",
         "A vendor component.\n\xa0Removing it is safe.",
+        "A vendor component.\xa0\nRemoving it is safe.",
     ],
 )
 def test_whitespace_next_to_a_newline_refuses_the_batch_naming_the_substring(description: str):
@@ -572,13 +584,318 @@ def test_render_pr_body_applies_the_same_gate_as_the_file_writer():
         body(packages=[approved("com.a", removal="Recommended", floor="Unsafe")])
 
 
-def test_a_pipe_in_a_package_name_cannot_end_the_table_row_early():
-    rendered = body(packages=[approved("com.a|evil")])
-    row = next(line for line in rendered.splitlines() if line.startswith("| `com.a"))
-    assert row.count("|") - row.count("\\|") == 5
-
-
 def test_the_body_is_the_same_string_twice():
     """No clock and no run-scoped id anywhere in emission, the same property `bundle.py` rests
     on: two runs over one approved batch produce one document."""
     assert body() == body()
+
+
+# --- the batch is walked more than once ----------------------------------------------------
+
+
+def test_a_one_shot_iterable_emits_every_entry_rather_than_none():
+    """`Sequence` is an annotation with no gate behind it and this repo runs no type checker,
+    so a generator is what the first real caller writes. Walked more than once it used to go
+    empty after the first pass and splice a trailing comma and no entries — invalid JSON, no
+    exception, discovered whenever somebody next loaded the file."""
+    out = insert_entries(FIXTURE, (item for item in [approved("com.p"), approved("com.q")]))
+    parsed = json.loads(out)
+    assert {"com.p", "com.q"} <= set(parsed)
+
+
+def test_render_pr_body_also_accepts_a_one_shot_iterable():
+    rendered = body(packages=(item for item in [approved("com.p"), approved("com.q")]))
+    assert "`com.p`" in rendered
+    assert "`com.q`" in rendered
+
+
+def test_output_that_does_not_parse_is_refused_rather_than_returned(monkeypatch):
+    """The self-check exists because "correct by construction" is an argument. Driven by
+    breaking the renderer, which is the bug class it is a backstop for."""
+    monkeypatch.setattr(emission_module, "_render_entry", lambda item, newline: '  "com.p": {')
+    with pytest.raises(EmissionError, match="does not parse"):
+        insert_entries(FIXTURE, [approved("com.p")])
+
+
+def test_output_carrying_the_wrong_entries_is_refused_rather_than_returned(monkeypatch):
+    monkeypatch.setattr(emission_module, "_render_entry", lambda item, newline: '  "com.other": {}')
+    with pytest.raises(EmissionError, match="exactly the entries"):
+        insert_entries(FIXTURE, [approved("com.p")])
+
+
+# --- text that must never reach somebody else's repository ---------------------------------
+
+
+@pytest.mark.parametrize("field", ["package", "description", "labels", "dependencies"])
+def test_an_unpaired_surrogate_is_refused_as_an_emission_error(field: str):
+    """androguard decodes manifest strings out of AXML's UTF-16, so a lone surrogate is
+    reachable. It used to reach `str.encode` and raise `UnicodeEncodeError`, which is not an
+    `EmissionError` and escapes a caller that wraps this stage in one."""
+    package = (
+        approved("com.a\ud800b")
+        if field == "package"
+        else approved(
+            "com.a",
+            **{
+                "description": {"description": "A vendor component \ud800 does a thing."},
+                "labels": {"labels": ("lab\ud800",)},
+                "dependencies": {"dependencies": ("com.dep\ud800",)},
+            }[field],
+        )
+    )
+    with pytest.raises(EmissionError, match="unpaired surrogate"):
+        insert_entries(FIXTURE, [package])
+
+
+@pytest.mark.parametrize("bad", ["\x00", "\x07", "\x1b", "\r"])
+def test_a_control_character_in_a_description_is_refused(bad: str):
+    """`_CONTROL_CHARACTERS` states the reason itself — it stays valid JSON and invisible in a
+    diff — and that argument is strictest for the description, the entry's whole content."""
+    with pytest.raises(EmissionError, match="control character"):
+        insert_entries(FIXTURE, [approved("com.a", description=f"A vendor{bad}component here.")])
+
+
+def test_a_newline_in_a_label_is_refused():
+    """A label is an identifier, so it gets the identifier's check rather than the prose one."""
+    with pytest.raises(EmissionError, match="control character"):
+        insert_entries(FIXTURE, [approved("com.a", labels=("one\ntwo",))])
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"dependencies": (" com.dep",)},
+        {"needed_by": ("com.dep ",)},
+        {"labels": (" lab ",)},
+    ],
+)
+def test_a_whitespace_padded_identifier_is_refused(overrides: dict[str, object]):
+    """0 of the 5372 live keys and 0 of the 84 live dependency names carry padding, measured
+    2026-08-13. It reads identically in a diff and is a different key to every exact-string
+    check here, which is how it walks past the already-carried guard."""
+    with pytest.raises(EmissionError, match="padded with whitespace"):
+        insert_entries(FIXTURE, [approved("com.a", **overrides)])
+
+
+def test_a_whitespace_padded_package_name_is_refused():
+    with pytest.raises(EmissionError, match="padded with whitespace"):
+        insert_entries(FIXTURE, [approved(" com.a ")])
+
+
+def test_a_padded_name_cannot_slip_past_the_already_carried_guard():
+    """The sharp end of the padding rule: the guard compares by exact string, so `"com.x "` is
+    not `"com.x"` and upstream would take a second key that renders identically."""
+    raw = b'{\n  "com.felica": {\n    "list": "Oem"\n  }\n}\n'
+    with pytest.raises(EmissionError, match="padded with whitespace"):
+        insert_entries(raw, [approved("com.felica ")])
+
+
+@pytest.mark.parametrize(
+    "key", [" pixel:oriole", "pixel :oriole", "pixel: oriole", "pixel:oriole "]
+)
+def test_a_padded_device_key_is_refused(key: str):
+    """`" pixel"` and `"pixel"` are two vendors, so one OEM's batch would split across two
+    branches and neither `insert_entries` call would ever see the other's packages."""
+    with pytest.raises(EmissionError, match="device key"):
+        vendor_for((key,))
+
+
+def test_a_short_description_a_human_wrote_is_not_refused():
+    """`classify.py`'s 20-600 window is the MODEL's generation budget, interpolated into the
+    prompt, and it is addressed to a stage that runs before the triage edit this boundary runs
+    after. 231 live entries sit under 20 characters and 88 over 600, so enforcing it here would
+    refuse a reviewer's own approved text for a rule upstream's file does not keep."""
+    out = insert_entries(FIXTURE, [approved("com.a", description="Font.")])
+    assert json.loads(out)["com.a"]["description"] == "Font."
+
+
+def test_a_long_description_a_human_expanded_is_not_refused():
+    long_enough = "A genuinely complicated package. " * 25
+    assert len(long_enough) > 600
+    out = insert_entries(FIXTURE, [approved("com.a", description=long_enough)])
+    assert json.loads(out)["com.a"]["description"] == long_enough
+
+
+def test_a_description_past_the_sanity_ceiling_is_refused():
+    """A ceiling on untrusted bytes rather than an editorial rule: upstream's longest is 1513,
+    so anything past this is a manifest string that ran away."""
+    with pytest.raises(EmissionError, match="over the 4096 ceiling"):
+        insert_entries(FIXTURE, [approved("com.a", description="x" * 4097)])
+
+
+def test_an_absurd_number_of_dependencies_is_refused():
+    """The busiest live entry has 7."""
+    with pytest.raises(EmissionError, match="over the"):
+        insert_entries(
+            FIXTURE, [approved("com.a", dependencies=tuple(f"com.d{n}" for n in range(65)))]
+        )
+
+
+def test_a_name_longer_than_the_ceiling_is_refused():
+    with pytest.raises(EmissionError, match="over the 255 ceiling"):
+        insert_entries(FIXTURE, [approved("com." + "a" * 256)])
+
+
+# --- the floor is not optional -------------------------------------------------------------
+
+
+def test_a_package_with_no_floor_cannot_ship_unchecked():
+    """`floor` is `str` rather than `str | None` on purpose. The guard that used to wrap this
+    comparison skipped it entirely for exactly the packages whose `rule_ladder` never ran, so
+    their rating was emitted with nothing checking it."""
+    with pytest.raises(EmissionError, match="A floor that cannot be read"):
+        build_entry(approved("com.a", floor=None))
+
+
+def test_the_floor_check_has_no_reachable_bypass():
+    """Enumerated from the dataclass rather than from the call I happened to think of: every
+    tier below `Unsafe` must refuse against an `Unsafe` floor, through every public writer."""
+    for tier in Removal:
+        package = approved("com.a", removal=str(tier), floor="Unsafe")
+        if tier is Removal.UNSAFE:
+            assert build_entry(package)
+            continue
+        for writer in (
+            lambda p: build_entry(p),
+            lambda p: insert_entries(FIXTURE, [p]),
+            lambda p: body(packages=[p]),
+        ):
+            with pytest.raises(EmissionError, match="against a computed floor"):
+                writer(package)
+
+
+# --- markdown a stranger reads and clicks --------------------------------------------------
+
+
+def row_cells(row: str) -> list[str]:
+    """Split a GFM table row the way the spec does: on pipes that are not backslash-escaped."""
+    cells: list[str] = []
+    current = ""
+    escaped = False
+    for char in row:
+        if escaped:
+            current += "|" if char == "|" else "\\" + char
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "|":
+            cells.append(current)
+            current = ""
+        else:
+            current += char
+    cells.append(current)
+    return cells
+
+
+def package_row(rendered: str) -> str:
+    """The one table row for the package under test, never the provenance table's header."""
+    rows = [line for line in rendered.splitlines() if line.startswith("| ") and "com." in line]
+    assert len(rows) == 1, f"expected one package row, got {len(rows)}"
+    return rows[0]
+
+
+def code_span_content(cell: str) -> str:
+    """The text inside a code span, asserting the span actually closes where it should."""
+    text = cell.strip()
+    fence = text[: len(text) - len(text.lstrip("`"))]
+    assert fence, f"not a code span: {cell!r}"
+    assert text.endswith(fence), f"span does not close with its own fence: {cell!r}"
+    inner = text[len(fence) : -len(fence)]
+    assert fence not in inner, (
+        f"the fence run appears inside the span, so it closes early: {cell!r}"
+    )
+    return inner[1:-1] if inner.startswith(" ") and inner.endswith(" ") else inner
+
+
+@pytest.mark.parametrize("bad", ["|", "\\", "`", "``", "a`b``c", "[t](http://x)"])
+def test_every_character_the_cell_layer_handles_is_pinned(bad: str):
+    """One case per character `_cell`/`_code` claim to handle. Deleting any one of those
+    replacements has to red something; an escaping function with one pinned character is an
+    escaping function with two unpinned ones."""
+    name = f"com.a{bad}b"
+    rendered = body(packages=[approved(name)])
+    row = package_row(rendered)
+    cells = row_cells(row)
+    assert len(cells) == 6, f"row split into {len(cells) - 2} columns: {row!r}"
+    assert code_span_content(cells[1]) == name
+
+
+@pytest.mark.parametrize("bad", ["\n", "\r", "\r\n"])
+def test_a_line_ending_in_a_value_cannot_end_the_table_row(bad: str):
+    """CommonMark treats a bare `\\r` as a line ending too, so it splits a row exactly like a
+    `\\n` and every column after it falls out of the table. Asserted against the same body
+    built from a clean value, so the control varies the one dimension under test."""
+    clean = body(packages=[approved("com.a"), approved("com.b", model="model")])
+    dirty = body(packages=[approved("com.a"), approved("com.b", model=f"m{bad}odel")])
+    table_lines = [line for line in dirty.splitlines() if line.startswith("| ")]
+    assert len(table_lines) == len([line for line in clean.splitlines() if line.startswith("| ")])
+    assert "`m odel`" in dirty
+
+
+def test_a_backtick_in_a_package_name_cannot_open_a_link():
+    """The whole reason `_code` sizes its fence: a name spelled with a backtick used to close
+    the span wrapping it, and the rest rendered as a real link a maintainer clicks."""
+    name = "com.a`[CLICK ME](https://phish.example)`b"
+    rendered = body(packages=[approved(name)])
+    row = package_row(rendered)
+    assert code_span_content(row_cells(row)[1]) == name
+
+
+def test_a_pipe_in_a_package_name_cannot_end_the_table_row_early():
+    rendered = body(packages=[approved("com.a|evil")])
+    assert len(row_cells(package_row(rendered))) == 6
+
+
+def test_a_backslash_in_a_package_name_is_not_doubled():
+    """A code span does not process backslash escapes, so doubling one renders a name the
+    package does not have — a wrong claim in a document going to another repository."""
+    rendered = body(packages=[approved("com.a\\b")])
+    assert code_span_content(row_cells(package_row(rendered))[1]) == "com.a\\b"
+
+
+@pytest.mark.parametrize(
+    "bad", ["pixel|x\n## INJECTED HEADING", "  ", "", "pixel devices", "../etc", "pi`xel"]
+)
+def test_a_vendor_that_is_not_a_driver_name_is_refused(bad: str):
+    """It reaches the body as a heading, where a newline in it writes a heading of its own
+    inside the disclosure section."""
+    with pytest.raises(EmissionError, match="not a driver name"):
+        body(vendor=bad)
+
+
+@pytest.mark.parametrize("good", ["pixel", "samsung", SHARED_VENDOR, "oppo", "nothing"])
+def test_every_real_driver_name_is_accepted_as_a_vendor(good: str):
+    assert body(vendor=good).startswith(f"## {good}: ")
+
+
+@pytest.mark.parametrize("bad", ["https://a.example/x)y", "https://a.example/a b", "https://a(x"])
+def test_a_bundle_base_url_that_would_break_its_own_link_is_refused(bad: str):
+    """A `)` closes the link target early and drops the rest of the URL into the page as
+    text, so the link a maintainer clicks is not the one the operator configured."""
+    with pytest.raises(EmissionError, match="bracket or whitespace"):
+        body(bundle_base_url=bad)
+
+
+# --- line endings --------------------------------------------------------------------------
+
+
+def test_entries_appended_to_a_crlf_document_use_crlf():
+    """The old bytes survived either way, but "indented like their neighbours" includes the
+    line ending, and silently mixing them turns the next normalisation into a whole-file diff."""
+    raw = b'{\r\n  "com.x": {\r\n    "list": "Oem"\r\n  }\r\n}\r\n'
+    out = insert_entries(raw, [approved("com.a")])
+    assert out.startswith(prefix_through_last_entry(raw))
+    assert out.count(b"\n") == out.count(b"\r\n")
+    assert json.loads(out)["com.a"]["list"] == "Oem"
+
+
+def test_entries_appended_to_an_lf_document_stay_lf():
+    """The live file is pure LF, measured 2026-08-13: 0 CRLF against 43199 LF."""
+    out = insert_entries(FIXTURE, [approved("com.a")])
+    assert b"\r" not in out
+
+
+def test_a_document_already_mixing_line_endings_is_refused():
+    raw = b'{\r\n  "com.x": {\n    "list": "Oem"\r\n  }\n}\r\n'
+    with pytest.raises(EmissionError, match="mixes CRLF"):
+        insert_entries(raw, [approved("com.a")])

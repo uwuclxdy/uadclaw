@@ -27,9 +27,15 @@ Three more things shape the module:
   naming the package. The description is what a human approved in triage, so the fix belongs
   to that human via a triage edit rather than to a silent rewrite here, and a rating below its
   floor came from misreading the same evidence the description was written from.
-- **`_validate` is the one seam.** Both public writers (`build_entry`, `insert_entries`) pass
-  through it, so no caller can be the one that forgets — the same shape `classifystore._upsert`
-  uses to make the floor structural rather than remembered.
+- **`_validate` is the one seam, and `insert_entries` re-reads its own output.** All three
+  public writers pass through `_validate`, so no caller can be the one that forgets — the same
+  shape `classifystore._upsert` uses to make the floor structural rather than remembered. The
+  splice then re-parses what it is about to return and compares it against the mapping that
+  went in plus the entries asked for, because "correct by construction" is an argument and
+  this is the one function here that could hand back a corrupt `uad_lists.json`.
+- **The PR body is markdown a stranger reads and clicks.** Package names come out of
+  downloaded firmware, so every free string in it is fenced as a code span sized to its own
+  content, and `vendor` is refused rather than escaped — see `_code` and `_VENDOR`.
 """
 
 import json
@@ -74,17 +80,62 @@ _JSON_WHITESPACE = " \t\n\r"
 # 2026-08-13, the space-only spelling finds 42 violating entries and this one finds 43.
 _WHITESPACE_NEXT_TO_NEWLINE = re.compile(r"[^\S\n]\n|\n[^\S\n]")
 
-# Control characters, refused in any name this module writes as a JSON key or into a name
-# array. `json.dumps` would escape them into valid JSON, which is the problem: the file stays
-# parseable and a human reviewing the PR cannot see what they are approving.
+# Control characters, refused in every string this module writes into the file. `json.dumps`
+# would escape them into valid JSON, which is the problem: the file stays parseable and a
+# human reviewing the PR cannot see what they are approving. The description gets the second
+# pattern, which spares `\n` alone — a newline is legal and common there, and 3 of the 5308
+# live descriptions carry a tab, so this refuses a shape upstream tolerates. It refuses it for
+# the reason above: nobody reviewing a diff can see a tab.
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+_CONTROL_CHARACTERS_ALLOWING_NEWLINE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+
+# A UTF-16 surrogate with no pair. `json.dumps` passes one straight through and `str.encode`
+# then raises `UnicodeEncodeError`, which is not an `EmissionError` and would escape a caller
+# that wraps this stage in one. Reachable rather than theoretical: manifest strings are
+# decoded from AXML's UTF-16 by androguard, which is where a lone surrogate is produced.
+_LONE_SURROGATE = re.compile(r"[\ud800-\udfff]")
 
 # A bundle hash as `bundle.bundle_sha256` spells it.
 _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
 
+# Sanity ceilings on untrusted bytes, and deliberately NOT editorial rules. Every one is set
+# far above what upstream actually carries, measured 2026-08-13 over the live file: longest
+# description 1513 characters, longest key 81, longest dependency name 40, at most 7
+# dependencies and 2 `neededBy` on any one entry, at most 1 label. They exist to refuse a
+# manifest string that ran away, not to judge an entry.
+#
+# `classify.DESCRIPTION_MIN_CHARS`/`DESCRIPTION_MAX_CHARS` (20/600) are deliberately NOT the
+# source. Those are the MODEL's generation budget — `classify.py` interpolates them into the
+# prompt as an instruction to DeepSeek — and they are addressed to a stage that runs BEFORE
+# the human triage edit this boundary runs after. 319 of the 5308 live descriptions break
+# them, so a reviewer who tightens a description to "Xiaomi cloud sync service." or expands
+# one past 600 to explain a genuinely complicated package would have their approved text
+# refuse the whole batch here, for a rule upstream's own file does not keep. There is no
+# minimum at all for the same reason: blank is already refused above, and 231 live entries
+# sit under 20 characters.
+_MAX_DESCRIPTION_CHARS = 4096
+_MAX_NAME_CHARS = 255
+_MAX_NAMES_PER_FIELD = 64
+
+# Everything markdown reads as a line ending, collapsed to a space inside a table cell. `\r`
+# alone is one to CommonMark, so a bare carriage return splits the row exactly like `\n`. A
+# RUN collapses to a single space rather than one space per character: a CRLF is ONE line
+# ending, and rendering it as two spaces misstates the value it came from.
+_MARKDOWN_LINE_BREAK = re.compile(r"[\r\n\x0b\x0c\x85  ]+")
+
+# A vendor is the driver half of a `device_key` or `SHARED_VENDOR`, so it is a registry name
+# from `firmware.py` rather than free text. Refused rather than escaped when it is not one: a
+# vendor that would need escaping did not come from the registry, and it reaches the PR body
+# as a heading where an injected `\n##` writes a heading of its own.
+_VENDOR = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
 # The schemes a bundle base URL may carry. Operator configuration rather than third-party
 # input, but it is rendered into a link in a document a stranger clicks.
 _BUNDLE_URL_SCHEMES = ("http://", "https://")
+
+# What cannot appear raw in a markdown link target: `)` closes it early and drops the rest of
+# the URL into the page as text, and whitespace ends it the same way.
+_UNSAFE_IN_LINK_TARGET = re.compile(r"[()\s]")
 
 
 class EmissionError(RuntimeError):
@@ -113,9 +164,16 @@ class ApprovedPackage:
     needed_by: tuple[str, ...]
     labels: tuple[str, ...]
     removal: str
-    # The ladder's computed lower bound, or None when none was recorded. Carried so emission
-    # can refuse a rating that fell under it; see `_validate`.
-    floor: str | None
+    # The ladder's computed lower bound. NOT optional, deliberately: a package whose
+    # `rule_ladder` never ran has no bound for a rating to sit above, so there is nothing here
+    # to check it against and an `ApprovedPackage` for it must not exist. Making it `str`
+    # rather than guarding on None moves that refusal onto the lane that builds these from
+    # `package_analysis`, whose `floor` column IS nullable — the same shape `ladder.py` uses to
+    # make lowering unrepresentable instead of merely forbidden. `Recommended` here means "the
+    # ladder ran and nothing fired", never "no ladder result": it is `danger_rank` 0, so a
+    # caller writing `floor=row.floor or "Recommended"` gets a floor that is structurally
+    # present, semantically absent, and reads exactly like the safe version.
+    floor: str
     bundle_sha256: str
     model: str
     # `<driver>:<device>`, from `device_scans.device_key`. The vendor grouping reads the
@@ -123,19 +181,56 @@ class ApprovedPackage:
     device_keys: tuple[str, ...]
 
 
-def _check_name(value: object, *, subject: str, field: str) -> str:
-    """One package name, as a key or as an element of `dependencies`/`neededBy`."""
+def _check_text(value: object, *, subject: str, field: str, prose: bool = False) -> str:
+    """One string this module writes into `uad_lists.json`, whatever field it came from.
+
+    One seam for every one of them rather than a check per field: a name, a label and a
+    description are all UTF-8 that ends up in somebody else's repository, and the ways that
+    goes wrong (blank, invisible, unencodable) do not vary by which key it lands under.
+
+    `prose` is the one axis that does, and it is the identifier/prose split rather than a
+    per-field exception. An identifier admits no newline and no surrounding whitespace; prose
+    admits both. Measured 2026-08-13 over the live file, which decides it rather than taste:
+    0 of the 5372 keys and 0 of the 84 dependency names carry surrounding whitespace, against
+    1096 of the 5308 descriptions. Padding on an identifier is refused because it is invisible
+    in a diff AND because it walks past the `already carried` check — `" com.x"` is not
+    `"com.x"` by exact string, so upstream would take a second key rendering identically.
+    """
     if not isinstance(value, str) or not value.strip():
         raise EmissionError(
-            f"{subject}: {field} is {value!r}, which is not a package name. Upstream reads "
+            f"{subject}: {field} is {value!r}, which is not shippable text. Upstream reads "
             "these as `String`, and a blank one becomes an entry nobody can look up."
         )
-    found = _CONTROL_CHARACTERS.search(value)
+    if not prose and value != value.strip():
+        raise EmissionError(
+            f"{subject}: {field} {value!r} is padded with whitespace. It reads identically to "
+            "the unpadded name in a diff and is a different key to every exact-string check "
+            "here, so it would slip past the already-carried guard and add a second entry for "
+            "one package; fix the triage row rather than trimming it on the way out."
+        )
+    pattern = _CONTROL_CHARACTERS_ALLOWING_NEWLINE if prose else _CONTROL_CHARACTERS
+    found = pattern.search(value)
     if found is not None:
         raise EmissionError(
             f"{subject}: {field} {value!r} carries the control character "
             f"{found.group()!r}. It would be escaped into valid JSON and stay invisible to "
             "the reviewer reading the PR, so it is refused; fix it in triage."
+        )
+    surrogate = _LONE_SURROGATE.search(value)
+    if surrogate is not None:
+        raise EmissionError(
+            f"{subject}: {field} {value!r} carries the unpaired surrogate "
+            f"{surrogate.group()!r}, which is not encodable as UTF-8. It comes from a manifest "
+            "string androguard decoded out of AXML's UTF-16; re-extract the package's facts, "
+            "or drop it from the batch."
+        )
+    ceiling = _MAX_DESCRIPTION_CHARS if prose else _MAX_NAME_CHARS
+    if len(value) > ceiling:
+        raise EmissionError(
+            f"{subject}: {field} is {len(value)} characters, over the {ceiling} ceiling. That "
+            "is a sanity bound on untrusted bytes rather than an editorial one — the longest "
+            "description upstream carries is 1513 — so a value past it is a manifest string "
+            "that ran away rather than an entry somebody wrote."
         )
     return value
 
@@ -147,7 +242,7 @@ def _validate(package: ApprovedPackage, *, subject: str) -> None:
     first thing wrong rather than a consequence of it: the tiers are parsed before the floor
     is compared against one.
     """
-    _check_name(package.package, subject=subject, field="package")
+    _check_text(package.package, subject=subject, field="package")
     name = package.package
 
     if package.uad_list not in tuple(UadList):
@@ -164,11 +259,7 @@ def _validate(package: ApprovedPackage, *, subject: str) -> None:
             "android-debloat-list as well as uad-ng, so a tier nobody defined is refused."
         )
 
-    if not package.description.strip():
-        raise EmissionError(
-            f"{subject}: {name} has a blank description. The description is the entry's whole "
-            "content and the thing the corroboration bar is about; there is nothing to ship."
-        )
+    _check_text(package.description, subject=subject, field=f"{name}'s description", prose=True)
     offender = _WHITESPACE_NEXT_TO_NEWLINE.search(package.description)
     if offender is not None:
         raise EmissionError(
@@ -179,33 +270,35 @@ def _validate(package: ApprovedPackage, *, subject: str) -> None:
             "triage and re-emit."
         )
 
-    if package.floor is not None:
-        if package.floor not in tuple(Removal):
-            raise EmissionError(
-                f"{subject}: {name} carries floor {package.floor!r}, which is not one of "
-                f"{', '.join(Removal)}. A floor that cannot be read cannot bound anything; "
-                "re-run the rule_ladder stage over this corpus."
-            )
-        if danger_rank(Removal(package.removal)) < danger_rank(Removal(package.floor)):
-            raise EmissionError(
-                f"{subject}: {name} is rated {package.removal} against a computed floor of "
-                f"{package.floor}. Raising it to the floor here would keep the misreading that "
-                "produced it and hide it behind a corrected number, so the batch is refused; "
-                "re-classify the package or record a human decision at or above the floor."
-            )
+    # Unguarded on purpose. An earlier revision skipped the whole comparison when `floor` was
+    # None, which emitted an unchecked rating for exactly the packages whose ladder never ran.
+    if package.floor not in tuple(Removal):
+        raise EmissionError(
+            f"{subject}: {name} carries floor {package.floor!r}, which is not one of "
+            f"{', '.join(Removal)}. A floor that cannot be read cannot bound anything; "
+            "re-run the rule_ladder stage over this corpus."
+        )
+    if danger_rank(Removal(package.removal)) < danger_rank(Removal(package.floor)):
+        raise EmissionError(
+            f"{subject}: {name} is rated {package.removal} against a computed floor of "
+            f"{package.floor}. Raising it to the floor here would keep the misreading that "
+            "produced it and hide it behind a corrected number, so the batch is refused; "
+            "re-classify the package or record a human decision at or above the floor."
+        )
 
     for field_name, values in (
         ("dependencies", package.dependencies),
         ("neededBy", package.needed_by),
+        ("labels", package.labels),
     ):
-        for value in values:
-            _check_name(value, subject=subject, field=f"{name}'s {field_name} entry")
-    for label in package.labels:
-        if not isinstance(label, str) or not label.strip():
+        if len(values) > _MAX_NAMES_PER_FIELD:
             raise EmissionError(
-                f"{subject}: {name} carries the label {label!r}. Upstream reads `labels` as "
-                "`Vec<String>`, so a blank or non-string element fails its serde round-trip."
+                f"{subject}: {name} carries {len(values)} {field_name} entries, over the "
+                f"{_MAX_NAMES_PER_FIELD} ceiling. The busiest live entry has 7; a package with "
+                "hundreds is a corpus-graph bug rather than an entry to ship."
             )
+        for value in values:
+            _check_text(value, subject=subject, field=f"{name}'s {field_name} entry")
 
     if not _SHA256.fullmatch(package.bundle_sha256):
         raise EmissionError(
@@ -233,13 +326,25 @@ def _vendor(device_keys: Sequence[str], *, subject: str) -> str:
     drivers: set[str] = set()
     for key in device_keys:
         driver, separator, device = key.partition(":")
-        if not separator or not driver or not device:
+        # Padding is refused on both halves for the reason `_check_text` states, plus one this
+        # function owns: `" pixel"` and `"pixel"` are two vendors, so one OEM's batch would
+        # split across two branches and neither `insert_entries` call would see the other's.
+        if (
+            not separator
+            or not driver
+            or not device
+            or driver != driver.strip()
+            or device != device.strip()
+        ):
             raise EmissionError(
                 f"{subject}: {key!r} is not a `<driver>:<device>` device key. The vendor a "
                 "branch is filed under is read off that prefix and nothing else, so a key "
-                "with no driver half would file the package under a vendor nobody wrote; fix "
-                "the device_scans row rather than guessing from the package name."
+                "with no driver half, or one padded so it reads as a second vendor, would "
+                "file the package under a vendor nobody wrote; fix the device_scans row "
+                "rather than guessing from the package name."
             )
+        _check_text(driver, subject=subject, field=f"the driver half of {key!r}")
+        _check_text(device, subject=subject, field=f"the device half of {key!r}")
         drivers.add(driver)
     return next(iter(drivers)) if len(drivers) == 1 else SHARED_VENDOR
 
@@ -301,20 +406,41 @@ def build_entry(package: ApprovedPackage) -> dict[str, Any]:
     return _entry(package)
 
 
-def _render_entry(package: ApprovedPackage) -> str:
+def _render_entry(package: ApprovedPackage, newline: str) -> str:
     """One entry as the text that goes into the file, in the file's own style.
 
     `ensure_ascii=False` because the live file's own convention is raw UTF-8: measured
     2026-08-13 it carries 118 non-ASCII characters (curly quotes, a `™`, non-breaking hyphens)
     and zero `\\uXXXX` escapes, so escaping would make every new entry the odd one out.
     """
-    body = ",\n".join(
+    body = f",{newline}".join(
         f"{_FIELD_INDENT}{json.dumps(key, ensure_ascii=False)}: "
         f"{json.dumps(value, ensure_ascii=False)}"
         for key, value in _entry(package).items()
     )
     key = json.dumps(package.package, ensure_ascii=False)
-    return f"{_KEY_INDENT}{key}: {{\n{body}\n{_KEY_INDENT}}}"
+    return f"{_KEY_INDENT}{key}: {{{newline}{body}{newline}{_KEY_INDENT}}}"
+
+
+def _document_newline(text: str) -> str:
+    """The line ending the document already uses, so appended entries match their neighbours.
+
+    Three cases and only three: no `\\r\\n` at all is LF (the live file, measured 2026-08-13:
+    0 CRLF against 43199 LF), every `\\n` preceded by `\\r` is CRLF, and anything between is a
+    document already mixed, which is refused rather than guessed at — picking either ending
+    for a mixed file makes the next person's normalisation a whole-file diff.
+    """
+    carriage_returns = text.count("\r\n")
+    if carriage_returns == 0:
+        return "\n"
+    if carriage_returns == text.count("\n"):
+        return "\r\n"
+    raise EmissionError(
+        "insert_entries: the current uad_lists.json mixes CRLF and bare LF line endings "
+        f"({carriage_returns} CRLF against {text.count(chr(10))} LF total). Appending in "
+        "either ending would leave it mixed and turn the next normalisation into a whole-file "
+        "diff; normalise the file in its own commit first, then re-emit."
+    )
 
 
 def insert_entries(raw: bytes, packages: Sequence[ApprovedPackage]) -> bytes:
@@ -333,8 +459,19 @@ def insert_entries(raw: bytes, packages: Sequence[ApprovedPackage]) -> bytes:
     The insertion point is then the last non-whitespace character before that brace, so the new
     entries follow the last entry's own line rather than the file's closing indentation, and
     the whitespace that separated the last entry from the brace is preserved ahead of it.
+
+    **The result is re-parsed before it is returned.** The splice being correct by construction
+    is an argument, and this is the one function in this repo that can hand back a corrupt
+    `uad_lists.json`, so it carries a structural guarantee instead: the bytes going out parse,
+    and they parse to exactly the mapping that went in plus exactly the entries asked for.
+    Measured 2026-08-13 against the real 1.6 MB file, the whole check costs 46 ms — nothing
+    against a stage whose input arrived as a multi-GB firmware image.
     """
-    if not packages:
+    # Materialized once because this function walks the batch four times. A generator handed in
+    # would be empty by the second walk, and the failure is silent: the collision check and the
+    # rendering both see nothing, and the splice writes a trailing comma and no entries.
+    items = tuple(packages)
+    if not items:
         raise EmissionError(
             "insert_entries: no packages to insert. An empty batch would rewrite the file's "
             "final bytes for no content change and commit an empty diff; whether a vendor "
@@ -342,7 +479,7 @@ def insert_entries(raw: bytes, packages: Sequence[ApprovedPackage]) -> bytes:
         )
 
     seen: set[str] = set()
-    for item in packages:
+    for item in items:
         if item.package in seen:
             raise EmissionError(
                 f"insert_entries: {item.package} appears twice in one batch. Two members with "
@@ -392,7 +529,7 @@ def insert_entries(raw: bytes, packages: Sequence[ApprovedPackage]) -> bytes:
             "usual cause is two files concatenated."
         )
 
-    already = sorted(item.package for item in packages if item.package in parsed)
+    already = sorted(item.package for item in items if item.package in parsed)
     if already:
         raise EmissionError(
             f"insert_entries: {', '.join(already)} already carried in uad_lists.json. An "
@@ -401,19 +538,60 @@ def insert_entries(raw: bytes, packages: Sequence[ApprovedPackage]) -> bytes:
             "the list, which is what decides the additions queue."
         )
 
+    newline = _document_newline(text)
     closing = end - 1
     last = closing - 1
     while last >= start and text[last] in _JSON_WHITESPACE:
         last -= 1
     gap = text[last + 1 : closing]
-    rendered = ",\n".join(_render_entry(item) for item in packages)
-    return f"{text[: last + 1]},\n{rendered}{gap}}}{trailing}".encode()
+    rendered = f",{newline}".join(_render_entry(item, newline) for item in items)
+    spliced = f"{text[: last + 1]},{newline}{rendered}{gap}}}{trailing}"
+
+    expected = {**parsed, **{item.package: _entry(item) for item in items}}
+    try:
+        reparsed, _ = json.JSONDecoder().raw_decode(spliced, start)
+    except json.JSONDecodeError as exc:
+        raise EmissionError(
+            f"insert_entries: the spliced document does not parse ({exc}). That is this "
+            "module's own output and therefore a bug here rather than bad input; the file on "
+            "disk has not been touched. Report it with the batch that produced it."
+        ) from exc
+    if reparsed != expected:
+        raise EmissionError(
+            "insert_entries: the spliced document does not carry exactly the entries that "
+            "went in plus the ones asked for. That is this module's own output and therefore "
+            "a bug here rather than bad input; the file on disk has not been touched."
+        )
+    return spliced.encode()
 
 
 def _cell(value: str) -> str:
-    """One markdown table cell. A package name and a label come out of downloaded firmware, so
-    a `|` in one would end the row early and silently drop every column after it."""
-    return value.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
+    """One markdown table cell's text. A package name comes out of downloaded firmware, so a
+    `|` in one would end the row early and silently drop every column after it, and any line
+    ending would end the row outright.
+
+    Deliberately no backslash doubling. GFM resolves `\\|` while it splits the row, before any
+    inline parsing, so the pipe escape survives into a code span — but a code span does not
+    process backslash escapes, so doubling one would render `com.a\\b` as `com.a\\\\b`, a wrong
+    claim about a package name in a document going to somebody else's repository.
+    """
+    return _MARKDOWN_LINE_BREAK.sub(" ", value).replace("|", "\\|")
+
+
+def _code(value: str) -> str:
+    """One table cell rendered as a code span, fenced so its content cannot break out.
+
+    Every free string in this body is a code span, and a backtick in the value closes the one
+    wrapping it: a package name spelled ``com.a`[t](http://x)`b`` renders the middle as a real
+    link a maintainer clicks. CommonMark closes a span only on a backtick run of exactly the
+    opening length, so the fence is one longer than the longest run in the content, and content
+    that starts or ends with a backtick is padded with the space the renderer then strips.
+    """
+    text = _cell(value)
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
 
 
 def render_pr_body(
@@ -436,10 +614,18 @@ def render_pr_body(
     `base_commit` and `branch` are navigation aids for the maintainer rather than part of that
     disclosure, so a blank one is rendered as unrecorded instead of failing the emission.
     """
-    if not packages:
+    items = tuple(packages)
+    if not items:
         raise EmissionError(
             "render_pr_body: no packages. A PR body announcing zero additions describes a "
             "branch with no diff on it."
+        )
+    if not _VENDOR.fullmatch(vendor):
+        raise EmissionError(
+            f"render_pr_body: vendor {vendor!r} is not a driver name. A vendor is the driver "
+            "half of a device_key or the shared marker, so anything else did not come from "
+            "`vendor_for`; it reaches the body as a heading, where a newline in it writes a "
+            "heading of its own inside the disclosure. Pass what `group_by_vendor` keyed on."
         )
     if not pipeline_version.strip():
         raise EmissionError(
@@ -461,15 +647,24 @@ def render_pr_body(
                 "rendered as a link a maintainer clicks; pass None when the bundles are not "
                 "hosted, which is the normal case."
             )
+        if _UNSAFE_IN_LINK_TARGET.search(base_url):
+            raise EmissionError(
+                f"render_pr_body: bundle_base_url {base_url!r} carries a bracket or whitespace. "
+                "It goes straight into a markdown link target, where a `)` closes the link "
+                "early and drops the rest of the URL into the page as text; percent-encode it "
+                "in the setting rather than shipping a link that goes somewhere else."
+            )
         base_url = base_url.rstrip("/")
-    for item in packages:
+    for item in items:
         _validate(item, subject="render_pr_body")
 
-    models = sorted({item.model for item in packages})
+    models = sorted({item.model for item in items})
+    # `vendor` is interpolated bare rather than through `_cell`, and that is the point of the
+    # charset check above: a value that would need escaping is refused instead.
     lines = [
-        f"## {vendor}: {len(packages)} package addition(s)",
+        f"## {vendor}: {len(items)} package addition(s)",
         "",
-        f"{len(packages)} new entries for devices this pipeline scanned under the `{vendor}` "
+        f"{len(items)} new entries for devices this pipeline scanned under the `{vendor}` "
         "driver, appended to `uad_lists.json` in the dominant key order. No existing entry is "
         "touched and nothing anywhere in the file is reformatted.",
         "",
@@ -496,23 +691,26 @@ def render_pr_body(
         "",
         "| field | value |",
         "| --- | --- |",
-        f"| pipeline | uadclaw {_cell(pipeline_version)} |",
-        f"| pipeline commit | `{_cell(commit_sha)}` |",
-        f"| base commit | {f'`{_cell(base_commit)}`' if base_commit.strip() else 'unrecorded'} |",
-        f"| branch | {f'`{_cell(branch)}`' if branch.strip() else 'unrecorded'} |",
-        f"| model | {', '.join(f'`{_cell(model)}`' for model in models)} |",
+        f"| pipeline | uadclaw {_code(pipeline_version)} |",
+        f"| pipeline commit | {_code(commit_sha)} |",
+        f"| base commit | {_code(base_commit) if base_commit.strip() else 'unrecorded'} |",
+        f"| branch | {_code(branch) if branch.strip() else 'unrecorded'} |",
+        f"| model | {', '.join(_code(model) for model in models)} |",
         "",
         "### Packages",
         "",
         "| package | list | removal | evidence bundle |",
         "| --- | --- | --- | --- |",
     ]
-    for item in packages:
+    for item in items:
         digest = _cell(item.bundle_sha256)
-        bundle = f"[`{digest}`]({base_url}/{digest})" if base_url else f"`{digest}`"
+        bundle = (
+            f"[{_code(item.bundle_sha256)}]({base_url}/{digest})"
+            if base_url
+            else _code(item.bundle_sha256)
+        )
         lines.append(
-            f"| `{_cell(item.package)}` | {_cell(item.uad_list)} | {_cell(item.removal)} | "
-            f"{bundle} |"
+            f"| {_code(item.package)} | {_cell(item.uad_list)} | {_cell(item.removal)} | {bundle} |"
         )
     lines.append("")
     if base_url:
