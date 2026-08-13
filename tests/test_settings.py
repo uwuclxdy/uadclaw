@@ -8,6 +8,8 @@ persists `traceback.format_exc()` into `jobs.failure_reason` plus a line into `l
 and both columns are exposed on `JobResponse`.
 """
 
+from pathlib import Path
+
 import pytest
 from pydantic import SecretStr, ValidationError
 
@@ -291,3 +293,99 @@ def test_an_operator_name_list_keeps_its_order_and_drops_duplicates(monkeypatch,
     assert settings.samsung_region_names == ("XAA", "EUX")
     assert settings.samsung_model_names == ("SM-S928B", "SM-S911U")
     assert settings.motorola_device_names == ("rtwo", "bronco")
+
+
+def test_no_upstream_clone_is_a_legal_configuration(monkeypatch, tmp_path):
+    """Same posture `deepseek_key` and `brave_key` keep, and for the same reason: acquire
+    through rule_ladder plus the whole triage screen have to boot on a box with no clone of
+    somebody else's repository on it. Only a `branch_emission` job needs one, and it refuses
+    at the point of use naming the setting."""
+    _set_required_env(monkeypatch)
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.upstream_repo_path == ""
+    assert settings.upstream_repo_dir is None
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_clone_path_never_becomes_the_current_directory(monkeypatch, tmp_path, blank):
+    """`Path("")` is `PosixPath(".")`, which is a real writable directory — the app root inside
+    the worker image — and a `git init` anywhere above it makes that look like a valid clone.
+    So "unset" has to stay distinguishable from "here", and the blank case has exactly one
+    spelling."""
+    _set_required_env(monkeypatch, {"UPSTREAM_REPO_PATH": blank})
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.upstream_repo_dir is None
+
+
+def test_a_configured_clone_path_becomes_that_path_and_nothing_else(monkeypatch, tmp_path):
+    """The positive leg: without it the property above is satisfied by a property that always
+    answers None."""
+    _set_required_env(monkeypatch, {"UPSTREAM_REPO_PATH": "/upstream"})
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.upstream_repo_dir == Path("/upstream")
+
+
+def test_the_list_path_default_is_upstreams_own_layout(monkeypatch, tmp_path):
+    """That path is what identifies a clone as the upstream repo (`inspect_repo` validates the
+    clone by CONTENT at this path, never by its remote), so the default has to be the real one
+    rather than a plausible one. Measured against the live file, which was fetched from
+    `.../main/resources/assets/uad_lists.json` — see `docs/research/upstream-norms.md`."""
+    _set_required_env(monkeypatch)
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.upstream_repo_list_path == "resources/assets/uad_lists.json"
+    assert settings.upstream_base_ref == "main"
+
+
+def test_the_disclosure_commit_starts_unset_so_emission_has_to_refuse(monkeypatch, tmp_path):
+    """The worker image carries no `.git`, so this cannot be derived and must be supplied.
+    Defaulting it to anything at all — a version, a placeholder, an empty-looking sentinel —
+    would put a disclosure upstream demands into a PR body while naming a commit that does not
+    identify what produced it."""
+    _set_required_env(monkeypatch)
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.pipeline_commit_sha == ""
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_an_unhosted_bundle_url_is_none_rather_than_an_empty_link(monkeypatch, tmp_path, blank):
+    """`render_pr_body` takes None for the unhosted case — the normal one — and validates
+    anything else as a markdown link target. A blank string is neither, and would render every
+    evidence hash as a link that goes nowhere."""
+    _set_required_env(monkeypatch, {"EMISSION_BUNDLE_BASE_URL": blank})
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.emission_bundle_url is None
+
+
+def test_a_hosted_bundle_url_survives_to_the_pr_body(monkeypatch, tmp_path):
+    _set_required_env(monkeypatch, {"EMISSION_BUNDLE_BASE_URL": " https://bundles.example/ "})
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.emission_bundle_url == "https://bundles.example/"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "-uadclaw", " uadclaw", "uad claw"])
+def test_a_branch_prefix_git_would_misread_is_refused_at_load(monkeypatch, tmp_path, bad):
+    """Refused here so the error names the FIELD. A leading dash makes git read the whole
+    branch name as an option and whitespace is not a ref name at all; both would otherwise
+    surface out of `git check-ref-format` as a complaint about a name nobody typed."""
+    _set_required_env(monkeypatch, {"EMISSION_BRANCH_PREFIX": bad})
+
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    # The failing FIELD, never merely that something failed: a shared validator inverted the
+    # wrong way still raises, for one of the other required fields, and reads green.
+    assert [error["loc"] for error in excinfo.value.errors()] == [("emission_branch_prefix",)]

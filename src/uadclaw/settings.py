@@ -370,6 +370,48 @@ class Settings(BaseSettings):
     # http->https->canonical-path chain and stops a redirect loop dead.
     page_fetch_max_redirects: int = 3
 
+    # Branch emission (task 10). The operator's own clone of the upstream repo — a fork is
+    # fine, it is identified by content rather than by remote — mounted read-write into the
+    # WORKER alone.
+    #
+    # Blank is legal and is the same posture `deepseek_key` and `brave_key` keep, deliberately
+    # NOT a required field: the whole deterministic half of this pipeline plus triage has to
+    # boot on a box with no clone on it, and only a `branch_emission` job needs one. The
+    # refusal happens at the point of use, in `stages.branch_stage`, naming this setting.
+    #
+    # A `str` rather than a `Path` because `Path("")` is `PosixPath(".")` — a real directory,
+    # and one that in the worker image is the app root. "Unset" has to stay distinguishable
+    # from "the current directory", so the conversion goes through `upstream_repo_dir` below
+    # and there is one spelling of the blank case.
+    upstream_repo_path: str = ""
+    # Where `uad_lists.json` lives INSIDE that clone, repo-relative and POSIX-spelled. The
+    # default is upstream's own layout, from `docs/research/upstream-norms.md` (the live 5372
+    # -entry file was fetched from `raw.githubusercontent.com/.../main/resources/assets/
+    # uad_lists.json`) and the same path the `./data` refresh command in docker-compose.yml
+    # already names. A fork that moved it repoints this.
+    upstream_repo_list_path: str = "resources/assets/uad_lists.json"
+    # The ref a branch is cut from. `main` is upstream's own default branch, and it is a
+    # SETTING because a fork can name its default anything — which is also why `inspect_repo`
+    # takes it as a parameter rather than asking git for the clone's HEAD.
+    upstream_base_ref: str = "main"
+    # The first segment of every emitted branch name; the rest is the vendor and the job id, so
+    # one job can only ever name one branch. See `emission.branch_name`.
+    emission_branch_prefix: str = "uadclaw"
+    # Which commit of THIS pipeline produced an emission. Blank by default and REFUSED at
+    # emission: upstream's CONTRIBUTING demands the disclosure, so an unrecorded one is a
+    # refusal rather than a line quietly left out of the PR body, and an evidence-bundle hash
+    # that names no commit links to nothing.
+    #
+    # It has to be configuration because the worker image carries no `.git` to read it from —
+    # the build copies the source tree, not the repository — so it arrives as an environment
+    # variable set from the deploying checkout's `git rev-parse HEAD`.
+    pipeline_commit_sha: str = ""
+    # Where the evidence bundles are served, if they are served anywhere. Blank is the normal
+    # case and the PR body then explains how to regenerate them instead of linking; the shape
+    # of a non-blank value is validated by `emission.render_pr_body`, which renders it into a
+    # markdown link a stranger clicks.
+    emission_bundle_base_url: str = ""
+
     @field_validator("postgres_password", "auth_password", "session_secret")
     @classmethod
     def _reject_blank(cls, value: SecretStr) -> SecretStr:
@@ -445,6 +487,22 @@ class Settings(BaseSettings):
             raise ValueError("page_fetch_max_redirects must be >= 0")
         return value
 
+    @field_validator("emission_branch_prefix")
+    @classmethod
+    def _reject_unusable_branch_prefix(cls, value: str) -> str:
+        # Refused here rather than at the point of use so the error names the FIELD. A leading
+        # dash makes git read the whole branch name as an option, and whitespace is not a
+        # branch name at all; both would otherwise surface out of `git check-ref-format` as a
+        # message about a name nobody typed.
+        if not value.strip() or value != value.strip() or value.startswith("-"):
+            raise ValueError(
+                "must be a non-empty branch-name prefix with no surrounding whitespace and no "
+                "leading dash, e.g. `uadclaw`"
+            )
+        if any(character.isspace() for character in value):
+            raise ValueError("must not contain whitespace: git refuses it as a ref name")
+        return value
+
     @field_validator("max_apk_parse_failure_ratio")
     @classmethod
     def _reject_out_of_range_ratio(cls, value: float) -> float:
@@ -488,6 +546,26 @@ class Settings(BaseSettings):
         parseable date, so `select_ref` resolves "newest" as the last row for a model — which
         is the last CSC listed here."""
         return _ordered_names(self.samsung_regions)
+
+    @property
+    def upstream_repo_dir(self) -> Path | None:
+        """The operator's clone, or None when no clone is configured.
+
+        The one place the blank case becomes an absence. Everywhere else it would have to be
+        `Path(setting)`, which turns "" into the current working directory — a real, writable
+        directory that a `git init` anywhere above it makes look like a valid clone.
+        """
+        return Path(self.upstream_repo_path) if self.upstream_repo_path.strip() else None
+
+    @property
+    def emission_bundle_url(self) -> str | None:
+        """The bundle base url, or None when the bundles are not hosted.
+
+        `render_pr_body` takes `None` for the unhosted case and validates anything else as a
+        link target, so the blank string must not reach it: it is neither a url nor an absence
+        and would render `[hash]()`.
+        """
+        return self.emission_bundle_base_url.strip() or None
 
     @property
     def database_url(self) -> str:
