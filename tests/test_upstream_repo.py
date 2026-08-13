@@ -316,11 +316,12 @@ def test_inline_git_config_count_hooks_path_never_reaches_the_commit(clone, tmp_
     assert not marker.exists()
 
 
-def test_git_env_neutralises_file_config_and_strips_inline_config(monkeypatch):
+def test_git_env_neutralises_file_config_and_strips_inline_config_and_identity(monkeypatch):
     """File-based config vars are forced to /dev/null (git would otherwise fall back to its
-    default global/system files); inline config vars are removed outright, the indexed
-    `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` run included. Each is planted in `os.environ` first
-    so the env is what changed it."""
+    default global/system files); inline config vars and the author/committer identity vars
+    (the four `GIT_*` spellings plus git's generic `EMAIL` fallback) are removed outright, the
+    indexed `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` run included. Each is planted in `os.environ`
+    first so the env is what changed it."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/tmp/hostile-global")
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/tmp/hostile-system")
     monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/tmp/hostile-objects")
@@ -328,6 +329,11 @@ def test_git_env_neutralises_file_config_and_strips_inline_config(monkeypatch):
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "/tmp/hostile-hooks")
     monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.hooksPath=/tmp/hostile-hooks'")
+    monkeypatch.setenv("EMAIL", "hostile@example.com")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Hostile Author")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "hostile@example.com")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Hostile Committer")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "hostile@example.com")
 
     env = _git_env()
 
@@ -339,6 +345,11 @@ def test_git_env_neutralises_file_config_and_strips_inline_config(monkeypatch):
         "GIT_CONFIG_KEY_0",
         "GIT_CONFIG_VALUE_0",
         "GIT_CONFIG_PARAMETERS",
+        "EMAIL",
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
     ):
         assert name in os.environ
         assert name not in env

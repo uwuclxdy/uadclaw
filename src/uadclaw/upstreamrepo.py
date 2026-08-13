@@ -121,7 +121,20 @@ _CONFIG_INLINE_GIT_ENV = (
 # can carry any number of them and the count is the only bound.
 _GIT_CONFIG_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 
-_STRIPPED_GIT_ENV = _REPOSITORY_REDIRECTING_GIT_ENV + _CONFIG_INLINE_GIT_ENV
+# Author and committer identity, stripped so a hostile parent cannot mislabel the commit this
+# pipeline ships: unset, git falls back to the clone's own `user.*` config, which is the identity
+# invariant — the same reason the config file pair is neutralised. `EMAIL` is git's generic email
+# fallback, below `user.email` but above nothing, so it is stripped with the rest rather than left
+# as a second spelling of the same injection.
+_IDENTITY_GIT_ENV = (
+    "EMAIL",
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+)
+
+_STRIPPED_GIT_ENV = _REPOSITORY_REDIRECTING_GIT_ENV + _CONFIG_INLINE_GIT_ENV + _IDENTITY_GIT_ENV
 
 # A git operation the clone can be stopped in the middle of. Every one of these is invisible to
 # `status --porcelain` in at least one of its states — a rebase stopped at an `edit` step stages
