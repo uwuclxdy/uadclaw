@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}emission {{ emission_id }} · uadclaw{% endblock %}
+{% block content %}
+<section hx-boost="true">
+  <nav class="breadcrumb" style="margin-bottom:var(--space-4)">
+    <a class="breadcrumb-item" href="/emission">emission</a>
+    <span class="breadcrumb-sep">/</span>
+    <span class="breadcrumb-item current">#{{ emission_id }}</span>
+  </nav>
+
+  <header style="margin-bottom:var(--space-6);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
+    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">emission</div>
+    <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em">#{{ emission_id }}</h2>
+  </header>
+
+  {% if error is defined and error %}
+    <div class="callout callout-danger">
+      <div class="callout-body">could not load this emission. the database query failed; check the worker logs and try again.</div>
+    </div>
+  {% elif not_found is defined and not_found %}
+    <div class="callout callout-warning">
+      <div class="callout-body">no emission with id <code>{{ emission_id }}</code>. <a href="/emission">back to the emission log</a>.</div>
+    </div>
+  {% else %}
+    <div class="card" style="margin-bottom:var(--space-5)">
+      <div class="card-header">
+        <div>
+          <div class="card-title">{{ detail.vendor }} · {{ detail.package_count }} package(s)</div>
+          <div class="card-subtitle">{{ detail.branch }}</div>
+        </div>
+        <span class="tag {{ detail.status_tag }}">{{ detail.status_label }}</span>
+      </div>
+      <table class="info-table">
+        <tr><td>vendor</td><td>{{ detail.vendor }}</td></tr>
+        <tr><td>branch</td><td>{{ detail.branch }}</td></tr>
+        <tr><td>base commit</td><td>{{ detail.base_commit }}</td></tr>
+        <tr><td>emitted commit</td><td>{{ detail.commit_oid if detail.commit_oid else "not committed yet" }}</td></tr>
+        <tr><td>committed at</td><td>{% if detail.committed_at %}{{ detail.committed_at }} utc{% else %}—{% endif %}</td></tr>
+        <tr><td>reconciled</td><td>{{ "yes" if detail.reconciled else "no" }}</td></tr>
+        <tr><td>pipeline version</td><td>{{ detail.pipeline_version }}</td></tr>
+        <tr><td>pipeline commit</td><td>{{ detail.pipeline_commit_sha }}</td></tr>
+        <tr><td>repo path</td><td>{{ detail.repo_path }}</td></tr>
+        <tr><td>list path</td><td>{{ detail.list_path }}</td></tr>
+        <tr><td>list sha256</td><td>{{ detail.list_sha256 }}</td></tr>
+        <tr><td>created at</td><td>{{ detail.created_at }} utc</td></tr>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:var(--space-5)">
+      <div class="card-header">
+        <div>
+          <div class="card-title" style="font-size:var(--text-lg)">pr body</div>
+          <div class="card-subtitle">copy this into the github pr. select all inside the box to copy it whole.</div>
+        </div>
+      </div>
+      {# A `<textarea readonly>` rather than a `<pre>`: native copy, full text selectable, and
+         the whole body is one value so a human pastes it into the PR unchanged. `{{ pr_body }}`
+         is autoescaped, which is safe here — the textarea shows the raw body, never markup. #}
+      <textarea class="input" readonly rows="24" spellcheck="false"
+                style="font-family:var(--font-mono);font-size:var(--text-sm);width:100%;white-space:pre;overflow-x:auto">{{ detail.pr_body }}</textarea>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title" style="font-size:var(--text-lg)">batch</div>
+          <div class="card-subtitle">every package written to the branch, in the order it was written.</div>
+        </div>
+      </div>
+      {% if detail.packages %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>package</th><th>list</th><th>removal</th><th>floor</th></tr>
+            </thead>
+            <tbody>
+              {% for p in detail.packages %}
+              <tr>
+                <td><a class="table-name" href="{{ p.href }}" style="text-decoration:none">{{ p.package }}</a></td>
+                <td>{{ p.uad_list }}</td>
+                <td>{{ p.removal }}</td>
+                <td>{{ p.floor }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div style="color:var(--text-dim);font-size:var(--text-sm)">no package rows recorded for this emission.</div>
+      {% endif %}
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

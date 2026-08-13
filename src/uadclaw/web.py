@@ -86,6 +86,7 @@ NAV_ITEMS: tuple[NavItem, ...] = (
     NavItem("jobs", "jobs", "/jobs"),
     NavItem("corpus", "corpus", "/corpus"),
     NavItem("telemetry", "telemetry", "/telemetry"),
+    NavItem("emission", "emission", "/emission"),
 )
 
 templates.env.globals["htmx_filename"] = HTMX_FILENAME
@@ -119,6 +120,18 @@ def url_segment(value: Any) -> str:
     if quoted and set(quoted) == {"."}:
         return quoted.replace(".", "%2E")
     return quoted
+
+
+def corpus_href(package: Any) -> str:
+    """The `/corpus/{package}` detail link, from a package name this pipeline did not write.
+
+    One spelling, shared by `views/corpus.py` and `views/emission.py` for the reason
+    `url_segment` is one function: a package name carrying a `/` must reach an href through
+    `url_segment`, never the `|urlencode` filter (jinja's `url_quote` keeps `/` safe, so the
+    slash comes back unescaped and the link points at a different path than the record). A
+    second local spelling of this is the drift that split the monogram derivation in two.
+    """
+    return f"/corpus/{url_segment(package)}"
 
 
 templates.env.filters["url_segment"] = url_segment

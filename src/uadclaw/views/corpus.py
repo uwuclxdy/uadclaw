@@ -17,7 +17,7 @@ recorded on `models.py`/`ladder.py`:
   keeps it a visually distinct badge ("filter pending").
 
 A package name is bytes out of downloaded firmware, never bytes this pipeline chose, so every
-place one is written into an `href` goes through `_package_href`/`_package_links` — never the
+place one is written into an `href` goes through `web.corpus_href`/`_package_links` — never the
 `|urlencode` filter, whose `safe=b"/"` default leaves a `/` in a package name unescaped and
 points the link at a different path than the record — the record's identity is not the
 record's path (see the repo's own rule on this).
@@ -127,19 +127,10 @@ def _has_icon(fact: PackageFact) -> bool:
 # one implementation both screens call; this module supplies only `has_icon`.
 
 
-def _package_href(package: str) -> str:
-    """`/corpus/{package}`, through `web.url_segment` rather than the `|urlencode` filter:
-    jinja2's `do_urlencode` calls `url_quote` with `safe=b"/"`, so a package name carrying a
-    `/` comes back unescaped and the link points at a different path than the record.
-    `web.url_segment` is the one place that encoding rule lives; a second local spelling of
-    it is exactly the kind of drift that split this round's monogram derivation in two."""
-    return f"/corpus/{web.url_segment(package)}"
-
-
 def _package_links(packages: Iterable[str]) -> list[dict[str, str]]:
     """`(package, href)` pairs for the dependency/needed-by tag lists, for the same reason
-    `_package_href` exists: those names come off the corpus graph, not off this pipeline."""
-    return [{"package": p, "href": _package_href(p)} for p in packages]
+    `web.corpus_href` exists: those names come off the corpus graph, not off this pipeline."""
+    return [{"package": p, "href": web.corpus_href(p)} for p in packages]
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,7 +289,7 @@ async def corpus_screen(request: Request):
     rows = [
         CorpusRow(
             package=fact.package,
-            href=_package_href(fact.package),
+            href=web.corpus_href(fact.package),
             device_count=fact.device_count,
             floor=analysis.floor if analysis is not None else None,
             floor_rule=analysis.floor_rule if analysis is not None else None,

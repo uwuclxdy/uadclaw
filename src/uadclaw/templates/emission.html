@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}emission · uadclaw{% endblock %}
+{% block content %}
+<section hx-boost="true">
+  <header style="margin-bottom:var(--space-8);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
+    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">pipeline</div>
+    <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em">emission</h2>
+    <p style="font-size:var(--text-base);color:var(--text-dim);max-width:540px;margin-top:var(--space-2)">
+      the branches this pipeline committed into the operator's clone, newest first.
+    </p>
+  </header>
+
+  {% if error is defined and error %}
+    <div class="callout callout-danger">
+      <div class="callout-body">could not load the emission log. the database query failed; check the worker logs and try again.</div>
+    </div>
+  {% elif empty %}
+    <div class="callout callout-info">
+      <div class="callout-body">nothing has shipped yet. approve packages in triage and run a branch emission job to cut the first one.</div>
+    </div>
+  {% else %}
+    {% if capped %}
+      <div class="callout callout-info" style="margin-bottom:var(--space-4)">
+        <div class="callout-body">showing the newest {{ list_limit }} of {{ total }} emissions.</div>
+      </div>
+    {% endif %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>vendor</th>
+            <th>branch</th>
+            <th class="num-col">packages</th>
+            <th>created</th>
+            <th>status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr>
+            <td><span class="table-name">{{ row.vendor }}</span></td>
+            <td><a href="/emission/{{ row.id }}" style="color:var(--accent)">{{ row.branch }}</a></td>
+            <td class="num-col">{{ row.package_count }}</td>
+            <td style="color:var(--text-dim);font-size:var(--text-xs)">{{ row.created_at }} utc</td>
+            <td><span class="tag {{ row.status_tag }}">{{ row.status_label }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

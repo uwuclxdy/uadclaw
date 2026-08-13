@@ -28,6 +28,7 @@ from uadclaw.models import Job
 from uadclaw.settings import get_settings
 from uadclaw.stats import StatsResponse, compute_stats
 from uadclaw.views import corpus as corpus_view
+from uadclaw.views import emission as emission_view
 from uadclaw.views import icons as icons_view
 from uadclaw.views import jobs as jobs_view
 from uadclaw.views import telemetry as telemetry_view
@@ -252,6 +253,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs_view.router)
     app.include_router(corpus_view.router)
     app.include_router(telemetry_view.router)
+    app.include_router(emission_view.router)
     app.include_router(icons_view.router)
     web.mount_static(app)
     return app

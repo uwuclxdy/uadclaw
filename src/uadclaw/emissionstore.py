@@ -50,7 +50,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from uadclaw.emission import ApprovedPackage, group_by_vendor, vendor_for
@@ -107,6 +107,64 @@ class EmissionRecord:
     # None means the outcome of this emission is not known: the row was written before the git
     # commit was attempted, and nothing has recorded one since. See `stages.branch_stage`.
     commit_oid: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EmissionSummary:
+    """One list-view row of the emission log, as the dashboard reads it.
+
+    The status is deliberately not a field. `commit_oid` and `reconciled` are the two stored
+    columns, and pending/emitted/reconciled is the view's display vocabulary; a reader that
+    wants the outcome checks the pair, the same way `EmissionRecord` leaves the recovery
+    branch on `commit_oid is None` rather than pre-digesting it.
+    """
+
+    id: int
+    vendor: str
+    branch: str
+    package_count: int
+    created_at: datetime
+    commit_oid: str | None
+    reconciled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class EmissionPackage:
+    """One package row that shipped in one emission, as it shipped."""
+
+    package: str
+    uad_list: str
+    removal: str
+    floor: str
+
+
+@dataclass(frozen=True, slots=True)
+class EmissionDetail:
+    """One `branch_emission` row plus its package rows, as the detail screen reads it.
+
+    A value object rather than the ORM row for the reason `EmissionRecord` is one: the
+    template renders it, and a screen must not reach into a relationship it has not loaded.
+    `packages` is loaded here ordered by `branch_emission_package.id` — insertion order is
+    the order the branch was written in, which is the only order that means anything after
+    the fact.
+    """
+
+    id: int
+    vendor: str
+    branch: str
+    repo_path: str
+    list_path: str
+    base_commit: str
+    list_sha256: str
+    pipeline_version: str
+    pipeline_commit_sha: str
+    package_count: int
+    pr_body: str
+    created_at: datetime
+    commit_oid: str | None
+    committed_at: datetime | None
+    reconciled: bool
+    packages: tuple[EmissionPackage, ...]
 
 
 # --- reading -----------------------------------------------------------------------------
@@ -313,6 +371,81 @@ async def load_emission(session: AsyncSession, *, job_id: uuid.UUID) -> Emission
         base_commit=row.base_commit,
         list_sha256=row.list_sha256,
         commit_oid=row.commit_oid,
+    )
+
+
+async def list_emissions(session: AsyncSession, *, limit: int) -> tuple[EmissionSummary, ...]:
+    """The newest `limit` emission rows, newest first, for the log the dashboard renders.
+
+    A cap rather than pagination: the pipeline ships at most a few branches a day and this is
+    an operator log, not a full history table. `id` is the tiebreaker so two emissions written
+    in the same second still order deterministically.
+    """
+    rows = (
+        (
+            await session.execute(
+                select(BranchEmission)
+                .order_by(BranchEmission.created_at.desc(), BranchEmission.id.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return tuple(
+        EmissionSummary(
+            id=row.id,
+            vendor=row.vendor,
+            branch=row.branch,
+            package_count=row.package_count,
+            created_at=row.created_at,
+            commit_oid=row.commit_oid,
+            reconciled=row.reconciled,
+        )
+        for row in rows
+    )
+
+
+async def count_emissions(session: AsyncSession) -> int:
+    """How many emission rows exist in total, for the cap note beside the newest few."""
+    return (await session.execute(select(func.count()).select_from(BranchEmission))).scalar_one()
+
+
+async def load_emission_detail(session: AsyncSession, *, emission_id: int) -> EmissionDetail | None:
+    """One emission row plus the packages that went into it, or None when it does not exist."""
+    row = await session.get(BranchEmission, emission_id)
+    if row is None:
+        return None
+    package_rows = (
+        (
+            await session.execute(
+                select(BranchEmissionPackage)
+                .where(BranchEmissionPackage.emission_id == emission_id)
+                .order_by(BranchEmissionPackage.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return EmissionDetail(
+        id=row.id,
+        vendor=row.vendor,
+        branch=row.branch,
+        repo_path=row.repo_path,
+        list_path=row.list_path,
+        base_commit=row.base_commit,
+        list_sha256=row.list_sha256,
+        pipeline_version=row.pipeline_version,
+        pipeline_commit_sha=row.pipeline_commit_sha,
+        package_count=row.package_count,
+        pr_body=row.pr_body,
+        created_at=row.created_at,
+        commit_oid=row.commit_oid,
+        committed_at=row.committed_at,
+        reconciled=row.reconciled,
+        packages=tuple(
+            EmissionPackage(p.package, p.uad_list, p.removal, p.floor) for p in package_rows
+        ),
     )
 
 
