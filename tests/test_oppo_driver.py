@@ -29,6 +29,7 @@ import base64
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
@@ -41,6 +42,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from uadclaw.drivers import oppo
 from uadclaw.drivers.oppo import (
+    CONFIGURED_MODEL_BRANCHES,
     DEVICE_ID,
     GATE_USER_ID,
     IMEI,
@@ -161,6 +163,20 @@ def cn_region(monkeypatch) -> oppo.OppoRegion:
     _private_key, public_key_b64 = _test_keypair()
     region = replace(REGIONS["CN"], public_key_b64=public_key_b64)
     monkeypatch.setitem(oppo.REGION_BY_GATE_HOST, CN_GATE_HOST, region)
+    return region
+
+
+@pytest.fixture
+def eu_region(monkeypatch) -> oppo.OppoRegion:
+    """The EU region with this module's public key in place of OPlus's.
+
+    `cn_region` swaps the gate-host table, because the catalogue path attributes a region by
+    gate host; a ref minted for a configured model re-resolves against the region its build id
+    names, which these tests make EU, so the driver's own `REGIONS` table is the one swapped.
+    """
+    _private_key, public_key_b64 = _test_keypair()
+    region = replace(REGIONS["EU"], public_key_b64=public_key_b64)
+    monkeypatch.setitem(oppo.REGIONS, "EU", region)
     return region
 
 
@@ -1125,6 +1141,220 @@ async def test_fetch_refuses_a_ref_belonging_to_another_driver(tmp_path):
 
     with pytest.raises(FirmwareInputError):
         await driver.fetch(ref, tmp_path)
+
+
+# --- configured models (OPPO_MODELS) --------------------------------------------------------
+
+
+def configured_model_document(model: str, ota: str, *, url: str, md5: str, size: int) -> dict:
+    """A decrypted 200 document of the captured shape, rewritten for `model` the way the
+    fetch tests rewrite the PLK110 capture."""
+    document = captured_response("rmx3706")
+    document["otaVersion"] = document["realOtaVersion"] = ota
+    document["components"][0]["componentVersion"] = f"{ota}.97.36b35a9b"
+    document["components"][0]["componentPackets"] = {
+        "url": url,
+        "md5": md5,
+        "size": str(size),
+    }
+    return document
+
+
+def catalogue_handler(
+    calls: list[httpx.Request],
+    *,
+    on_endpoint: Callable[[httpx.Request], httpx.Response | None] | None = None,
+):
+    """The catalogue GET plus an optional per-endpoint branch, every request recorded."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if on_endpoint is not None:
+            handled = on_endpoint(request)
+            if handled is not None:
+                return handled
+        return httpx.Response(200, text=json.dumps(catalogue()))
+
+    return handler
+
+
+async def test_an_unset_oppo_models_leaves_list_available_untouched():
+    # Default: no extra requests, the catalogue alone. The GET-only shape assertion is the one
+    # that reds a planted mutation replacing the settings read with a literal entry — the
+    # refs-equality assertion stays green because a refused configured model is skipped.
+    calls: list[httpx.Request] = []
+    driver = OppoDriver(make_settings(), client=mock_client(catalogue_handler(calls)))
+    refs = await driver.list_available()
+
+    assert [request.method for request in calls] == ["GET"]
+    assert [ref.build for ref in refs] == [
+        ref.build for ref in parse_catalogue(catalogue(), source_url=driver._catalogue_url)
+    ]
+
+
+async def test_a_configured_model_that_resolves_appears_beside_the_catalogue_rows(eu_region):
+    # RMX3301 answers EU (measured 2026-08-12). The first branch letter wins and the walk
+    # stops there, so the endpoint is asked exactly once.
+    posts = 0
+    ota = "RMX3301_11.A.31_0310_202306202020"
+    calls: list[httpx.Request] = []
+
+    def on_endpoint(request: httpx.Request) -> httpx.Response | None:
+        nonlocal posts
+        if str(request.url) == eu_region.endpoint:
+            posts += 1
+            key = unwrap_session_key(request.headers["protectedKey"], _test_keypair()[0])
+            return httpx.Response(
+                200,
+                text=seal_response(
+                    configured_model_document(
+                        "RMX3301",
+                        ota,
+                        url="https://gauss-compotacostauto-eu.allawnfs.com/component-ota/a.zip",
+                        md5="e027328b9c1f81382ec4d48b9e802914",
+                        size=7549973765,
+                    ),
+                    key,
+                ),
+            )
+        return None
+
+    driver = OppoDriver(
+        make_settings(oppo_models="RMX3301:EU"),
+        client=mock_client(catalogue_handler(calls, on_endpoint=on_endpoint)),
+    )
+    refs = await driver.list_available()
+
+    assert posts == 1
+    assert refs[-1].device == "RMX3301"
+    assert refs[-1].build == f"{ota}_EU"
+    assert refs[-1].md5 == "e027328b9c1f81382ec4d48b9e802914"
+    assert refs[-1].size == 7549973765
+    assert refs[-1].url == "https://gauss-compotacostauto-eu.allawnfs.com/component-ota/a.zip"
+    assert len(refs) == 8 + 1  # the eight OPlus catalogue rows are all still there
+
+
+async def test_a_configured_model_answering_2004_is_skipped_with_a_warning(caplog):
+    # CPH2797 is one of the five documented export models answering 2004 to every otaVersion
+    # tried. All five branch letters are asked and then the model is skipped, never fabricated.
+    posts = 0
+    calls: list[httpx.Request] = []
+
+    def on_endpoint(request: httpx.Request) -> httpx.Response | None:
+        nonlocal posts
+        if request.method == "POST":
+            posts += 1
+            return httpx.Response(200, text=json.dumps({"responseCode": 2004, "errMsg": None}))
+        return None
+
+    driver = OppoDriver(
+        make_settings(oppo_models="CPH2797:GL"),
+        client=mock_client(catalogue_handler(calls, on_endpoint=on_endpoint)),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="uadclaw.drivers.oppo"):
+        refs = await driver.list_available()
+
+    assert posts == len(CONFIGURED_MODEL_BRANCHES)
+    assert len(refs) == 8
+    assert not [ref for ref in refs if ref.device == "CPH2797"]
+    assert "CPH2797" in caplog.text
+    assert "GL" in caplog.text
+    assert "2004" in caplog.text
+
+
+async def test_a_ref_minted_for_a_configured_model_is_re_resolved_before_it_downloads(
+    eu_region, tmp_path
+):
+    # The trap this pins: the URL the endpoint answered at list time is a signed CDN link that
+    # expires in about ten minutes, so a job running later must ask the endpoint AGAIN for a
+    # fresh URL — the mock serves a different URL per POST, and the stale one is never fetched.
+    payload = b"PK\x03\x04" + b"configured-model" * 64
+    ota = "RMX3301_11.A.31_0310_202306202020"
+    posts = 0
+    calls: list[httpx.Request] = []
+    asked: list[dict] = []
+
+    def on_endpoint(request: httpx.Request) -> httpx.Response | None:
+        nonlocal posts
+        if str(request.url) == eu_region.endpoint:
+            posts += 1
+            key = unwrap_session_key(request.headers["protectedKey"], _test_keypair()[0])
+            body = decrypt_request(request.content, key)
+            assert body["model"] == "RMX3301"
+            asked.append(body)
+            document = configured_model_document(
+                "RMX3301",
+                ota,
+                url=f"https://gauss-compotacostauto-eu.allawnfs.com/component-ota/{posts}.zip",
+                md5=hashlib.md5(payload).hexdigest(),
+                size=len(payload),
+            )
+            return httpx.Response(200, text=seal_response(document, key))
+        if request.method == "GET" and "danielspringer" not in str(request.url):
+            return httpx.Response(200, content=payload)
+        return None
+
+    driver = OppoDriver(
+        make_settings(oppo_models="RMX3301:EU"),
+        client=mock_client(catalogue_handler(calls, on_endpoint=on_endpoint)),
+    )
+    refs = await driver.list_available()
+    minted = select_ref(refs, device="RMX3301")
+    assert minted.url.endswith("/1.zip")
+
+    archive = await driver.fetch(minted, tmp_path)
+
+    assert posts == 2
+    assert archive.integrity_verified is True
+    assert archive.path.read_bytes() == payload
+    # The stale signed link is never downloaded; the fresh one is.
+    assert not [
+        request
+        for request in calls
+        if request.method == "GET" and str(request.url).endswith("/1.zip")
+    ]
+    downloads = [request for request in calls if request.method == "GET"]
+    assert str(downloads[-1].url).endswith("/2.zip")
+    # The re-ask is the same question that minted the ref — same model, branch and Android
+    # major — or the exact-match guard would refuse the fresh answer.
+    assert [body["otaVersion"] for body in asked] == [
+        "RMX3301_11.A.00_0001_100000000000",
+        "RMX3301_11.A.00_0001_100000000000",
+    ]
+    assert [body["androidVersion"] for body in asked] == ["Android16.0", "Android16.0"]
+
+
+async def test_a_configured_model_the_catalogue_already_carries_is_not_asked_again(caplog):
+    # An appended endpoint ref would outrank the catalogue's newest row in select_ref's
+    # row-order fallback while trailing it in build age, so the endpoint is not asked at all.
+    calls: list[httpx.Request] = []
+    driver = OppoDriver(
+        make_settings(oppo_models="PLK110:CN"),
+        client=mock_client(catalogue_handler(calls)),
+    )
+
+    with caplog.at_level(logging.INFO, logger="uadclaw.drivers.oppo"):
+        refs = await driver.list_available()
+
+    assert [request.method for request in calls] == ["GET"]
+    assert len(refs) == 8
+    assert "PLK110:CN" in caplog.text
+
+
+@pytest.mark.parametrize("entry", ["RMX3301", "RMX3301:XX", ":EU"])
+async def test_a_configured_entry_that_names_no_region_is_skipped_with_a_warning(entry, caplog):
+    calls: list[httpx.Request] = []
+    driver = OppoDriver(
+        make_settings(oppo_models=entry), client=mock_client(catalogue_handler(calls))
+    )
+
+    with caplog.at_level(logging.WARNING, logger="uadclaw.drivers.oppo"):
+        refs = await driver.list_available()
+
+    assert [request.method for request in calls] == ["GET"]
+    assert len(refs) == 8
+    assert entry in caplog.text
 
 
 def replace_driver(ref: FirmwareRef, driver: str) -> FirmwareRef:

@@ -76,14 +76,28 @@ and four.
 The download URL comes back as either a signed CDN link or another `/downloadCheck` gate. The
 gate wants a `userId: oplus-ota|<anything>` header and validates only that prefix; without it it
 answers `200 {"responseCode":2306}`, which is a body a downloader would otherwise save as an
-archive. The signed link expires in about ten minutes and the gate does not, so what this driver
-stores in a `FirmwareRef` is always the gate.
+archive. The signed link expires in about ten minutes and the gate does not, so a catalogue ref
+stores the gate — a ref minted off the endpoint for a configured model stores whatever the
+endpoint answered, and `fetch` re-asks the endpoint for a fresh URL before downloading, so the
+expiry never meets a job that runs minutes after the listing.
 
 **The endpoint is the optional half and the gate is the durable one, so no endpoint failure ends
 a fetch.** A 500, a transport error, a body past the memory ceiling and a response this driver
 cannot read all land where `2004` already landed: a warning naming the model and the cause, then
-the catalogue's own gate. The reverse would let the reverse-engineered half fail every Oppo job
-at `acquire` while the URL the ref carries was live and serving.
+the stored URL. The reverse would let the reverse-engineered half fail every Oppo job at
+`acquire` while the URL the ref carries was live and serving.
+
+**`OPPO_MODELS` reaches the models the catalogue never carried, straight off the endpoint.**
+`RMX3706` and `RMX3301` resolve there and publish no catalogue row, so an operator names them as
+comma-separated `MODEL:REGION` entries and `list_available` appends one ref per model that
+answers. The region is the operator's to name because which endpoint resolves which model is
+per-model (`RMX3301` EU, `RMX3706` GL, both measured 2026-08-12) and no walk order prefers one
+answer over another. The branch has no row to read it off either, so the five letters the
+catalogue has ever published are walked until one answers 200 — the same guess a client without
+an index has to make — and the ref's build is whatever the endpoint answered, minted with
+`ref_build` so `parse_ref_build` can take it apart again at fetch time. A model that answers
+`2004` to every letter is skipped with a warning naming it and the region, the way the five
+documented export models do, and the catalogue refs still come back.
 
 Written from the protocol and from captured request/response pairs. `R0rt1z2/realme-ota` is
 GPL-3.0 and was read to understand the wire format; no code from it is here. The four public
@@ -154,8 +168,27 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_CATALOGUE_BYTES = 16 * 1024 * 1024
 _RESPONSE_CHUNK_BYTES = 64 * 1024
 
-# The only code that means "here is a package". Everything else falls back to the gate.
+# The only code that means "here is a package". Everything else falls back to the stored URL.
 RESPONSE_OK = 200
+
+# What a configured model (OPPO_MODELS) is asked at. There is no catalogue row to read a
+# branch off, so the five letters the catalogue has ever published are walked, most frequent
+# first (A 43, F 28, C 26, H 6, J 4 across the 107 rows, 2026-08-12): the walk costs one
+# request for a branch-A model, and the first letter that answers wins, because the endpoint
+# answers the NEXT build in the chain and no letter ordering prefers a newer one. The major is
+# not walked: it is 11 on all 107 rows, the newest 2026 builds included, and a wrong major
+# answers `2004` this driver cannot tell from the export-model hole.
+CONFIGURED_MODEL_BRANCHES = ("A", "F", "C", "H", "J")
+CONFIGURED_MODEL_MAJOR = "11"
+
+# The Android major a request claims when the ref carries none, which is what a configured
+# model is asked at. ColorOS and OxygenOS majors have tracked the Android major since
+# ColorOS 11 and the endpoint was never observed to reject a request over these fields — they
+# were never varied — so this is a plausible value rather than a proven-load-bearing one. One
+# constant on purpose: the query that mints a configured model's ref and the query that
+# re-resolves it at fetch time must be the same question, or the exact-match guard refuses the
+# fresh answer.
+_DEFAULT_ANDROID_MAJOR = "16"
 
 
 @dataclass(frozen=True, slots=True)
@@ -751,6 +784,9 @@ class OppoDriver(FirmwareDriver):
         self._catalogue_url = settings.oppo_catalogue_url
         self._timeout = settings.firmware_http_timeout_seconds
         self._max_archive_bytes = settings.max_firmware_archive_bytes
+        # Parsed entry by entry at list time, so a bad one is a skipped warning rather than a
+        # driver that fails to construct.
+        self._configured_models = settings.oppo_model_names
         # Injected only by tests (a mock transport); production builds one per call so no
         # connection pool outlives the stage that opened it.
         self._client = client
@@ -811,22 +847,135 @@ class OppoDriver(FirmwareDriver):
                     f"OppoDriver: {self._catalogue_url} answered non-JSON; the API changed or an "
                     "interstitial is being served"
                 ) from exc
+            refs = parse_catalogue(payload, source_url=self._catalogue_url)
+            refs.extend(await self._configured_model_refs(client, catalogue_refs=refs))
+            self._refs = refs
+            return list(self._refs)
         finally:
             if owned:
                 await client.aclose()
-        self._refs = parse_catalogue(payload, source_url=self._catalogue_url)
-        return list(self._refs)
+
+    async def _configured_model_refs(
+        self, client: httpx.AsyncClient, *, catalogue_refs: list[FirmwareRef]
+    ) -> list[FirmwareRef]:
+        """One ref per resolvable `OPPO_MODELS` entry, appended after the catalogue rows.
+
+        Everything that fails is a skipped warning, never an error: the catalogue refs must
+        still come back. A model the catalogue already carries is not asked at all — the
+        endpoint trails the catalogue on every model where both were measured, and an appended
+        endpoint ref would outrank the catalogue's newest row in `select_ref`'s row-order
+        fallback, since no OPlus build id carries a parseable date.
+        """
+        refs: list[FirmwareRef] = []
+        catalogue_models = {ref.device for ref in catalogue_refs}
+        for entry in self._configured_models:
+            model, separator, region_name = entry.partition(":")
+            region = REGIONS.get(region_name.strip().upper()) if separator else None
+            if not model.strip() or region is None:
+                logger.warning(
+                    "oppo: OPPO_MODELS entry %r does not name a model and one of %s as "
+                    "`MODEL:REGION`; skipping it",
+                    entry,
+                    ", ".join(sorted(REGIONS)),
+                )
+                continue
+            model = model.strip()
+            if model in catalogue_models:
+                logger.info(
+                    "oppo: OPPO_MODELS entry %r is already in the catalogue, whose newest "
+                    "build is the authority; not asking the endpoint for it",
+                    entry,
+                )
+                continue
+            ref = await self._resolve_configured_model(client, model, region)
+            if ref is not None:
+                refs.append(ref)
+        return refs
+
+    async def _resolve_configured_model(
+        self, client: httpx.AsyncClient, model: str, region: OppoRegion
+    ) -> FirmwareRef | None:
+        """The ref one configured model resolves to, or None (skipped, warned) when it does not.
+
+        There is no catalogue row to compare against, so the endpoint's answer IS the ref's
+        build. The query is the synthesized `.00` the fetch path also asks, minted into a build
+        id with `ref_build` so `parse_ref_build` can take it apart again and `fetch` can
+        re-resolve the ref for a fresh URL.
+        """
+        last_code = None
+        for branch in CONFIGURED_MODEL_BRANCHES:
+            try:
+                code, document = await self._query_update(
+                    client,
+                    model=model,
+                    region=region,
+                    branch=branch,
+                    major=CONFIGURED_MODEL_MAJOR,
+                    android_major=_DEFAULT_ANDROID_MAJOR,
+                )
+            except FirmwareError as exc:
+                # The same shape `_resolve_direct` keeps, and for the same reason: a transport
+                # or protocol failure must not end a listing the catalogue alone would serve.
+                logger.warning(
+                    "oppo: resolving OPPO_MODELS model %s against %s failed (%s); skipping it",
+                    model,
+                    region.name,
+                    exc,
+                    exc_info=exc,
+                )
+                return None
+            last_code = code
+            if code != RESPONSE_OK or document is None:
+                continue
+            try:
+                package = resolved_package(document, model=model)
+                # The endpoint's own region spelling, so `parse_ref_build` recovers a
+                # `REGIONS` key and not a catalogue string like `GLO`.
+                build = ref_build(package.ota_version, region.name)
+                if build is None:
+                    logger.warning(
+                        "oppo: OPPO_MODELS model %s resolved %s but no build id could be "
+                        "minted for region %s; skipping it",
+                        model,
+                        package.ota_version,
+                        region.name,
+                    )
+                    return None
+                return FirmwareRef(
+                    driver=self.name,
+                    device=model,
+                    build=build,
+                    url=package.url,
+                    md5=package.md5,
+                    size=package.size,
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "oppo: OPPO_MODELS model %s did not validate as a ref: %s", model, exc
+                )
+                return None
+        logger.warning(
+            "oppo: %s answered no package on %s for any of the %d branch letters this driver "
+            "asks (last answer: responseCode %s); skipping it",
+            model,
+            region.name,
+            len(CONFIGURED_MODEL_BRANCHES),
+            last_code,
+        )
+        return None
 
     async def _resolve_direct(
         self, client: httpx.AsyncClient, ref: FirmwareRef
     ) -> ResolvedPackage | None:
-        """The endpoint's own URL for exactly the build `ref` names, or None to use the gate.
+        """The endpoint's own URL for exactly the build `ref` names, or None to use the stored
+        URL. For a ref minted off the endpoint this is also where its expiring URL is replaced
+        with a fresh one before anything downloads.
 
         Every way the endpoint can fail ends here rather than at the caller. It is the OPTIONAL
-        half of this driver: `ref.url` is a durable `/downloadCheck` gate that serves the same
-        bytes, the endpoint trails the catalogue on every model where both were measured, and
-        five modern export models refuse it outright — so letting a 500, a wedged body or a
-        protocol change out of here would fail an acquire stage the gate would have served.
+        half of this driver: the endpoint trails the catalogue on every model where both were
+        measured, and five modern export models refuse it outright — so letting a 500, a wedged
+        body or a protocol change out of here would fail an acquire stage the stored URL would
+        have served.
         """
         try:
             return await self._ask_endpoint(client, ref)
@@ -835,8 +984,8 @@ class OppoDriver(FirmwareDriver):
             # answering something usable-but-not-wanted. This one is the endpoint not answering,
             # and WHICH shape it fails in is the only sign the protocol moved.
             logger.warning(
-                "oppo: resolving %s/%s against the update endpoint failed (%s); downloading the "
-                "catalogue's gate instead, which is the durable URL this ref carries",
+                "oppo: resolving %s/%s against the update endpoint failed (%s); downloading "
+                "the stored URL instead",
                 ref.device,
                 ref.build,
                 exc,
@@ -844,34 +993,33 @@ class OppoDriver(FirmwareDriver):
             )
             return None
 
-    async def _ask_endpoint(
-        self, client: httpx.AsyncClient, ref: FirmwareRef
-    ) -> ResolvedPackage | None:
-        """One update query, or None when the answer is not this exact build.
+    async def _query_update(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        model: str,
+        region: OppoRegion,
+        branch: str,
+        major: str,
+        android_major: str,
+    ) -> tuple[int, dict[str, Any] | None]:
+        """One synthesized query against `region`'s endpoint: `(responseCode, decrypted
+        document)`, with the document None for any code but 200.
 
-        Only an exact `ota_version` match is accepted. The endpoint answers the next build in a
-        chain rather than a requested one, so anything else means it offered a DIFFERENT package,
-        and downloading that under this ref's name would file one build's packages under
-        another's build id.
+        The wire half shared by `_ask_endpoint` and the configured-model path — one request
+        builder, one cipher and one body cap, so a protocol change cannot be fixed in one place
+        and missed in the other. A non-200 is returned rather than raised; transport and
+        envelope failures raise, and the caller owns which of those end a job and which fall
+        back.
         """
-        region = REGION_BY_GATE_HOST.get(_host_of(ref.url))
-        parsed = parse_ref_build(ref.build, model=ref.device)
-        if region is None or parsed is None:
-            logger.info(
-                "oppo: %s/%s carries no OPlus gate host or build this driver minted, downloading "
-                "the stored URL",
-                ref.device,
-                ref.build,
-            )
-            return None
         key = secrets.token_bytes(_AES_KEY_BYTES)
         iv = secrets.token_bytes(_AES_IV_BYTES)
         now_ms = int(time.time() * 1000)
         wire, headers = build_update_request(
-            model=ref.device,
-            ota_version=synthesize_ota_version(ref.device, parsed.branch, major=parsed.major),
+            model=model,
+            ota_version=synthesize_ota_version(model, branch, major=major),
             region=region,
-            android_major=ref.android_version or "16",
+            android_major=android_major,
             key=key,
             iv=iv,
             now_ms=now_ms,
@@ -884,19 +1032,55 @@ class OppoDriver(FirmwareDriver):
                     await response.aread()
                     raise FirmwareError(
                         f"OppoDriver: {region.endpoint} answered HTTP {response.status_code} "
-                        f"while resolving {ref.device}/{ref.build}; expected 200"
+                        f"while resolving {model}; expected 200"
                     )
                 text = await _read_capped(
                     response,
                     ceiling=MAX_RESPONSE_BYTES,
-                    context=f"oppo update[{ref.device}/{region.name}]",
+                    context=f"oppo update[{model}/{region.name}]",
                 )
         except httpx.HTTPError as exc:
             raise FirmwareError(
-                f"OppoDriver: {region.endpoint} is unreachable while resolving "
-                f"{ref.device}/{ref.build}: {exc}"
+                f"OppoDriver: {region.endpoint} is unreachable while resolving {model}: {exc}"
             ) from exc
-        code, document = decrypt_update_response(text, key)
+        return decrypt_update_response(text, key)
+
+    async def _ask_endpoint(
+        self, client: httpx.AsyncClient, ref: FirmwareRef
+    ) -> ResolvedPackage | None:
+        """One update query, or None when the answer is not this exact build.
+
+        Only an exact `ota_version` match is accepted. The endpoint answers the next build in a
+        chain rather than a requested one, so anything else means it offered a DIFFERENT package,
+        and downloading that under this ref's name would file one build's packages under
+        another's build id. The query is synthesized at the ref's own major and branch, so for a
+        ref minted off the endpoint the answer IS the ref's build — asking again minutes later
+        is how a minted ref's expiring URL is replaced with a fresh one.
+        """
+        parsed = parse_ref_build(ref.build, model=ref.device)
+        region = REGION_BY_GATE_HOST.get(_host_of(ref.url))
+        if region is None and parsed is not None:
+            # A ref minted off the endpoint carries the endpoint's own URL, which may be a
+            # signed CDN link rather than a gate — no gate host to attribute. Its build id
+            # names the region that answered, and only that region can be asked again for the
+            # same package.
+            region = REGIONS.get(parsed.region)
+        if region is None or parsed is None:
+            logger.info(
+                "oppo: %s/%s carries no OPlus gate host or build this driver minted, downloading "
+                "the stored URL",
+                ref.device,
+                ref.build,
+            )
+            return None
+        code, document = await self._query_update(
+            client,
+            model=ref.device,
+            region=region,
+            branch=parsed.branch,
+            major=parsed.major,
+            android_major=ref.android_version or _DEFAULT_ANDROID_MAJOR,
+        )
         if code != RESPONSE_OK or document is None:
             # The observable for the `2004` hole, and the reason it is a warning rather than a
             # note: the question asked is always a synthesized `.00`, which is below every real
@@ -904,8 +1088,8 @@ class OppoDriver(FirmwareDriver):
             # unexplained export-model refusal or a (model, branch, region) triple this endpoint
             # does not serve — and WHICH models take this path is the only sign the hole moved.
             logger.warning(
-                "oppo: %s answered responseCode %d for %s at %s; downloading the catalogue's "
-                "gate instead",
+                "oppo: %s answered responseCode %d for %s at %s; downloading the stored URL "
+                "instead",
                 region.endpoint,
                 code,
                 ref.device,
@@ -917,10 +1101,12 @@ class OppoDriver(FirmwareDriver):
             # Routine rather than alarming: the endpoint trailed the catalogue on every model
             # where both were measured (2026-08-12, `PLK110` A.68/A.72, `PKC110` C.78/C.79,
             # `RMX5010` F.61/F.66), and asking it again at its own answer just returns `2004`,
-            # so there is no walk from here to the catalogue's build.
+            # so there is no walk from here to the catalogue's build. For a ref minted off the
+            # endpoint this instead means the endpoint's chain moved between listing and fetch;
+            # the stored URL still downloads and fails loudly if it has expired.
             logger.info(
-                "oppo: %s offered %s where the catalogue lists %s; downloading the catalogue's "
-                "gate rather than filing another build under this one's id",
+                "oppo: %s offered %s where this ref names %s; downloading the stored URL "
+                "rather than filing another build under this one's id",
                 ref.device,
                 package.ota_version,
                 ref.build,
@@ -928,8 +1114,8 @@ class OppoDriver(FirmwareDriver):
             return None
         if ref.md5 is not None and package.md5 is not None and package.md5 != ref.md5:
             logger.warning(
-                "oppo: %s/%s resolved to md5 %s where the catalogue published %s; downloading "
-                "the catalogue's gate, whose digest is the one this ref carries",
+                "oppo: %s/%s resolved to md5 %s where this ref carries %s; downloading the "
+                "stored URL instead, whose digest is the one this ref carries",
                 ref.device,
                 ref.build,
                 package.md5,
@@ -938,8 +1124,8 @@ class OppoDriver(FirmwareDriver):
             return None
         if ref.size is not None and package.size is not None and package.size != ref.size:
             logger.warning(
-                "oppo: %s/%s resolved to %d bytes where the catalogue published %d; "
-                "downloading the catalogue's gate, whose size is the one this ref carries",
+                "oppo: %s/%s resolved to %d bytes where this ref carries %d; downloading the "
+                "stored URL instead, whose size is the one this ref carries",
                 ref.device,
                 ref.build,
                 package.size,

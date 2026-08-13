@@ -190,6 +190,11 @@ class Settings(BaseSettings):
     # same reason Samsung's FUS hosts do. This catalogue blocks a scraping IP across its whole
     # domain, so the driver reads it once per job — never per device — and caches it.
     oppo_catalogue_url: str = "https://roms.danielspringer.at/api/ota.php?latest=1"
+    # Models the catalogue never carried, one `MODEL:REGION` entry each, with the endpoint
+    # region that resolves it. The driver asks the OPlus endpoint straight for these and appends
+    # one ref per model that answers; see the OPPO_MODELS comment in `.env.example` for the
+    # branch walk and what a 2004 means here. A plain string like the other name lists.
+    oppo_models: str = ""
     # Read/connect timeout for firmware HTTP. No total deadline: a factory zip is multi-GB
     # and a slow-but-progressing transfer is not a failure.
     firmware_http_timeout_seconds: float = 60.0
@@ -546,6 +551,10 @@ class Settings(BaseSettings):
         parseable date, so `select_ref` resolves "newest" as the last row for a model — which
         is the last CSC listed here."""
         return _ordered_names(self.samsung_regions)
+
+    @property
+    def oppo_model_names(self) -> tuple[str, ...]:
+        return _ordered_names(self.oppo_models)
 
     @property
     def upstream_repo_dir(self) -> Path | None:

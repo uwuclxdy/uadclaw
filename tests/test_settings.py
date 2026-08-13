@@ -293,6 +293,16 @@ def test_an_operator_name_list_keeps_its_order_and_drops_duplicates(monkeypatch,
     assert settings.samsung_region_names == ("XAA", "EUX")
     assert settings.samsung_model_names == ("SM-S928B", "SM-S911U")
     assert settings.motorola_device_names == ("rtwo", "bronco")
+    assert settings.oppo_model_names == ()
+
+
+def test_oppo_model_entries_keep_their_order_and_drop_duplicates(monkeypatch, tmp_path):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("OPPO_MODELS", " RMX3301:EU , RMX3706:GL ,RMX3301:EU")
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.oppo_model_names == ("RMX3301:EU", "RMX3706:GL")
 
 
 def test_no_upstream_clone_is_a_legal_configuration(monkeypatch, tmp_path):
