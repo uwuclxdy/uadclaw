@@ -35,7 +35,13 @@ Three more things shape the module:
   this is the one function here that could hand back a corrupt `uad_lists.json`.
 - **The PR body is markdown a stranger reads and clicks.** Package names come out of
   downloaded firmware, so every free string in it is fenced as a code span sized to its own
-  content, and `vendor` is refused rather than escaped — see `_code` and `_VENDOR`.
+  content, and `vendor` is refused rather than escaped — see `_code` and `_VENDOR`. **A
+  hand-written backtick pair around a value is the bug, not a shortcut**: `_cell` neutralises
+  a cell's text and does not fence, so ``f"`{_cell(x)}`"`` reads as careful and lets a backtick
+  in `x` close the span and open a link. One such pair survived in the prose of the
+  unhosted-bundle branch — the DEFAULT path — for a whole review round, four lines from a
+  correct `_code` call, because the test that covered it was shaped like a table row and that
+  line is a sentence. `_code` is the only spelling; there are no exceptions to grep for.
 """
 
 import json
@@ -312,6 +318,11 @@ def _validate(package: ApprovedPackage, *, subject: str) -> None:
             "mandatory upstream, so an unrecorded one is a refusal rather than a line quietly "
             "left out of the PR body."
         )
+    # Kept after the blank check, whose message is the useful one for this field. The point of
+    # the second call is the rest of `_check_text`: `model` reaches the PR body, and a body is
+    # a `str` a caller encodes, so an unpaired surrogate here raises `UnicodeEncodeError` in
+    # the git lane rather than an `EmissionError` here.
+    _check_text(package.model, subject=subject, field=f"{name}'s model")
 
 
 def _vendor(device_keys: Sequence[str], *, subject: str) -> str:
@@ -654,7 +665,21 @@ def render_pr_body(
                 "early and drops the rest of the URL into the page as text; percent-encode it "
                 "in the setting rather than shipping a link that goes somewhere else."
             )
+        _check_text(base_url, subject="render_pr_body", field="bundle_base_url")
         base_url = base_url.rstrip("/")
+    # Every remaining free string that reaches the body. `render_pr_body` returns a `str` its
+    # caller encodes, so an unpaired surrogate in any of these is a `UnicodeEncodeError` in the
+    # git lane where the contract promises an `EmissionError`. The blank cases above already
+    # raised for the two mandatory ones; `base_commit` and `branch` are skipped when blank
+    # because blank is their documented "unrecorded" rendering.
+    for label, value in (
+        ("pipeline_version", pipeline_version),
+        ("commit_sha", commit_sha),
+        ("base_commit", base_commit),
+        ("branch", branch),
+    ):
+        if value.strip():
+            _check_text(value, subject="render_pr_body", field=label)
     for item in items:
         _validate(item, subject="render_pr_body")
 
@@ -723,7 +748,7 @@ def render_pr_body(
             "Each hash above is the sha256 of the evidence bundle that package was classified "
             "from — the exact facts, graph edges and rule floor the model was shown. The "
             "bundles are not hosted anywhere. They are regenerated deterministically from this "
-            f"pipeline at commit `{_cell(commit_sha)}`, which serializes them canonically and "
+            f"pipeline at commit {_code(commit_sha)}, which serializes them canonically and "
             "writes no timestamp and no run-scoped id into them, so the same corpus produces "
             "byte-identical bundles and the same hashes on any machine."
         )

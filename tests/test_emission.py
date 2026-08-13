@@ -787,6 +787,42 @@ def row_cells(row: str) -> list[str]:
     return cells
 
 
+def strip_code_spans(markdown: str) -> str:
+    """Remove every code span, the way a parser resolves them: an opening run of N backticks
+    closes on the next run of exactly N. What is left is the text markdown actually renders as
+    prose, which is where a link can form."""
+    runs = [(m.start(), m.end()) for m in re.finditer(r"`+", markdown)]
+    out = []
+    cursor = 0
+    index = 0
+    while index < len(runs):
+        start, end = runs[index]
+        width = end - start
+        closing = next(
+            (pair for pair in runs[index + 1 :] if pair[1] - pair[0] == width),
+            None,
+        )
+        if closing is None:
+            index += 1
+            continue
+        out.append(markdown[cursor:start])
+        cursor = closing[1]
+        index = runs.index(closing) + 1
+    out.append(markdown[cursor:])
+    return "".join(out)
+
+
+def link_targets(markdown: str) -> list[str]:
+    """Every URL the rendered body would actually link to.
+
+    Deliberately NOT a regex over the raw text: a `](...)` inside a code span is inert, so a
+    raw scan reports the safely-fenced values as links and goes red on correct output. And
+    deliberately not row-shaped — a row splitter cannot see an injection in a sentence, which
+    is exactly how one survived a review round.
+    """
+    return re.findall(r"\]\(([^)]*)\)", strip_code_spans(markdown))
+
+
 def package_row(rendered: str) -> str:
     """The one table row for the package under test, never the provenance table's header."""
     rows = [line for line in rendered.splitlines() if line.startswith("| ") and "com." in line]
@@ -820,16 +856,68 @@ def test_every_character_the_cell_layer_handles_is_pinned(bad: str):
     assert code_span_content(cells[1]) == name
 
 
-@pytest.mark.parametrize("bad", ["\n", "\r", "\r\n"])
-def test_a_line_ending_in_a_value_cannot_end_the_table_row(bad: str):
-    """CommonMark treats a bare `\\r` as a line ending too, so it splits a row exactly like a
-    `\\n` and every column after it falls out of the table. Asserted against the same body
-    built from a clean value, so the control varies the one dimension under test."""
-    clean = body(packages=[approved("com.a"), approved("com.b", model="model")])
-    dirty = body(packages=[approved("com.a"), approved("com.b", model=f"m{bad}odel")])
-    table_lines = [line for line in dirty.splitlines() if line.startswith("| ")]
-    assert len(table_lines) == len([line for line in clean.splitlines() if line.startswith("| ")])
-    assert "`m odel`" in dirty
+@pytest.mark.parametrize("bad", ["\n", "\r", "\r\n", "\x0b", "\x0c", "\x85", "\u2028", "\u2029"])
+def test_the_cell_layer_collapses_every_line_ending_markdown_knows(bad: str):
+    """Driven against `_code` directly, and that is the point rather than a shortcut.
+
+    Every field that reaches the body is now gated by `_check_text`, which refuses a control
+    character outright, so no public call can put a line ending into a cell any more — the
+    route this used to be tested through is closed. That leaves the collapse as the markdown
+    layer's own contract with nothing reachable to exercise it, and an unreachable guard with
+    no test is exactly what rots into a wrong claim. So the primitive is pinned as a primitive:
+    it holds for any string, which is what makes it still correct the day somebody adds a sixth
+    disclosure field and forgets to gate it.
+    """
+    assert emission_module._code(f"m{bad}odel") == "`m odel`"
+
+
+def test_a_control_character_in_a_disclosure_string_is_refused():
+    """The reachable half of the same concern: through the public API a line ending in a
+    disclosure string never gets as far as the cell layer."""
+    with pytest.raises(EmissionError, match="control character"):
+        body(packages=[approved("com.a", model="m\rodel")])
+
+
+PAYLOAD = "ab`[CLICK](http://phish.example)`cd"
+
+
+def test_the_unhosted_body_links_to_nothing_at_all():
+    """The whole-body property, not a per-row one. Every free string carries a backtick-plus-
+    link payload at once, and the unhosted path is supposed to emit no link whatsoever — so
+    the expected set is empty and any escape from any field shows up as a non-empty answer."""
+    rendered = body(
+        vendor="pixel",
+        packages=[approved(f"com.a{PAYLOAD}", model=f"m{PAYLOAD}")],
+        pipeline_version=PAYLOAD,
+        commit_sha=PAYLOAD,
+        base_commit=PAYLOAD,
+        branch=PAYLOAD,
+    )
+    assert link_targets(rendered) == []
+
+
+def test_the_hosted_body_links_only_to_the_bundle_url():
+    """The positive leg: the same payload everywhere, but now the body IS supposed to emit
+    links, so the assertion is the exact set rather than emptiness. A test that only ever
+    expects zero cannot tell a working fence from a renderer that stopped emitting links."""
+    rendered = body(
+        packages=[approved(f"com.a{PAYLOAD}", bundle_sha256=SHA_A, model=f"m{PAYLOAD}")],
+        pipeline_version=PAYLOAD,
+        commit_sha=PAYLOAD,
+        base_commit=PAYLOAD,
+        branch=PAYLOAD,
+        bundle_base_url="https://bundles.example/x",
+    )
+    assert link_targets(rendered) == [f"https://bundles.example/x/{SHA_A}"]
+
+
+def test_the_commit_sha_is_fenced_in_the_prose_as_well_as_the_table():
+    """Both sites, named. The prose one is in the `else` branch — the unhosted path, which is
+    the normal case — so a body rendered with `bundle_base_url` set never reaches it."""
+    rendered = body(commit_sha=PAYLOAD)
+    assert link_targets(rendered) == []
+    assert "pipeline at commit" in rendered
+    assert rendered.count(PAYLOAD) == 2
 
 
 def test_a_backtick_in_a_package_name_cannot_open_a_link():
@@ -866,6 +954,44 @@ def test_a_vendor_that_is_not_a_driver_name_is_refused(bad: str):
 @pytest.mark.parametrize("good", ["pixel", "samsung", SHARED_VENDOR, "oppo", "nothing"])
 def test_every_real_driver_name_is_accepted_as_a_vendor(good: str):
     assert body(vendor=good).startswith(f"## {good}: ")
+
+
+@pytest.mark.parametrize(
+    "field", ["model", "pipeline_version", "commit_sha", "base_commit", "branch"]
+)
+def test_a_surrogate_in_a_disclosure_string_is_refused_before_the_body_is_built(field: str):
+    """`render_pr_body` returns a `str` its caller encodes, so a surrogate that survives to the
+    body is a `UnicodeEncodeError` in the git lane where the contract promises an
+    `EmissionError`. These five reach the body and never the file, which is why the file-side
+    gating did not cover them."""
+    overrides: dict[str, object] = (
+        {"packages": [approved("com.a", model="deepseek\ud800v4")]}
+        if field == "model"
+        else {field: "x\ud800y"}
+    )
+    with pytest.raises(EmissionError, match="unpaired surrogate"):
+        body(**overrides)
+
+
+def test_a_surrogate_in_the_bundle_url_is_refused():
+    with pytest.raises(EmissionError, match="unpaired surrogate"):
+        body(bundle_base_url="https://bundles.example/\ud800")
+
+
+def test_every_string_reaching_the_body_encodes_as_utf8():
+    """The property behind the five cases above, stated once: whatever this function returns,
+    a caller can write to disk. Enumerated from `render_pr_body`'s own signature rather than
+    from the fields I happened to think of."""
+    rendered = body(
+        vendor="pixel",
+        packages=[approved("com.a", model="deepseek-v4-flash")],
+        pipeline_version="0.1.0",
+        commit_sha="c" * 40,
+        base_commit="d" * 40,
+        branch="uadclaw/pixel",
+        bundle_base_url="https://bundles.example/x",
+    )
+    assert rendered.encode("utf-8")
 
 
 @pytest.mark.parametrize("bad", ["https://a.example/x)y", "https://a.example/a b", "https://a(x"])
