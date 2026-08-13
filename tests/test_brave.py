@@ -14,6 +14,7 @@ is chosen by whoever can rank for it.
 """
 
 import asyncio
+from collections.abc import Callable
 
 import httpx
 import pytest
@@ -27,6 +28,7 @@ from uadclaw.brave import (
     BraveRedirectError,
     BraveUnavailableError,
     PageFetcher,
+    _blocked_address,
     extract_text,
     is_fetchable_url,
     merge_results,
@@ -614,26 +616,146 @@ async def test_one_dead_host_costs_only_its_own_result():
     assert fetched[1].judged_text == "s2"
 
 
-async def test_the_fetcher_never_exceeds_its_concurrency_bound():
-    import asyncio
+# How long a handler waits at the barrier before deciding the overlap is never coming. Sized
+# against a loaded CI runner rather than against this box: it is only ever reached when the
+# test is already failing, and `abort()` below means the whole test pays it once, not once per
+# generation. The suite's per-test ceiling is 30s (`pyproject.toml`), so a too-few-permits
+# regression reports in ~5s.
+OVERLAP_TIMEOUT_SECONDS = 5.0
 
-    state = {"live": 0, "peak": 0}
+# How long the parties stay inside the handler after the barrier releases them, so a permit
+# count ABOVE the parties is observable as a surplus arrival. Unlike the barrier this is a
+# bounded wait by necessity — there is no event to await for an arrival that should never
+# happen — and it fails only in the safe direction: too short and a widened bound survives,
+# never a false red.
+#
+# The barrier on its own is a FLAKY detector of a widened bound, not a blind one, and an
+# earlier revision of this comment said blind on the strength of one observation. Measured
+# 2026-08-13, both semaphores at `max_concurrency + 1`, the two tests below run 15x serially:
+# at 0.05 the widening survived 0 of 30 test-instances, at 0.0 it survived 8 of 30. A reviewer
+# running the same protocol independently got 7 of 30. So the surplus task fails to arrive
+# before the parties leave roughly a quarter of the time, and one green run of the
+# barrier-only form was a single draw from that.
+SURPLUS_SETTLE_SECONDS = 0.05
+
+# Barrier generations per test, and the reason the request count is derived rather than
+# written. The count must be a multiple of `bound`, because the barrier fills in generations of
+# exactly `bound`: a remainder leaves those tasks waiting alone at a barrier that can never
+# fill, each burning OVERLAP_TIMEOUT_SECONDS.
+#
+# It used to break SILENTLY. A reviewer measured `bound = 3` against the hardcoded 10 this
+# replaced at 11.6s and still green. Re-measured here 2026-08-13 the same mismatch takes 10.4s
+# and now FAILS, because the timed-out leg of `_assert_the_bound_was_exactly_reached` catches
+# the tasks that never overlapped — so the two fixes overlap, and deriving the count means the
+# mismatch cannot arise rather than merely being reported.
+OVERLAP_GENERATIONS = 5
+
+
+async def _bounded_overlap_handler(
+    state: dict[str, int],
+    barrier: asyncio.Barrier,
+    response: Callable[[], httpx.Response],
+) -> httpx.Response:
+    """One handler call that cannot return until `barrier.parties` of them are inside at once.
+
+    The sleep this replaces only HOPED for the overlap: ten tasks against two permits and a
+    10ms `asyncio.sleep` need the second task scheduled inside that window, which a contended
+    runner does not guarantee. Both callers below failed exactly there on CI run 31677665642
+    with `peak == 1` against correct code, and twice locally in about twenty whole-suite runs
+    under parallel load. A barrier inverts it — the first arrival cannot leave until every
+    party the semaphore is supposed to admit has arrived — so the overlap is a consequence of
+    the permit count and nothing else.
+
+    That covers one half of the equality the callers assert. Too FEW permits never fills the
+    barrier; too MANY is caught by `SURPLUS_SETTLE_SECONDS` above, not by the barrier. What the
+    timeout plus `abort()` buys is that a too-few failure is an assertion in about five seconds
+    rather than a hang, which this repo has already paid for once elsewhere in this file.
+    """
+    state["live"] += 1
+    state["peak"] = max(state["peak"], state["live"])
+    try:
+        await asyncio.wait_for(barrier.wait(), timeout=OVERLAP_TIMEOUT_SECONDS)
+        await asyncio.sleep(SURPLUS_SETTLE_SECONDS)
+    except TimeoutError:
+        state["timed_out"] += 1
+        # Break it for everyone: the remaining callers fail fast instead of each waiting out
+        # their own timeout, and the peak assertion is what reports rather than the clock.
+        await barrier.abort()
+    except asyncio.BrokenBarrierError:
+        state["timed_out"] += 1
+    state["live"] -= 1
+    return response()
+
+
+def _overlap_state() -> dict[str, int]:
+    return {"live": 0, "peak": 0, "timed_out": 0}
+
+
+def _assert_the_bound_was_exactly_reached(state: dict[str, int], bound: int, requests: int) -> None:
+    """Exactly `bound`, not "at most": a client that serialised everything would satisfy an
+    upper bound while proving nothing about the semaphore.
+
+    The timed-out leg is asserted first and separately because a bare `peak == 1` is
+    character-for-character the CI flake this whole shape exists to delete. If the barrier ever
+    fails to fill again, the failure has to say so rather than look like the thing it replaced.
+    """
+    assert state["timed_out"] == 0, (
+        f"{state['timed_out']} of {requests} handlers left the barrier without it filling, so "
+        f"no overlap was ever proven and peak={state['peak']} means nothing. Two causes: the "
+        f"permit count is below {bound} (a regression), or this box starved the event loop "
+        f"past the {OVERLAP_TIMEOUT_SECONDS:g}s ceiling (not one). Re-run at `-n0` before "
+        "filing a regression."
+    )
+    assert state["peak"] == bound, (
+        f"peak={state['peak']} against a bound of {bound}, and the barrier filled, so this is "
+        "the permit count and not the scheduler"
+    )
+
+
+def test_a_barrier_that_never_filled_reports_itself_rather_than_a_bare_peak():
+    """The timed-out leg fires only when its subject is already broken, so no passing test
+    reaches it and its wording would otherwise be pinned by nothing at all.
+
+    That wording is the entire point of the leg. `AssertionError: 1` out of a bare peak check
+    is character-for-character what CI run 31677665642 printed for a scheduling flake, and a
+    too-few-permits regression printed the same thing, so the two were indistinguishable.
+    Driven directly rather than by starving a real run, which would cost the 5s ceiling.
+    """
+    with pytest.raises(AssertionError) as caught:
+        _assert_the_bound_was_exactly_reached({"live": 0, "peak": 1, "timed_out": 3}, 2, 10)
+    message = str(caught.value)
+    assert "3 of 10 handlers left the barrier without it filling" in message
+    assert "a regression" in message, "the regression cause is named"
+    assert "not one" in message, "the not-a-regression cause is named too"
+    assert "-n0" in message, "and what to run before filing one"
+
+
+def test_the_control_a_clean_overlap_passes_the_same_assertion():
+    """Otherwise the pin above is satisfied by an assertion that always raises."""
+    _assert_the_bound_was_exactly_reached({"live": 0, "peak": 2, "timed_out": 0}, 2, 10)
+
+
+async def test_the_fetcher_never_exceeds_its_concurrency_bound():
+    bound = 2
+    requests = bound * OVERLAP_GENERATIONS
+    state = _overlap_state()
+    barrier = asyncio.Barrier(bound)
 
     async def handler(request):
-        state["live"] += 1
-        state["peak"] = max(state["peak"], state["live"])
-        await asyncio.sleep(0.01)
-        state["live"] -= 1
-        return html_response("<html><body><p>a page body here</p></body></html>")
+        return await _bounded_overlap_handler(
+            state,
+            barrier,
+            lambda: html_response("<html><body><p>a page body here</p></body></html>"),
+        )
 
     merged = merge_results(
-        envelope(web=[result(f"https://p{index}.test") for index in range(10)]), limit=10
+        envelope(web=[result(f"https://p{index}.test") for index in range(requests)]),
+        limit=requests,
     )
-    async with fetcher(handler, max_concurrency=2) as pages:
+    assert len(merged) == requests, "every request must reach the fetcher or the count is a lie"
+    async with fetcher(handler, max_concurrency=bound) as pages:
         await pages.fetch_all(merged)
-    # Exactly 2, not "at most 2": a fetcher that serialised everything would also satisfy an
-    # upper bound while proving nothing about the semaphore.
-    assert state["peak"] == 2, state["peak"]
+    _assert_the_bound_was_exactly_reached(state, bound, requests)
 
 
 async def test_the_search_client_never_exceeds_its_concurrency_bound():
@@ -641,22 +763,23 @@ async def test_the_search_client_never_exceeds_its_concurrency_bound():
     creates one task per candidate against a ceiling of 500. Brave's measured policy is 50
     req/s and `_QueryBudget.take()` decrements BEFORE the request, so every 429 an unbounded
     fanout earns spends a query out of the job's ceiling for nothing."""
-    state = {"live": 0, "peak": 0}
+    bound = 2
+    requests = bound * OVERLAP_GENERATIONS
+    state = _overlap_state()
+    barrier = asyncio.Barrier(bound)
 
     async def handler(request):
-        state["live"] += 1
-        state["peak"] = max(state["peak"], state["live"])
-        await asyncio.sleep(0.01)
-        state["live"] -= 1
-        return httpx.Response(200, json=envelope(web=[result("https://a.test/1")]))
+        return await _bounded_overlap_handler(
+            state,
+            barrier,
+            lambda: httpx.Response(200, json=envelope(web=[result("https://a.test/1")])),
+        )
 
-    client, _ = brave([httpx.Response(200, json={})], max_concurrency=2)
+    client, _ = brave([httpx.Response(200, json={})], max_concurrency=bound)
     client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     async with client:
-        await asyncio.gather(*(client.search(f"pkg{index}", limit=1) for index in range(10)))
-    # Exactly 2, not "at most 2": a client that serialised everything would satisfy an upper
-    # bound while proving nothing about the semaphore.
-    assert state["peak"] == 2, state["peak"]
+        await asyncio.gather(*(client.search(f"pkg{index}", limit=1) for index in range(requests)))
+    _assert_the_bound_was_exactly_reached(state, bound, requests)
 
 
 # --- the fetch boundary: nothing may escape into the caller -------------------------------------
@@ -745,6 +868,8 @@ BLOCKED_TARGETS = (
     ("http://192.168.1.1/x", "private"),
     ("http://172.16.0.1/x", "private"),
     ("http://0.0.0.0/x", "unspecified"),
+    ("https://[2002:a9fe:a9fe::]/x", "6to4"),
+    ("https://[2001:0:53aa:64c:200:5efe:c000:201]/x", "teredo"),
 )
 
 
@@ -766,6 +891,98 @@ async def test_an_internal_address_is_refused_before_any_connection_is_opened(ur
     assert reached == [], "no request was made at all"
     assert label in fetched.fetch_error
     assert fetched.text is None
+
+
+MAPPED_SPELLINGS = (
+    "127.0.0.1",
+    "169.254.169.254",
+    "10.0.0.5",
+    "192.168.1.1",
+    "172.16.0.1",
+    "0.0.0.0",
+    "224.0.0.1",
+    "240.0.0.1",
+    "93.184.216.34",
+)
+
+
+@pytest.mark.parametrize("address", MAPPED_SPELLINGS)
+def test_an_ipv4_mapped_address_carries_its_own_ipv4_verdict(address):
+    """A tripwire, and worth naming as one rather than banking it as a pin.
+
+    What it pins: `_blocked_address` answers an `::ffff:` spelling exactly what it answers the
+    IPv4 address it wraps. What it CANNOT pin: that the normalisation in the module is what
+    makes that true. `ipaddress` already answers this way unaided on every interpreter
+    `requires-python = ">=3.12.13"` admits, so deleting those two lines leaves this green —
+    measured 2026-08-13, the whole file at 88 passed with them removed. Only CPython 3.12.3
+    reddened it, at 7 tests, and 3.12.3 is below the floor as of this round.
+
+    Its value is what it catches LATER: `ipaddress`'s classification table moved once inside
+    one minor version already, and this fails the next time it moves. The pin with teeth on the
+    shipping interpreter is the transition-block test below, which asserts a label CPython does
+    not produce on its own.
+
+    "Every supported python" is deliberately not in the name any more. `>=3.12.13` admits 3.13
+    and 3.14, no gate in this repo runs either, and a name is a bad place to keep a promise no
+    job checks.
+    """
+    assert _blocked_address(f"::ffff:{address}") == _blocked_address(address)
+
+
+def test_the_control_a_mapped_public_address_is_still_fetchable():
+    """The pair the equality above cannot state on its own: agreeing on `None` is only worth
+    something if `None` is what a public address gets."""
+    assert _blocked_address("93.184.216.34") is None
+    assert _blocked_address("::ffff:93.184.216.34") is None
+
+
+# A 6to4 or Teredo literal wraps an IPv4 address the requester picks, and the requester here is
+# whoever can rank a page for a package name. Refused by block, never normalised to the IPv4
+# inside: `2002:0808:0808::` wraps `8.8.8.8`, which carries no label, so normalising is the
+# repair that WIDENS the gate.
+TRANSITION_TARGETS = (
+    ("2002:a9fe:a9fe::", "6to4"),  # the cloud metadata address, tunnelled
+    ("2002:7f00:1::", "6to4"),  # loopback, tunnelled
+    ("2002:0a00:0005::", "6to4"),  # RFC1918, tunnelled
+    ("2002:0808:0808::", "6to4"),  # a PUBLIC IPv4, and still refused: the block is the reason
+    ("2002::", "6to4"),  # block floor
+    ("2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "6to4"),  # block ceiling
+    ("2001::1", "teredo"),
+    ("2001:0:53aa:64c:200:5efe:c000:201", "teredo"),  # teredo with an embedded IPv4
+    ("2001:0:ffff:ffff:ffff:ffff:ffff:ffff", "teredo"),  # block ceiling
+)
+
+
+@pytest.mark.parametrize(("address", "label"), TRANSITION_TARGETS)
+def test_a_tunnelled_ipv4_address_is_refused_by_its_block_and_named_for_it(address, label):
+    """The round's discriminating pin, because CPython answers `private` for all nine.
+
+    Measured 2026-08-13: on CPython 3.12.3 the whole of `2002::/16` is `is_private` False and
+    `is_global` True, so `2002:a9fe:a9fe::` — the cloud metadata address wearing a 6to4
+    literal — was FETCHABLE. On 3.12.13 it is `is_private`. That is a reachability divergence
+    rather than the labelling one the `::ffff:` case turned out to be, and raising the floor is
+    what closes it; this test is what keeps it closed when the table moves again.
+
+    Asserting the specific label rather than "refused" is what makes it discriminating on the
+    shipping interpreter: delete the block check and 3.12.13 still refuses all nine, as
+    `private`, so a `is not None` assertion here would be a tautology.
+    """
+    assert _blocked_address(address) == label
+
+
+@pytest.mark.parametrize(
+    "address",
+    (
+        "2003::",  # one bit above the 6to4 block
+        "2001:1::1",  # one /32 above the teredo block
+        "2606:4700:4700::1111",  # a real public resolver
+    ),
+)
+def test_the_control_an_address_outside_the_tunnel_blocks_keeps_its_own_verdict(address):
+    """Refusing `2002::/16` whole is only narrow if it stops at the block's edge — otherwise
+    the same test passes for a gate that refused every IPv6 address there is."""
+    assert _blocked_address(address) != "6to4"
+    assert _blocked_address(address) != "teredo"
 
 
 async def test_a_redirect_into_an_internal_address_is_refused_at_the_hop():
