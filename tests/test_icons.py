@@ -651,13 +651,16 @@ def test_a_valid_drawable_over_the_measured_maximum_is_parsed_not_refused():
     compiled.zip` and `aapt2 link -o out.apk -I android.jar --manifest
     AndroidManifest.xml --min-sdk-version 21 compiled.zip`, extracting
     `res/drawable/big.xml` from the APK and checking the magic `03 00 08 00`. Both link
-    flags are load-bearing: 2.20's compile emits only the protobuf format (there is no
-    legacy flag), and link flattens it back to the legacy binary XML the runtime and
-    this gate read — and without `--min-sdk-version` the vector is auto-split into a
-    480-byte degraded base member plus the full drawable under `-v21`, so the extracted
-    member would be the tiny one. A binary-XML string is length-prefixed (u16 in UTF-16
-    pools, u16-encoded in UTF-8 pools), so one pathData cannot exceed ~64 KB: reaching
-    this size takes four flat paths, each carrying its own pathData string."""
+    flags are load-bearing: 2.20's compile emits only the protobuf format — its
+    `--legacy` flag merely relaxes error checking and does not select an output format —
+    and link flattens it back to the legacy binary XML the runtime and this gate read —
+    and without `--min-sdk-version` the vector is auto-split into a 480-byte degraded
+    base member plus the full drawable under `-v21`, so the extracted member would be
+    the tiny one. A binary-XML string is length-prefixed, and aapt2's UTF-8 pools cap
+    one string at 32,767 bytes (15-bit prefix; measured with this aapt2, a 32,768-char
+    pathData links into the 16-char literal `STRING_TOO_LARGE`), so one pathData cannot
+    exceed ~32 KB: reaching this size takes several flat paths, each carrying its own
+    pathData string (four here)."""
     data = DRAWABLE_97K.read_bytes()
     # The literals, not the constant: a fixture whose range check is built out of
     # MAX_DRAWABLE_BYTES goes green with the constant retuned around it.
@@ -692,6 +695,26 @@ def test_a_valid_drawable_over_the_cap_is_refused_at_the_cap():
     )
 
     assert ApkDrawables(apk).element("@7F110001") is None
+
+
+def test_an_oversized_drawable_is_refused_before_any_decode_at_the_element_seam(monkeypatch):
+    """The decode-order half at the element() seam, mirroring the top-level pin above:
+    the input cap exists because the decode, render and encode all happen before the 64
+    KB output cap is consulted, and a gate that checks the size AFTER decoding still
+    refuses (the return value looks identical) while allocating the unbounded document.
+    Asserting the decoder was never reached is the discriminating half — reordering the
+    gate keeps every other assertion green and this one red. The fixture is the real
+    oversized vector, so a reordered gate would not merely call the decoder but succeed
+    at it; the monkeypatched AXMLPrinter only records the call."""
+    decoded: list[int] = []
+    monkeypatch.setattr(icons_module, "AXMLPrinter", lambda data: decoded.append(len(data)))
+    apk = FakeApk(
+        resources=FakeResources({0x7F110001: [(0, "res/drawable/big.xml")]}),
+        files={"res/drawable/big.xml": DRAWABLE_314K.read_bytes()},
+    )
+
+    assert ApkDrawables(apk).element("@7F110001") is None
+    assert decoded == []
 
 
 def test_a_package_that_declares_no_icon_yields_nothing():
