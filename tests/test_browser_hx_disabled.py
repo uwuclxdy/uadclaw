@@ -10,14 +10,16 @@ WHILE the request is pending and enabled again after the swap is the firing. Wit
 `hx-disabled-elt` removed from the template this test goes red.
 
 Opt-in like the heavy tier: skipped unless UADCLAW_BROWSER_TESTS=1, and skipped again
-when playwright or a browser cannot be resolved. Runs serial (-n0): one browser, one
-port, and the per-checkout DB prefix keeps the suite's parallel contract.
+when playwright or a browser cannot be resolved. Run with -n0 for a lone run; under
+the suite's -n auto the loadscope distribution keeps the single file on one worker,
+so a parallel run is safe too. One browser, one port, and the per-checkout DB prefix
+keeps the suite's parallel contract.
 """
 
 import asyncio
 import os
+import shutil
 import socket
-from pathlib import Path
 
 import pytest
 
@@ -28,7 +30,7 @@ from uadclaw.views import jobs as jobs_view
 pytest.importorskip("playwright")
 
 PASSWORD = "test-only-admin-password"
-CHROME = Path("/usr/bin/google-chrome-stable")
+CHROME = shutil.which("google-chrome-stable")
 # How long the index fetch takes: long enough that the disabled state is observable,
 # short enough that the whole test stays inside the timeout.
 INDEX_FETCH_DELAY_SECONDS = 1.5
@@ -38,6 +40,10 @@ pytestmark = [
     pytest.mark.skipif(
         os.environ.get("UADCLAW_BROWSER_TESTS") != "1",
         reason="opt-in: set UADCLAW_BROWSER_TESTS=1 (needs playwright and a chrome)",
+    ),
+    pytest.mark.skipif(
+        CHROME is None,
+        reason="no chrome on PATH (google-chrome-stable)",
     ),
 ]
 
@@ -102,11 +108,8 @@ async def test_load_devices_disables_the_button_for_the_in_flight_fetch(
     the same button — it sits OUTSIDE the swap target — is enabled again after the
     swap. The presence test stays green with the attribute dead inside htmx's JS; this
     one cannot, which is the distinction docs/todo.md §16 asks for."""
-    if not CHROME.exists():
-        pytest.skip(f"no chrome at {CHROME}")
-
     import uvicorn
-    from playwright.async_api import async_playwright
+    from playwright.async_api import Error, async_playwright
 
     from uadclaw.app import create_app
 
@@ -131,13 +134,20 @@ async def test_load_devices_disables_the_button_for_the_in_flight_fetch(
     server_task = asyncio.create_task(server.serve())
     try:
         await _wait_until(lambda: server.started, what="uvicorn startup")
+    except AssertionError:
+        # A failed bind leaves the real exception in the task, where it would read as
+        # a generic timeout and never be retrieved. Surface the actual cause.
+        if server_task.done():
+            server_task.result()
+        raise
+    try:
         base_url = f"http://127.0.0.1:{port}"
         async with async_playwright() as playwright:
             try:
                 browser = await playwright.chromium.launch(
                     executable_path=str(CHROME), headless=True
                 )
-            except Exception as exc:
+            except Error as exc:
                 pytest.skip(f"could not launch chrome: {exc}")
             try:
                 page = await browser.new_page()
@@ -156,7 +166,7 @@ async def test_load_devices_disables_the_button_for_the_in_flight_fetch(
                 # The response is RECORDED, never awaited here: `expect_response`'s
                 # context manager blocks until the response arrives, which is the whole
                 # in-flight window the test exists to observe.
-                responses: list = []
+                responses: list[object] = []
 
                 def record(resp) -> None:
                     if "/jobs/launch/devices" in resp.url:
@@ -207,4 +217,5 @@ async def test_load_devices_disables_the_button_for_the_in_flight_fetch(
                 await browser.close()
     finally:
         server.should_exit = True
-        await server_task
+        if not server_task.done():
+            await server_task
