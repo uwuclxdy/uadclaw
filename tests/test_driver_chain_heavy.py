@@ -27,7 +27,7 @@ re-download 13 GB on every run.
 Every count below was measured and is asserted exactly — the first three rows on 2026-08-11,
 Samsung's chain figures with `test_samsung_fetch_heavy.py` on 2026-08-12 and its upstream
 columns on this file's first Samsung run 2026-08-13, and Oppo's on its first run 2026-08-13,
-the first time the catalogue's md5 was ever checked against a real transfer. A chain that
+the first heavy run to check the catalogue's md5 over a real transfer. A chain that
 quietly stops extracting returns a smaller number, never an exception: the Xiaomi build's
 three EROFS partitions, the Motorola super's six and the Oppo payload's dumped partitions are
 the whole point of pinning them per partition.
@@ -493,8 +493,9 @@ OPPO_DEVICE = "PLK110"
 # The build id carries the region: the catalogue publishes 12 `ota_version`s twice with
 # different bytes, and the row's own region is the only field that separates them.
 OPPO_BUILD = "PLK110_11.A.72_0720_202607301131_CN"
-# The catalogue row's published md5 and size, checked against a real transfer for the first
-# time on this row's first run (2026-08-13).
+# The catalogue row's published md5 and size, still naming the build these numbers were
+# measured on. Only the md5 is checked over the transfer on this row's first run (2026-08-13):
+# the mock streams no Content-Length, so the size gate is inert here.
 OPPO_MD5 = "2cbe1af4dece932fff62c81f5e6dbb68"
 OPPO_SIZE = 9_146_672_362
 OPPO_ARCHIVE_SHA256 = "cb1a491d594b818101497b2015973dca5489c4644aaf77d8be674663a26b8b71"
@@ -520,13 +521,13 @@ OPPO_QUEUE = {
 # stored-uncompressed `payload.bin` copy (9.15 GB) and the partitions payload-dumper-go dumps
 # from it (~11 GB) all coexist, and the peak comes slightly later — the extraction stages one
 # more EROFS image at a time on top of the archive, the dumps and the APKs it has already
-# harvested, a sampled 29.74 GiB.
+# harvested, a 5-second-sampled peak of 29.74 GiB (the true instantaneous peak sits above it).
 OPPO_REQUIRED_FREE_BYTES = 36 * 1024**3
 
 
 async def test_oppo_plk110_end_to_end(db_env, db_session_factory, monkeypatch, tmp_path):
-    """The first Oppo device through the real chain, and the first time the catalogue's md5
-    is checked against a real transfer. The mock serves the committed catalogue, answers the
+    """The first Oppo device through the real chain, and the first heavy run to check the
+    catalogue's md5 over a real transfer. The mock serves the committed catalogue, answers the
     update endpoint's POST with a plain `2004` — a non-200 code carries no sealed body, so no
     crypto in the handler — and the driver's own fallback then downloads the catalogue's
     durable gate through its real download loop, checking the md5 over all 9.1 GB.
@@ -538,8 +539,8 @@ async def test_oppo_plk110_end_to_end(db_env, db_session_factory, monkeypatch, t
     get_settings.cache_clear()
 
     # The committed fixture is what the driver mints the ref from — the md5 it verifies
-    # against and the size the transfer is checked against — so it has to still describe the
-    # build these numbers were measured on.
+    # against and the size that names the build — so it has to still describe the build these
+    # numbers were measured on.
     catalogue_text = (FIXTURES / "oppo_catalogue.json").read_text(encoding="utf-8")
     catalogue = json.loads(catalogue_text)
     row = next(
@@ -582,12 +583,14 @@ async def test_oppo_plk110_end_to_end(db_env, db_session_factory, monkeypatch, t
     counts = await _run_chain(ctx)
 
     state = read_state(work)
-    # The catalogue's md5, checked against a real 9.1 GB transfer for the first time.
+    # The catalogue's md5, checked over a real 9.1 GB transfer on this row's first run.
     assert state.integrity_verified is True
     assert state.archive_sha256 == OPPO_ARCHIVE_SHA256
     assert counts == OPPO_CHAIN
-    # The CN endpoint was consulted once and answered 2004, so the real fallback ran: the
-    # gate the ref carries was downloaded and its md5 checked over all 9.1 GB.
+    # The CN endpoint was consulted and answered 2004, so the real fallback ran: the gate
+    # the ref carries was downloaded and its md5 checked over all 9.1 GB. The hosts are
+    # pinned exactly because they are the driver's real regional hosts; a host shuffle reds
+    # this row on purpose.
     assert ("POST", "https://component-otapc-cn.allawntech.com/update/v3") in seen
     assert any(
         method == "GET" and url.startswith("https://component-ota-cn.allawntech.com/downloadCheck")
