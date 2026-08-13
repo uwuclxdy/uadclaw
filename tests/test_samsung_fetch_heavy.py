@@ -55,7 +55,7 @@ pytestmark = [
     pytest.mark.timeout(5400),
     pytest.mark.skipif(
         os.environ.get("UADCLAW_HEAVY_TESTS") != "1",
-        reason="opt-in: set UADCLAW_HEAVY_TESTS=1 (needs the real 11.5 GB .enc4 and ~24 GB free)",
+        reason="opt-in: set UADCLAW_HEAVY_TESTS=1 (needs the real 11.5 GB .enc4 and ~44 GB free)",
     ),
 ]
 

@@ -71,7 +71,7 @@ pytestmark = [
     pytest.mark.timeout(5400),
     pytest.mark.skipif(
         os.environ.get("UADCLAW_HEAVY_TESTS") != "1",
-        reason="opt-in: set UADCLAW_HEAVY_TESTS=1 (needs ~40 GB scratch and the toolchain)",
+        reason="opt-in: set UADCLAW_HEAVY_TESTS=1 (needs ~44 GB scratch and the toolchain)",
     ),
 ]
 
@@ -380,7 +380,9 @@ SAMSUNG_ARCHIVE_SHA256 = "fc563d5b8bff839eaacdf0f9d5674ee043309fb5153d9b73542251
 SAMSUNG_APKS_BY_PARTITION = {"product": 79, "system": 407, "system_ext": 13, "vendor": 10}
 SAMSUNG_CHAIN = {"apks": 509, "artifacts": 1143, "packages": 491, "parse_failures": 0}
 SAMSUNG_QUEUE = {
-    # MEASURED: pinned after the first heavy run; this placeholder reds on purpose.
+    # MEASURED: pinned after the first heavy run; this placeholder reds on purpose, and the
+    # failure diff carries the real dict — copy its KEY SET too, since `group_by` omits
+    # zero-count groups and a Samsung run may add an `auto_generated_rro` key.
     "already_upstream": 0,
     "queued": 0,
     "merged_packages": 491,
