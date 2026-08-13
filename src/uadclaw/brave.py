@@ -172,13 +172,27 @@ def is_fetchable_url(url: str) -> bool:
 def _blocked_address(host: str) -> str | None:
     """Why this literal address must not be requested, or `None` if it is not a literal.
 
-    IPv4-mapped IPv6 (`::ffff:127.0.0.1`) is classified correctly by `ipaddress` itself, so
-    the loopback spelling that most often slips a hand-written check is covered here.
+    An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) is classified as the IPv4 address it
+    maps to, because `ipaddress`'s own answer for the mapped spelling is not stable across the
+    interpreters this project declares support for. Measured 2026-08-13 on
+    `ipaddress.ip_address("::ffff:127.0.0.1")`: CPython 3.12.3 answers `is_loopback` False and
+    `is_private` True, CPython 3.12.13 answers both True. Same for the other seven mapped
+    spellings this module is tested against — on 3.12.3 they collapse onto `private` or
+    `reserved`, on 3.12.13 they keep the label their plain IPv4 spelling has.
+
+    Every one of them is refused under both, so the divergence was a wrong LABEL rather than a
+    hole; `::ffff:169.254.169.254` reading "private" is a fact the reader has to decode back.
+    Normalising first makes the label a property of the address instead of a property of the
+    patch level. `ipv4_mapped` covers `::ffff:0:0/96` and nothing else: a 6to4 or Teredo
+    address carrying an embedded IPv4 is a real IPv6 address that routes on its own terms, and
+    is left to the checks below.
     """
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
     # Ordered most specific first: `0.0.0.0` is unspecified AND private, and `127.0.0.1` is
     # loopback AND private, so a name-the-broadest-match order would label every one of them
     # "private" and lose the fact a reader needs.

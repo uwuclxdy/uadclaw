@@ -27,6 +27,7 @@ from uadclaw.brave import (
     BraveRedirectError,
     BraveUnavailableError,
     PageFetcher,
+    _blocked_address,
     extract_text,
     is_fetchable_url,
     merge_results,
@@ -766,6 +767,44 @@ async def test_an_internal_address_is_refused_before_any_connection_is_opened(ur
     assert reached == [], "no request was made at all"
     assert label in fetched.fetch_error
     assert fetched.text is None
+
+
+MAPPED_SPELLINGS = (
+    "127.0.0.1",
+    "169.254.169.254",
+    "10.0.0.5",
+    "192.168.1.1",
+    "172.16.0.1",
+    "0.0.0.0",
+    "224.0.0.1",
+    "240.0.0.1",
+    "93.184.216.34",
+)
+
+
+@pytest.mark.parametrize("address", MAPPED_SPELLINGS)
+def test_an_ipv4_mapped_address_carries_its_own_ipv4_verdict_on_every_supported_python(address):
+    """The label must be a property of the address, never of the interpreter's patch level.
+
+    `ipaddress` disagrees with itself across the versions `requires-python = ">=3.12"` admits:
+    measured 2026-08-13, `::ffff:127.0.0.1` is loopback on CPython 3.12.13 and NOT loopback
+    (private instead) on 3.12.3, which is what CI's runner ships. Nothing was reachable that
+    should not have been — every one of these is refused under both — but the reason handed to
+    an operator changed, and `BLOCKED_TARGETS` above pins reasons.
+
+    Written as an equality against the plain IPv4 spelling rather than as a literal label, so
+    it holds for whatever `ipaddress` decides an IPv4 address is next. `93.184.216.34` is in
+    the set as the control: it makes both spellings agree on `None`, so a `_blocked_address`
+    that refused everything would satisfy the other eight and die here.
+    """
+    assert _blocked_address(f"::ffff:{address}") == _blocked_address(address)
+
+
+def test_the_control_a_mapped_public_address_is_still_fetchable():
+    """The pair the equality above cannot state on its own: agreeing on `None` is only worth
+    something if `None` is what a public address gets."""
+    assert _blocked_address("93.184.216.34") is None
+    assert _blocked_address("::ffff:93.184.216.34") is None
 
 
 async def test_a_redirect_into_an_internal_address_is_refused_at_the_hop():
