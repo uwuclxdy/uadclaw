@@ -56,6 +56,27 @@ def test_a_static_library_provider_counts_as_a_provider():
     assert graph.dependencies_of("com.vendor.app") == ("com.vendor.lib",)
 
 
+def test_a_static_library_consumer_is_an_edge_in_both_directions():
+    """The consumer half of the pair, on the graph side: a package whose required bucket holds
+    a static library's name — populated by the `<uses-static-library>` parse — gets the same
+    edge a `required="true"` consumer gets, against a static provider, in both directions."""
+    graph = graph_of(
+        CorpusPackage(
+            package="com.google.android.trichromelibrary",
+            static_libraries=("com.google.android.trichromelibrary",),
+        ),
+        CorpusPackage(
+            package="com.android.chrome",
+            uses_libraries_required=("com.google.android.trichromelibrary",),
+        ),
+    )
+
+    assert graph.dependencies_of("com.android.chrome") == ("com.google.android.trichromelibrary",)
+    assert graph.needed_by("com.google.android.trichromelibrary") == ("com.android.chrome",)
+    assert [edge.detail for edge in graph.edges] == ["com.google.android.trichromelibrary"]
+    assert [edge.kind for edge in graph.edges] == [EDGE_LIBRARY]
+
+
 def test_library_providers_lists_every_declarer():
     corpus = [
         CorpusPackage(package="com.a", libraries=("shared",)),
@@ -116,6 +137,27 @@ def test_an_overlay_pointing_outside_the_corpus_records_the_target_and_emits_not
 
     assert graph.edges == ()
     assert graph.evidence["com.example.overlay"].overlay_target_absent == "com.absent.app"
+
+
+def test_a_static_library_consumer_with_no_provider_in_corpus_is_evidence():
+    """Folding the static consumer into the existing bucket means the evidence split fires
+    unchanged: no in-corpus provider, no edge, and the name lands exactly where an unresolved
+    `required="true"` name lands."""
+    graph = graph_of(
+        CorpusPackage(
+            package="com.android.chrome",
+            uses_libraries_required=(
+                "com.google.android.trichromelibrary",
+                "com.absent.library",
+            ),
+        ),
+        platform=frozenset({"com.google.android.trichromelibrary"}),
+    )
+
+    assert graph.edges == ()
+    evidence = graph.evidence["com.android.chrome"]
+    assert evidence.required_libraries_from_platform == ("com.google.android.trichromelibrary",)
+    assert evidence.required_libraries_unresolved == ("com.absent.library",)
 
 
 def test_a_package_never_becomes_its_own_dependency():

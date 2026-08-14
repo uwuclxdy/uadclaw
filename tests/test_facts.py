@@ -12,13 +12,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from lxml import etree
 from sqlalchemy import func, select
 from sqlalchemy import inspect as sa_inspect
 
 from uadclaw import icons as icons_module
 from uadclaw import jobs as jobs_module
 from uadclaw import stages as stages_module
-from uadclaw.facts import LABEL_UNKNOWN, ApkFacts, ApkParseError, IntentFilterFact, parse_apk
+from uadclaw.facts import (
+    LABEL_UNKNOWN,
+    ApkFacts,
+    ApkParseError,
+    IntentFilterFact,
+    _uses_libraries,
+    parse_apk,
+)
 from uadclaw.factstore import (
     _SCALAR_OBSERVATION_FIELDS,
     UNION_FIELDS,
@@ -444,6 +452,39 @@ async def test_one_device_shipping_a_package_twice_stays_two_observations(
     assert fact.has_conflict is True
     async with db_session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(PackageObservation)) == 2
+
+
+# --- the manifest parse -------------------------------------------------------------------
+
+
+def test_a_uses_static_library_consumer_is_a_hard_dependency():
+    """The consumer half of the library edge class. `<uses-static-library>` carries no
+    `required` attribute, so a static consumer is a hard dependency by construction: its name
+    lands in the bucket a `required="true"` uses-library uses, and it leaves the optional
+    bucket, whose entry would claim the app works without a library the same manifest makes
+    unwaivable. Both local corpora declare zero of these elements, so no real manifest can pin
+    this branch — a synthetic element can, because what is under test is this module's
+    element-walking rather than androguard's AXML decode (which stays the heavy suite's job)."""
+    application = etree.fromstring(
+        '<application xmlns:android="http://schemas.android.com/apk/res/android">'
+        '<uses-library android:name="android.ext.shared" android:required="false"/>'
+        '<uses-library android:name="com.framework.required"/>'
+        '<uses-library android:name="com.conflicted" android:required="false"/>'
+        '<uses-static-library android:name="com.google.android.trichromelibrary" '
+        'android:version="435302154"/>'
+        '<uses-static-library android:name="com.framework.required" android:version="1"/>'
+        '<uses-static-library android:name="com.conflicted" android:version="1"/>'
+        "</application>"
+    )
+
+    required, optional = _uses_libraries(application)
+
+    assert required == (
+        "com.framework.required",
+        "com.google.android.trichromelibrary",
+        "com.conflicted",
+    )
+    assert optional == ("android.ext.shared",)
 
 
 # --- the stage's own inputs ---------------------------------------------------------------

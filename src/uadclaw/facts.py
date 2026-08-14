@@ -198,7 +198,10 @@ def _libraries(parent: Any, tag: str) -> tuple[LibraryFact, ...]:
 def _uses_libraries(parent: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """`required` defaults to `"true"` per the AOSP manifest docs, so an omitted attribute is a
     hard dependency and must not fall into the optional bucket — that bucket is explicitly not
-    emitted as a graph edge in task 5."""
+    emitted as a graph edge in task 5. A `<uses-static-library>` consumer is the same promise
+    made unwaivable: the element has no `required` attribute, so it can never be optional, and
+    a name it requires leaves the optional bucket — an optional entry would claim the app
+    works without a library the same manifest makes unwaivable."""
     required: list[str] = []
     optional: list[str] = []
     if parent is None:
@@ -210,6 +213,17 @@ def _uses_libraries(parent: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
         bucket = optional if _attr(element, "required") == "false" else required
         if name not in bucket:
             bucket.append(name)
+    for element in parent.iterfind("uses-static-library"):
+        # The element also declares a `version`, but the edge class matches by name only — the
+        # names-only buckets have no carrier for a consumer version, and the provider side
+        # already carries its own.
+        name = _attr(element, "name")
+        if name is None:
+            continue
+        if name not in required:
+            required.append(name)
+        if name in optional:
+            optional.remove(name)
     return tuple(required), tuple(optional)
 
 

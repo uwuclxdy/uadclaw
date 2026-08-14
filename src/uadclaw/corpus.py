@@ -9,8 +9,10 @@ reader can check against the manifest by hand:
 - `<overlay android:targetPackage="X">` ⇒ the overlay depends on X. Fully mechanical: an RRO
   addresses exactly one target package and is meaningless without it.
 - provider declares `<library name="L">` or `<static-library name="L">`, consumer declares
-  `<uses-library name="L" required="true">` ⇒ the consumer depends on the provider. AOSP
-  documents the consumer as uninstallable on a device without the library.
+  `<uses-library name="L" required="true">` (`required` defaults to `"true"` per AOSP, so an
+  attribute-less `<uses-library>` is the same consumer) or `<uses-static-library name="L">`
+  ⇒ the consumer depends on the provider. AOSP documents the consumer as uninstallable on a
+  device without the library.
 
 Everything else is recorded as **evidence and never as an edge**, per the repo rule that
 `dependencies` and `neededBy` are never inferred loosely:
