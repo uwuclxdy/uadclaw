@@ -14,6 +14,7 @@ pool forced back to 1 confirms the assertion actually discriminates.
 
 import asyncio
 
+import pytest
 from sqlalchemy import func, select
 
 from conftest import FIRMWARE_TARGET
@@ -147,23 +148,40 @@ async def test_pool_size_one_never_shows_two_jobs_running_concurrently(
     )
 
 
+@pytest.mark.timeout(90)  # run_pool_until's 60s + job creation/reads + 5s pool shutdown
+# + teardown (~75s minimum); the old 30s suite-wide ceiling was sized for unit tests and a
+# loaded worker-pool test ran 21.6-28.7s against it (measured).
 async def test_job_waiting_on_a_contended_lease_is_not_falsely_reclaimed(
     monkeypatch, db_env, db_session_factory, run_pool_until
 ):
     """M3: the heartbeat must start BEFORE the lease wait, not after — a job blocked on a
     contended lease for longer than the stale window must not be reclaimed out from under
     itself just because it hasn't reached its own stage work yet. Job A holds the lease for
-    1s; the stale window and sweep interval are both well under that, so if job B's
+    6s; the stale window and sweep interval are both well under that, so if job B's
     heartbeat only started once ITS wait was over (the pre-fix bug), the periodic sweep
-    would reclaim it mid-wait and it would come back as a second attempt."""
+    would reclaim it mid-wait and it would come back as a second attempt.
+
+    The windows are sized for the measured heartbeat DB round trip, not for an idle box.
+    The heartbeat period is interval + write latency, and under a concurrent heavy-unpack
+    suite (or one pgbench hammering the shared Postgres) the write latency reaches
+    0.32-0.47s (measured during the investigation) and was observed at 0.71s worst in the
+    campaign that reproduced this flake. The row's age at the sweep's sample can therefore
+    reach ~0.9s; against the 3.0s stale window that is a 3x margin, while the old 0.1s
+    interval against a 0.3s window let the sweep sample the gap and reclaim a perfectly
+    healthy waiting job. Production's margin is the same shape and far wider: (300-30)/2 =
+    135s of latency budget vs this test's (3.0-0.2)/2 = 1.4s, and the ratios match or beat
+    production too (15x stale/heartbeat vs 10x, 2x sweep/heartbeat). Stacking TWO
+    concurrent pgbenches on top of the heavy suite pushed the heartbeat row age past 2s
+    (measured), a shape this test need not size for; it is not this test's verify
+    shape."""
     monkeypatch.setenv("WORKER_POOL_SIZE", "2")
-    monkeypatch.setenv("LEASE_STALE_AFTER_SECONDS", "0.3")
-    monkeypatch.setenv("HEARTBEAT_INTERVAL_SECONDS", "0.1")
-    monkeypatch.setenv("SWEEP_INTERVAL_SECONDS", "0.2")
+    monkeypatch.setenv("LEASE_STALE_AFTER_SECONDS", "3.0")
+    monkeypatch.setenv("HEARTBEAT_INTERVAL_SECONDS", "0.2")
+    monkeypatch.setenv("SWEEP_INTERVAL_SECONDS", "0.4")
     settings = get_settings()
 
     async def _slow_holder(ctx):
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(6.0)
 
     handlers = default_stage_handlers()
     handlers["acquire"] = _slow_holder
@@ -178,7 +196,11 @@ async def test_job_waiting_on_a_contended_lease_is_not_falsely_reclaimed(
             rows = (await session.execute(select(Job).where(Job.id.in_(ids)))).scalars()
             return all(j.state in (JobState.SUCCEEDED, JobState.FAILED) for j in rows)
 
-    await run_pool_until(db_session_factory, settings, handlers, _both_terminal, timeout=10)
+    # 60s: 12s of stage sleeps (6s hold x 2 jobs) plus ~25-30s of DB-serialized query time
+    # at the measured 0.3-0.7s per-write latency under load (passing runs of the previous
+    # shape measured 21.6-28.7s wall under a stacked load); the original 10s was sized
+    # against the 2s of sleeps the old 1s hold produced and tripped under load.
+    await run_pool_until(db_session_factory, settings, handlers, _both_terminal, timeout=60)
 
     async with db_session_factory() as session:
         jobs = {
