@@ -4,7 +4,7 @@
 
 **Automatic LLM-driven bloat classification of Android apps, from official OEM firmware to a reviewed UAD-ng pull request.**
 
-A FastAPI dashboard drives a worker through ten pipeline stages, and a human approves every package before it ships upstream.
+A FastAPI dashboard drives a worker through ten pipeline stages. A human approves every package before it ships upstream.
 
 [![license](https://shields.uwuclxdy.dev/badge/license-MIT-blue)](#license)
 [![ci](https://shields.uwuclxdy.dev/github/actions/workflow/status/uwuclxdy/uadclaw/ci.yml?branch=mommy)](.github/workflows/ci.yml)
@@ -13,17 +13,17 @@ A FastAPI dashboard drives a worker through ten pipeline stages, and a human app
 
 ---
 
-uadclaw pulls official OEM firmware and extracts its preinstalled APKs. A named list waives the appless partitions (`*_dlkm` kernel-module images, filesystems like `userdata`), never silently. It derives what it can deterministically and classifies the rest with DeepSeek. Every candidate goes through a human gate before it becomes a pull request to [UAD-ng](https://github.com/Universal-Debloater-Alliance/universal-android-debloater-next-generation). Spend is deliberate: the deterministic half never touches a paid API, and the model can only raise a rating above a computed floor.
+uadclaw pulls official OEM firmware and extracts every preinstalled APK. It derives what the manifests can prove, then classifies the rest with an LLM. Every candidate passes a human gate before it becomes a pull request to [UAD-ng](https://github.com/Universal-Debloater-Alliance/universal-android-debloater-next-generation). The deterministic half never touches a paid API. The model can only raise a rating above a computed floor, never lower one.
 
 ![the triage queue: ranked candidate cards with keyboard decisions](assets/triage.png)
 
 ## Why
 
-- **Deterministic first, model last.** acquire through rule_ladder read the firmware bytes and the manifests. DeepSeek writes the description and proposes a removal; `dependencies` and `neededBy` never come from the model. Every field carries its provenance: `rule:`, `graph:`, `llm:`, `human:`.
+- **Deterministic first, model last.** acquire through rule_ladder read the firmware bytes and the manifests. The LLM writes the description and proposes a removal; `dependencies` and `neededBy` never come from the model. Every field carries its provenance: `rule:`, `graph:`, `llm:`, `human:`.
 - **The rule ladder sets a floor the model can raise, never lower.** `coreApp`, `priv-app`, `sharedUserId` and friends pin a danger tier. A below-floor answer is rejected, never clamped.
 - **LLM spend is a separate job, never an automatic step.** A firmware job ends at the rule ladder. A human queues the classification job that pays the API.
 - **Every model answer faces an external check.** A Brave search and a judge pass look for independent support. A citation the judge was never handed refuses the whole response.
-- **The evidence bundle is the reproducibility anchor.** It is content-addressed and pinned, because DeepSeek has no seed. The same bundle hash means the same question.
+- **The evidence bundle is the reproducibility anchor.** It is content-addressed and pinned, because the LLM has no seed. The same bundle hash means the same question.
 - **Nothing pushes itself.** Approved entries are appended to a local branch with the disclosure upstream requires. A human pushes and opens the PR.
 
 ## How it works
@@ -36,12 +36,18 @@ uadclaw pulls official OEM firmware and extracts its preinstalled APKs. A named 
 | corpus graph | two dependency edge classes only: overlay-to-target and required-library provider to consumer |
 | filter | drops what is already in `uad_lists.json`, auto-generated RROs, and emulator-only packages |
 | rule ladder | the removal floor from manifest and `/etc` signals; the model may raise it, never lower it |
-| llm | DeepSeek writes the description and proposes a removal; below-floor answers are rejected |
+| llm | the LLM writes the description and proposes a removal; below-floor answers are rejected |
 | corroborate | Brave search plus a judge pass; a fabricated citation refuses the whole response |
 | triage | keyboard-driven human gate, ranked by device count; decisions land in an append-only log |
 | branch | approved entries are appended to the operator's clone of upstream; the PR body carries the disclosure |
 
-The worker runs firmware jobs through acquire to rule_ladder. Classification (llm, corroborate) and branch emission are separate job kinds a human queues.
+## LLM providers
+
+| provider | models | used for |
+|---|---|---|
+| DeepSeek | deepseek-v4-flash, deepseek-v4-pro | classification and the corroboration judge |
+
+DeepSeek is the only provider wired today. The client speaks the OpenAI wire format, so another one is a base URL plus a key.
 
 ## Install
 
@@ -56,14 +62,13 @@ mkdir -p secrets
 printf 'a long random postgres password' > secrets/postgres_password
 printf 'a long random login password'    > secrets/auth_password
 printf 'a long random session secret'    > secrets/session_secret
-touch secrets/deepseek_key               # blank is fine; the file must exist
-touch secrets/brave_key                  # blank is fine; the file must exist
+touch secrets/deepseek_key secrets/brave_key
 docker compose up -d --wait postgres
 docker compose run --rm web alembic upgrade head
 docker compose up -d
 ```
 
-The dashboard is at http://localhost:8000. Login is the single `AUTH_PASSWORD`. `secrets/deepseek_key` and `secrets/brave_key` are blank by default: the file must exist, an empty file is fine, and the install block creates them. Blank content fails only the paid stages, at the point of use, never at startup.
+The dashboard is at http://localhost:8000. Login is the single `AUTH_PASSWORD`. The two API-key files must exist and may stay empty. A blank key fails its own paid stage at the point of use, never at startup.
 
 > [!NOTE]
 > The worker bind-mounts a scratch dir for multi-GB firmware unpack and, for branch emission, the operator's clone of upstream. Defaults are in docker-compose.yml with their one-time setup steps. For a quick local run, point `WORKER_SCRATCH_DIR` at a writable directory.
@@ -99,12 +104,7 @@ Settings load from mounted docker secrets first, then the environment, then `.en
 | `PIPELINE_COMMIT_SHA` | unset | the commit of this pipeline; branch emission refuses without it |
 | `WORKER_SCRATCH_DIR` | `/mnt/ssd-1/scratch` | host directory for firmware unpack |
 
-<details>
-<summary>Full settings reference</summary>
-
-The first-touch keys are all in the table above: the three credentials, `PIXEL_TERMS_ACK_COOKIE_VALUE`, `SAMSUNG_MODELS`/`SAMSUNG_REGIONS`, `MOTOROLA_DEVICES`, `DEEPSEEK_KEY`, `BRAVE_KEY`, `UPSTREAM_REPO_PATH`, `PIPELINE_COMMIT_SHA` and `WORKER_SCRATCH_DIR`. The complete schema, defaults and comments included, lives in `src/uadclaw/settings.py` and `.env.example`.
-
-</details>
+Every remaining key, grouped with its default and its type, is on the [Configuration](https://github.com/uwuclxdy/uadclaw/wiki/Configuration) wiki page. The schema itself lives in `src/uadclaw/settings.py` and `.env.example`.
 
 ## Comparison
 
@@ -120,13 +120,13 @@ The first-touch keys are all in the table above: the three credentials, `PIXEL_T
 
 **What does uadclaw classify?** The preinstalled APKs of official OEM firmware, minus the partitions a named list waives as appless, for the Universal Android Debloater list.
 
-**Which phones does it support?** Pixel, Xiaomi, Nothing, Motorola, Samsung and Oppo/OnePlus/realme. One driver each, and unpack dispatches on bytes, never on the OEM.
+**Which phones does it support?** Pixel, Xiaomi, Nothing, Motorola, Samsung and Oppo/OnePlus/realme, one driver each. Unpacking dispatches on bytes, never on the OEM.
 
 **Does the model decide what gets removed?** No. The rule ladder sets a floor, the model proposes, and a human approves in triage. A below-floor answer is rejected, not clamped.
 
 **Does uadclaw push to upstream?** No. It commits a local branch and renders the PR body. A human pushes and opens the PR.
 
-**What does it cost to run?** DeepSeek and Brave tokens for the two paid stages. The deterministic half needs no paid keys at all.
+**What does it cost to run?** LLM and Brave tokens for the two paid stages. The deterministic half needs no paid keys at all.
 
 ## Development
 
@@ -138,11 +138,27 @@ uv run ruff format --check
 uv run pytest
 ```
 
-The suite needs a real Postgres: the override publishes loopback port 55432, and DB-backed tests fail loudly, not skip, when nothing is reachable. That override is gitignored, so a fresh clone lacks it: copy `docker-compose.override.yml` from a checkout that has one, or recreate it locally. The suite creates one isolated database per pytest-xdist worker and migrates it with alembic itself. Heavy tests that run the real extraction chain against a multi-GB image need `UADCLAW_HEAVY_TESTS=1`. Run the app from source with `uv run uvicorn uadclaw.asgi:app` and a Postgres reachable at your `.env` coordinates.
+The suite needs a real Postgres on loopback port 55432. `docker-compose.override.yml` publishes it and plain `docker compose` merges that file automatically, so never pass `-f docker-compose.yml`. The override is gitignored, so a fresh clone lacks it and every DB-backed test fails loudly rather than skipping; the [Development](https://github.com/uwuclxdy/uadclaw/wiki/Development) wiki page carries the four lines to recreate it. Each pytest-xdist worker gets its own database, migrated by alembic. Heavy tests run the real extraction chain against a multi-GB image and need `UADCLAW_HEAVY_TESTS=1`. Run the app from source with `uv run uvicorn uadclaw.asgi:app`.
 
 ## Documentation
 
-The design doc and the domain knowledge live in `docs/` locally; they are gitignored by design, so a checkout never carries them. `src/uadclaw/settings.py` and `.env.example` are the committed configuration reference. Issues and PRs are welcome; [CONTRIBUTING](.github/CONTRIBUTING.md) has the rules, agent formats included.
+The [wiki](https://github.com/uwuclxdy/uadclaw/wiki) is the full reference.
+
+| page | covers |
+|---|---|
+| [Firmware drivers](https://github.com/uwuclxdy/uadclaw/wiki/Firmware-Drivers) | one section per OEM: index shape, ref identity, terms posture, measured gotchas |
+| [Unpacking](https://github.com/uwuclxdy/uadclaw/wiki/Unpacking) | magic-number dispatch, the container chains, partition handling, path safety |
+| [Facts and corpus](https://github.com/uwuclxdy/uadclaw/wiki/Facts-and-Corpus) | manifest facts, the cross-device merge, the dependency graph's two edge classes |
+| [Rule ladder](https://github.com/uwuclxdy/uadclaw/wiki/Rule-Ladder) | the removal floor, the rules that set it, provenance, the queue filters |
+| [Classification](https://github.com/uwuclxdy/uadclaw/wiki/Classification) | the evidence bundle, the DeepSeek client, the response validator, persistence |
+| [Corroboration](https://github.com/uwuclxdy/uadclaw/wiki/Corroboration) | the two Brave clients, the SSRF gate, the judge, the fabricated-citation refusal |
+| [Jobs and worker](https://github.com/uwuclxdy/uadclaw/wiki/Jobs-and-Worker) | job kinds, the per-kind stage walk, claiming, the ownership fence, scratch leases |
+| [Triage and emission](https://github.com/uwuclxdy/uadclaw/wiki/Triage-and-Emission) | the human gate, the decision log, the append-only splice, branch safety |
+| [Configuration](https://github.com/uwuclxdy/uadclaw/wiki/Configuration) | every settings key with its default and what it gates |
+| [Deployment](https://github.com/uwuclxdy/uadclaw/wiki/Deployment) | the compose stack, secrets, bind mounts, hardening, the build stages |
+| [Development](https://github.com/uwuclxdy/uadclaw/wiki/Development) | the local loop, the test posture, migrations, what CI gates |
+
+The design doc and the domain knowledge stay in `docs/`, gitignored, so a checkout never carries them. Issues and PRs are welcome; [CONTRIBUTING](.github/CONTRIBUTING.md) has the rules, agent formats included.
 
 ## License
 
