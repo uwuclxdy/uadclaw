@@ -7,6 +7,7 @@ two rows, a re-scan drifting, a second signing certificate quietly winning — p
 own input handling, all of which run in milliseconds and none of which need an APK to exist.
 """
 
+import struct
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,6 +25,8 @@ from uadclaw.facts import (
     ApkFacts,
     ApkParseError,
     IntentFilterFact,
+    _authorities_in_dex,
+    _content_uri_authorities,
     _uses_libraries,
     parse_apk,
 )
@@ -427,6 +430,31 @@ async def test_list_signals_are_unioned_across_devices(db_env, db_session_factor
     assert [item["priority"] for item in fact.intent_filters] == [100]
 
 
+async def test_content_uri_authorities_are_unioned_across_devices(db_env, db_session_factory):
+    """The dex scan's evidence is additive like every other list signal: an authority seen on
+    one device is still a reference the package makes even if another device's build dropped
+    it, and the same string seen twice merges once."""
+    await store(
+        db_session_factory,
+        "pixel:oriole",
+        "A.1",
+        make_facts(
+            "com.example.app",
+            content_uri_authorities=("com.alpha.provider", "com.beta.provider"),
+        ),
+    )
+    await store(
+        db_session_factory,
+        "xiaomi:lisa",
+        "B.2",
+        make_facts("com.example.app", content_uri_authorities=("com.alpha.provider",)),
+    )
+
+    fact = await merged_row(db_session_factory, "com.example.app")
+
+    assert fact.content_uri_authorities == ["com.alpha.provider", "com.beta.provider"]
+
+
 async def test_one_device_shipping_a_package_twice_stays_two_observations(
     db_env, db_session_factory
 ):
@@ -788,3 +816,161 @@ def test_androguard_loguru_records_are_dropped_by_the_library_not_by_a_fixture()
 
     assert any("anywhere else" in line for line in captured)
     assert not [line for line in captured if "123 KB" in line]
+
+
+# --- the content-uri dex scan -------------------------------------------------------------
+
+
+def dex_with_strings(*strings: str) -> bytes:
+    """A minimal dex carrying nothing but a string table. The content-uri scan reads only the
+    header's `string_ids_size`/`string_ids_off` and the `string_data_item`s, so a fixture that
+    holds exactly those exercises every branch of it."""
+    ids_off = 112
+    data = bytearray()
+    offsets = []
+    for string in strings:
+        offsets.append(ids_off + 4 * len(strings) + len(data))
+        encoded = string.encode("utf-8")
+        length = len(encoded)
+        while True:
+            byte = length & 0x7F
+            length >>= 7
+            if length:
+                data.append(byte | 0x80)
+            else:
+                data.append(byte)
+                break
+        data += encoded
+    header = bytearray(112)
+    header[0:8] = b"dex\n035\0"
+    struct.pack_into("<II", header, 56, len(strings), ids_off)
+    ids = b"".join(struct.pack("<I", offset) for offset in offsets)
+    return bytes(header) + ids + bytes(data)
+
+
+def test_the_dex_scan_finds_authorities_and_skips_the_concatenation_artifact_slash():
+    """A URI built by concatenating `content://` with an authority that carries its own
+    leading slash (`content:///…`) must not lose the reference over a join artifact: the
+    scan skips one slash after the scheme, and the two-slash spelling is accepted too. A
+    bare scheme, with or without a trailing slash, refers to no authority and records
+    nothing. Measured 2026-08-14, no reachable literal on the emulator corpus has the
+    three-slash shape — the branch is defensive, and the fixture carries both spellings."""
+    dex = dex_with_strings(
+        "content:///com.google.android.gsf.gservices/prefix",
+        "content://com.google.settings/partner",
+        "no uri here",
+        "content://",
+        "content:///",
+    )
+
+    assert _authorities_in_dex(dex) == (
+        "com.google.android.gsf.gservices",
+        "com.google.settings",
+    )
+
+
+def test_the_dex_scan_matches_the_scheme_case_insensitively_and_dedupes():
+    dex = dex_with_strings(
+        "Content:///com.example.a/x",
+        "content:///com.example.a/y",
+        "CONTENT:///com.example.b/z",
+    )
+
+    assert _authorities_in_dex(dex) == ("com.example.a", "com.example.b")
+
+
+def test_the_dex_scan_records_a_placeholder_authority_literally():
+    """A runtime-built URI (`content://%s/…`) is recorded by its literal authority: it matches
+    no declared authority, lands in the absent bucket, and is never guessed at."""
+    assert _authorities_in_dex(dex_with_strings("content://%s/publicvalue/x")) == ("%s",)
+
+
+def test_the_dex_scan_does_not_false_positive_inside_a_multibyte_string():
+    """MUTF-8 multi-byte sequences have the high bit set on every byte (their NUL form is
+    `C0 80`), so the ASCII pattern can neither appear inside one nor straddle one — and a
+    reference after the non-ASCII text is still found."""
+    dex = dex_with_strings("héllo content:///com.example.x/path")
+
+    assert _authorities_in_dex(dex) == ("com.example.x",)
+
+
+def test_the_dex_scan_skips_a_non_ascii_authority():
+    dex = dex_with_strings("content:///café/x", "content:///com.example.ok/y")
+
+    assert _authorities_in_dex(dex) == ("com.example.ok",)
+
+
+def test_the_dex_scan_refuses_bytes_that_are_not_a_dex():
+    with pytest.raises(ValueError, match="not a dex"):
+        _authorities_in_dex(b"PK\x03\x04this is a zip, not a dex")
+
+
+def test_the_dex_scan_refuses_a_string_table_that_reaches_past_the_member():
+    """A member whose header claims more string ids than it carries: the ids table itself
+    overruns the file, so no string is reachable."""
+    dex = bytearray(dex_with_strings("a"))
+    struct.pack_into("<I", dex, 56, 2)  # claim two strings, provide one id
+
+    with pytest.raises(ValueError, match="string table reaches past the end"):
+        _authorities_in_dex(bytes(dex))
+
+
+def test_the_dex_scan_refuses_a_string_offset_at_or_past_the_end():
+    dex = bytearray(dex_with_strings("content:///x"))
+    struct.pack_into("<I", dex, 112, len(dex))  # the id points at the member's own end
+
+    with pytest.raises(ValueError, match="string offset reaches past the end"):
+        _authorities_in_dex(bytes(dex))
+
+
+def test_the_dex_scan_refuses_a_string_length_that_walks_past_the_end():
+    """A uleb128 length that starts on a continuation byte at EOF: the walk runs off the
+    member before the length terminates."""
+    dex = bytearray(dex_with_strings("x"))
+    dex.append(0x80)  # a bare continuation byte, nothing after it
+    struct.pack_into("<I", dex, 112, len(dex) - 1)
+
+    with pytest.raises(ValueError, match="string length reaches past the end"):
+        _authorities_in_dex(bytes(dex))
+
+
+def test_the_dex_scan_refuses_a_string_length_over_five_uleb128_bytes():
+    """A uleb128 that never terminates within its five bytes: the length cannot be
+    represented, so the span it would bound is unknowable."""
+    dex = bytearray(dex_with_strings("x"))
+    dex += b"\x80\x80\x80\x80\x80\x80"
+    struct.pack_into("<I", dex, 112, len(dex) - 6)
+
+    with pytest.raises(ValueError, match="overflows five uleb128 bytes"):
+        _authorities_in_dex(bytes(dex))
+
+
+def test_the_dex_scan_refuses_a_string_that_overruns_the_member():
+    dex = bytearray(dex_with_strings("x"))
+    dex += b"\x63x"  # a length of 99 bytes over a 1-byte string
+    struct.pack_into("<I", dex, 112, len(dex) - 2)
+
+    with pytest.raises(ValueError, match="a string reaches past the end of the member"):
+        _authorities_in_dex(bytes(dex))
+
+
+class _ApkWithDexMembers:
+    def __init__(self, *members: bytes):
+        self._members = members
+
+    def get_all_dex(self):
+        return iter(self._members)
+
+
+def test_a_dex_member_that_will_not_parse_costs_the_apk_nothing(caplog):
+    """The icon's policy, applied to the scan: dex bytes are external input, and one broken
+    member must not fail the APK. The readable members still contribute, the refusal is
+    logged with its traceback, and the stage's failure budget never hears about it."""
+    apk = _ApkWithDexMembers(
+        b"not a dex at all",
+        dex_with_strings("content:///com.example.x/a"),
+    )
+
+    assert _content_uri_authorities(apk, origin="/system/app/X/X.apk") == ("com.example.x",)
+    assert caplog.records[-1].exc_info is not None
+    assert "X.apk" in caplog.text

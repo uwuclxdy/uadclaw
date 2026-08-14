@@ -110,6 +110,11 @@ CORPUS = [
             ),
         ),
     ),
+    make_facts("com.example.contentprovider", provider_authorities=("com.example.content",)),
+    make_facts(
+        "com.example.contentclient",
+        content_uri_authorities=("com.example.content", "com.example.gone"),
+    ),
 ]
 
 
@@ -308,6 +313,15 @@ async def test_the_graph_stage_writes_both_edge_classes_and_the_evidence(
     assert rows["com.listed.one"].dependencies == []
     assert [edge["kind"] for edge in rows["com.vendor.app"].edges] == ["library"]
     assert rows["com.listed.one"].evidence["queries_packages_absent"] == []
+    # A dex `content://` reference to another package's declared authority: evidence on the
+    # card, zero edges on the graph — the same contract as the package queries.
+    assert rows["com.example.contentclient"].dependencies == []
+    assert rows["com.example.contentclient"].evidence["content_uri_authorities_in_corpus"] == [
+        "com.example.content"
+    ]
+    assert rows["com.example.contentclient"].evidence["content_uri_authorities_absent"] == [
+        "com.example.gone"
+    ]
 
     # This stage is also the one that parks the `/etc` inputs, because it is the last one that
     # can still see the job's scratch and the ladder two stages later cannot.

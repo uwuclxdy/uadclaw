@@ -25,11 +25,14 @@ APKs emitted 123 KB of DEBUG in the baseline run. `logger.disable("androguard")`
 silences that path by module name, so the worker does not flood its own logs, and it is scoped
 to androguard rather than removing every loguru sink the process might own.
 
-The launcher icon is read here rather than in a later stage because `extract_facts` deletes
-the APKs the moment their facts land: this is the only moment the file exists.
+The launcher icon and the dex `content://` scan are read here rather than in a later stage
+because `extract_facts` deletes the APKs the moment their facts land: this is the only moment
+the file exists.
 """
 
 import hashlib
+import logging
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -38,6 +41,8 @@ from loguru import logger as _loguru_logger
 
 # Before androguard is imported, not after: its module-level loggers bind at import time.
 _loguru_logger.disable("androguard")
+
+logger = logging.getLogger(__name__)
 
 from androguard.core.apk import APK  # noqa: E402
 
@@ -137,6 +142,11 @@ class ApkFacts:
     # to handle the queried package being absent, so this is evidence for the human and the
     # model only (`docs/pipeline-design.md` §4).
     queries_packages: tuple[str, ...] = ()
+    # `content://` strings in dex, matched by authority string only. Deliberately NOT a
+    # dependency edge: the reference may be optional, built at runtime, or aimed at a provider
+    # outside the corpus (`docs/pipeline-design.md` §4). Evidence for the human and the model
+    # only.
+    content_uri_authorities: tuple[str, ...] = ()
     intent_filters: tuple[IntentFilterFact, ...] = field(default_factory=tuple)
     is_input_method: bool = False
     is_device_admin: bool = False
@@ -311,6 +321,103 @@ def _label(apk: APK, application: Any) -> tuple[str, bool]:
     return name, False
 
 
+_CONTENT_SCHEME = b"content://"
+
+
+def _authorities_in_dex(data: bytes) -> tuple[str, ...]:
+    """The `content://` authorities one dex member's string table references.
+
+    Reads only the string table — the header's `string_ids_size`/`string_ids_off` and each
+    `string_data_item` — and nothing else in the member. Measured 2026-08-14 over the 228-APK
+    emulator corpus: 35 ms/APK (8.0 s for the corpus) versus 459 ms/APK for androguard's full
+    `DEX` parse, which rebuilds every class just to reach strings this scan only needs. A
+    malformed member raises
+    `ValueError` rather than misparsing; the caller turns that into a logged refusal, the same
+    policy the icon path uses.
+
+    MUTF-8 is safe to scan as bytes: the pattern and every authority are pure ASCII, and a
+    MUTF-8 multi-byte sequence has the high bit set on every byte (its NUL form is `C0 80`),
+    so the ASCII pattern can neither appear inside one nor straddle one. An authority that
+    fails the strict ASCII decode is skipped rather than approximated.
+    """
+    if len(data) < 112 or data[:4] != b"dex\n":
+        raise ValueError("member is not a dex file")
+    string_count, string_ids_off = struct.unpack_from("<II", data, 56)
+    if string_ids_off + 4 * string_count > len(data):
+        raise ValueError("the string table reaches past the end of the member")
+
+    found: set[str] = set()
+    for index in range(string_count):
+        string_off = struct.unpack_from("<I", data, string_ids_off + 4 * index)[0]
+        if string_off >= len(data):
+            raise ValueError("a string offset reaches past the end of the member")
+        position = string_off
+        length = 0
+        for shift in range(0, 35, 7):  # dex string lengths are uleb128, at most 5 bytes
+            if position >= len(data):
+                raise ValueError("a string length reaches past the end of the member")
+            byte = data[position]
+            position += 1
+            length |= (byte & 0x7F) << shift
+            if byte < 0x80:
+                break
+        else:
+            raise ValueError("a string length overflows five uleb128 bytes")
+        if position + length > len(data):
+            raise ValueError("a string reaches past the end of the member")
+        span = data[position : position + length]
+
+        cursor = 0
+        while True:
+            match = span.lower().find(_CONTENT_SCHEME, cursor)
+            if match < 0:
+                break
+            start = match + len(_CONTENT_SCHEME)
+            # A leading "/" right after the scheme is a join artifact, not part of the
+            # authority: app code builds URIs by concatenating "content://" with an
+            # authority that carries its own leading slash. Measured 2026-08-14, no
+            # reachable literal on the emulator corpus has that shape (525 two-slash
+            # spans, zero three-slash), so this branch is defensive and unit-pinned.
+            if start < len(span) and span[start] == 0x2F:
+                start += 1
+            end = span.find(b"/", start)
+            if end < 0:
+                end = len(span)
+            cursor = end
+            authority = span[start:end]
+            if not authority:
+                continue
+            try:
+                found.add(authority.decode("ascii"))
+            except UnicodeDecodeError:
+                continue
+    return tuple(sorted(found))
+
+
+def _content_uri_authorities(apk: APK, *, origin: str) -> tuple[str, ...]:
+    """The `content://` authorities one APK's dex members reference, deduped and sorted.
+
+    Total, like `extract_icon`: dex bytes are external input, and a member that will not
+    parse must not cost the APK its other facts, let alone the whole device's scan through
+    the `ApkParseError`-only guard. The refusal is logged with its traceback and the readable
+    members still contribute; an APK whose members are all broken reads as "found none" with
+    only the warning to say otherwise, which is the icon's accepted trade. The scan runs here
+    because `extract_facts` deletes the APKs the moment their facts land — this is the only
+    moment the file exists, the same reason the icon is read in `parse_apk`.
+    """
+    found: set[str] = set()
+    for member in apk.get_all_dex():
+        try:
+            found.update(_authorities_in_dex(member))
+        except Exception:
+            logger.warning(
+                "content-uri scan: %s has a dex member that could not be read",
+                origin,
+                exc_info=True,
+            )
+    return tuple(sorted(found))
+
+
 def parse_apk(path: Path, *, partition: str, device_path: str) -> ApkFacts:
     """Turn one extracted APK into facts.
 
@@ -349,9 +456,15 @@ def parse_apk(path: Path, *, partition: str, device_path: str) -> ApkFacts:
     cert_issuer, cert_subject = _certificate_names(apk)
     uses_required, uses_optional = _uses_libraries(application)
     filters = _intent_filters(application)
+    # AOSP's default is true; only an explicit "false" makes a package resource-only.
+    has_code = _attr(application, "hasCode") != "false"
     # Total by contract: an icon must never be able to cost this APK its facts, let alone
     # cost the whole device's scan through the ApkParseError-only guard above this.
     icon = extract_icon(apk, origin=device_path)
+    # The dex scan needs the APK's bytes and runs here for the same reason the icon does:
+    # `extract_facts` deletes the files the moment their facts land. A resource-only APK
+    # carries no dex to scan.
+    content_uri_authorities = _content_uri_authorities(apk, origin=device_path) if has_code else ()
 
     return ApkFacts(
         package=package,
@@ -368,8 +481,7 @@ def parse_apk(path: Path, *, partition: str, device_path: str) -> ApkFacts:
         core_app=_is_true(root.get("coreApp")),
         shared_user_id=_attr(root, "sharedUserId"),
         persistent=_is_true(_attr(application, "persistent")),
-        # AOSP's default is true; only an explicit "false" makes a package resource-only.
-        has_code=_attr(application, "hasCode") != "false",
+        has_code=has_code,
         overlay_target=_attr(overlay, "targetPackage"),
         overlay_static=_is_true(_attr(overlay, "isStatic")),
         overlay_priority=_parse_int(_attr(overlay, "priority")),
@@ -380,6 +492,7 @@ def parse_apk(path: Path, *, partition: str, device_path: str) -> ApkFacts:
         protected_broadcasts=_child_names(root, "protected-broadcast"),
         provider_authorities=_provider_authorities(application),
         queries_packages=_child_names(root.find("queries"), "package"),
+        content_uri_authorities=content_uri_authorities,
         intent_filters=filters,
         is_input_method=_declares(filters, "service", INPUT_METHOD_ACTION),
         is_device_admin=_declares(filters, "receiver", DEVICE_ADMIN_ACTION),

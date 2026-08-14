@@ -621,7 +621,11 @@ async def test_detail_renders_facts_floor_edges_and_evidence(db_env, db_session_
                 }
             ],
             dependencies=["com.example.target"],
-            evidence={"queries_packages_in_corpus": ["com.example.target"]},
+            evidence={
+                "queries_packages_in_corpus": ["com.example.target"],
+                "content_uri_authorities_in_corpus": ["com.example.target"],
+                "content_uri_authorities_absent": ["com.gone.provider"],
+            },
         ),
     )
     await _login(client)
@@ -631,6 +635,9 @@ async def test_detail_renders_facts_floor_edges_and_evidence(db_env, db_session_
     assert "core_app" in resp.text
     assert "com.example.target" in resp.text
     assert "already upstream" in resp.text
+    assert "content uri refs (in corpus)" in resp.text
+    assert "content uri refs (absent)" in resp.text
+    assert "com.gone.provider" in resp.text
 
 
 async def test_detail_for_a_package_with_no_analysis_row_shows_the_facts_and_says_pending(

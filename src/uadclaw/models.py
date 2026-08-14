@@ -318,6 +318,9 @@ class PackageObservation(Base):
     queries_packages: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
+    content_uri_authorities: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
     intent_filters: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
 
     # The launcher icon this device's copy of the package shipped, capped at 64 KB by
@@ -400,6 +403,9 @@ class PackageFact(Base):
     protected_broadcasts: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     provider_authorities: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     queries_packages: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    content_uri_authorities: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
     intent_filters: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)

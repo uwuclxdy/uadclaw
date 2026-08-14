@@ -201,6 +201,8 @@
           <tr><td>required libs (platform)</td><td>{{ (analysis.evidence.get("required_libraries_from_platform", []) | join(", ")) or "none" }}</td></tr>
           <tr><td>required libs (unresolved)</td><td>{{ (analysis.evidence.get("required_libraries_unresolved", []) | join(", ")) or "none" }}</td></tr>
           <tr><td>shared authorities</td><td>{{ (analysis.evidence.get("shared_provider_authorities", []) | join(", ")) or "none" }}</td></tr>
+          <tr><td>content uri refs (in corpus)</td><td>{{ (analysis.evidence.get("content_uri_authorities_in_corpus", []) | join(", ")) or "none" }}</td></tr>
+          <tr><td>content uri refs (absent)</td><td>{{ (analysis.evidence.get("content_uri_authorities_absent", []) | join(", ")) or "none" }}</td></tr>
           {% if analysis.evidence.get("overlay_target_absent") %}
             <tr><td>overlay target</td><td>{{ analysis.evidence.get("overlay_target_absent") }} (not in corpus)</td></tr>
           {% endif %}

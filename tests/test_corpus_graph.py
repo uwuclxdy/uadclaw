@@ -177,15 +177,77 @@ def test_a_package_never_becomes_its_own_dependency():
     assert graph.dependencies_of("com.example.overlay") == ()
 
 
-def test_the_content_uri_class_is_absent_rather_than_empty():
-    """§4's third relation (dex `content://` strings against declared authorities) is not
-    implemented: the APKs are deleted once their facts are stored, so there is nothing to
-    scan. The key is absent on purpose — an empty list would claim it was looked for."""
+def test_a_content_uri_reference_to_another_package_s_authority_is_evidence_and_never_an_edge():
+    graph = graph_of(
+        CorpusPackage(
+            package="com.example.notes", content_uri_authorities=("com.example.provider",)
+        ),
+        CorpusPackage(
+            package="com.example.provider", provider_authorities=("com.example.provider",)
+        ),
+    )
+    evidence = graph.evidence["com.example.notes"]
+
+    assert graph.edges == ()
+    assert graph.dependencies_of("com.example.notes") == ()
+    assert evidence.content_uri_authorities_in_corpus == ("com.example.provider",)
+    assert evidence.content_uri_authorities_absent == ()
+
+
+def test_a_content_uri_reference_to_an_authority_nobody_declares_is_recorded_absent():
+    graph = graph_of(
+        CorpusPackage(package="com.example.notes", content_uri_authorities=("com.gone.provider",)),
+    )
+    evidence = graph.evidence["com.example.notes"]
+
+    assert graph.edges == ()
+    assert evidence.content_uri_authorities_in_corpus == ()
+    assert evidence.content_uri_authorities_absent == ("com.gone.provider",)
+
+
+def test_a_package_referencing_its_own_authority_is_not_evidence_about_another_package():
+    """The library edge class applies the same self-exclusion: a package reaching its own
+    provider is normal operation. In-corpus would claim another package is implicated, absent
+    would claim nobody provides it, and both are wrong, so it appears in neither bucket."""
+    graph = graph_of(
+        CorpusPackage(
+            package="com.example.notes",
+            provider_authorities=("com.example.notes",),
+            content_uri_authorities=("com.example.notes",),
+        ),
+    )
+    evidence = graph.evidence["com.example.notes"]
+
+    assert graph.edges == ()
+    assert evidence.content_uri_authorities_in_corpus == ()
+    assert evidence.content_uri_authorities_absent == ()
+
+
+def test_a_self_reference_stays_excluded_when_the_authority_is_also_shared():
+    graph = graph_of(
+        CorpusPackage(
+            package="com.example.notes",
+            provider_authorities=("shared.authority",),
+            content_uri_authorities=("shared.authority",),
+        ),
+        CorpusPackage(package="com.example.other", provider_authorities=("shared.authority",)),
+    )
+    evidence = graph.evidence["com.example.notes"]
+
+    assert evidence.content_uri_authorities_in_corpus == ("shared.authority",)
+    assert evidence.content_uri_authorities_absent == ()
+
+
+def test_the_content_uri_evidence_keys_exist_and_an_empty_value_is_honest():
+    """The dex scan runs inside `extract_facts` now, so a present-and-empty key means
+    "looked, found none" — the claim an absent key was designed to avoid making."""
     evidence = graph_of(
         CorpusPackage(package="com.example.app", provider_authorities=("com.example.provider",))
     ).evidence["com.example.app"]
 
-    assert "content_uri_references" not in evidence.as_json()
+    payload = evidence.as_json()
+    assert payload["content_uri_authorities_in_corpus"] == []
+    assert payload["content_uri_authorities_absent"] == []
 
 
 def test_two_packages_declaring_one_authority_are_flagged_for_the_reviewer():
@@ -219,7 +281,11 @@ def test_the_corpus_order_does_not_change_the_graph():
         CorpusPackage(package="com.vendor.lib", libraries=("shared",)),
         CorpusPackage(package="com.vendor.app", uses_libraries_required=("shared",)),
         CorpusPackage(package="com.vendor.app.overlay", overlay_target="com.vendor.app"),
-        CorpusPackage(package="com.vendor.other", queries_packages=("com.vendor.app",)),
+        CorpusPackage(
+            package="com.vendor.other",
+            queries_packages=("com.vendor.app",),
+            content_uri_authorities=("com.vendor.app", "com.absent.authority"),
+        ),
     ]
 
     forward = build_graph(corpus)

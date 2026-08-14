@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from androguard.core.apk import APK
 from sqlalchemy import func, select
 from sqlalchemy import inspect as sa_inspect
 
@@ -217,6 +218,41 @@ def test_parse_apk_actually_carries_the_extracted_icon_out(oriole_facts):
         "the two icon columns are written as a pair or not at all"
     )
     assert max(len(facts.icon_bytes) for facts in oriole_facts if facts.icon_bytes) <= 64 * 1024
+
+
+def test_the_content_uri_scan_yields_its_measured_count(emulator_artifacts, emulator_facts):
+    """The dex string-table scan's yield on the emulator corpus, measured 2026-08-14: 48 of
+    228 packages reference at least one `content://` authority, 146 distinct authority
+    strings, and the top of the list is GMS plumbing (`com.google.android.gsf.gservices` on
+    33 packages, `com.google.android.gms.phenotype` on 28).
+
+    The no-code half is the corpus fact rather than a gate test: measured 0 of 107
+    resource-only APKs carry any dex member, so their scan result is empty whether or not
+    `parse_apk`'s `has_code` gate skips the call — the gate is unobservable on real data
+    and the pin says so by checking the members directly."""
+    carrying = [facts for facts in emulator_facts if facts.content_uri_authorities]
+
+    assert len(carrying) == 48
+    assert len({a for facts in carrying for a in facts.content_uri_authorities}) == 146
+    assert (
+        sum(
+            "com.google.android.gsf.gservices" in facts.content_uri_authorities
+            for facts in carrying
+        )
+        == 33
+    )
+    assert all(
+        facts.content_uri_authorities == tuple(sorted(set(facts.content_uri_authorities)))
+        for facts in carrying
+    ), "the scan dedupes and sorts"
+    no_code = [facts for facts in emulator_facts if not facts.has_code]
+    assert len(no_code) == 107
+    assert all(not facts.content_uri_authorities for facts in no_code)
+    assert all(
+        not list(APK(str(path)).get_all_dex())
+        for path, facts in zip(apk_paths(emulator_artifacts), emulator_facts, strict=True)
+        if not facts.has_code
+    ), "no-code packages carry no dex members to scan"
 
 
 def test_an_undeclared_label_reads_unknown_and_no_resource_id_reaches_a_name(oriole_facts):

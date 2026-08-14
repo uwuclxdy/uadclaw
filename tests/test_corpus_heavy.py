@@ -338,3 +338,39 @@ async def test_the_whole_core_writes_one_analysis_row_per_package(
     assert all(row["upstream_provenance"]["sha256"] == upstream.sha256 for row in rows)
     assert sum(row["queued"] for row in rows) == 48
     assert sum(bool(row["dependencies"]) for row in rows) == 138
+
+
+async def test_the_content_uri_references_are_evidence_and_never_edges(
+    db_env, db_session_factory, emulator_facts
+):
+    """The dex scan's output through the real store -> corpus -> graph path, measured
+    2026-08-14 on the emulator corpus: 48 packages reference `content://` authorities,
+    landing as 229 per-package evidence entries (82 in-corpus, 147 absent), and not one of
+    them is an edge. The in-corpus half is real data rather than a broken lookup: every
+    authority in it is declared by some other package on the same corpus. The absent half
+    carries the runtime fragments (`%s`, `content:// scheme`) alongside genuine off-corpus
+    providers, which is why the fuzzy match records authorities rather than resolutions.
+    """
+    await store(db_session_factory, EMULATOR_DEVICE, EMULATOR_BUILD, emulator_facts)
+    async with db_session_factory() as session:
+        corpus = await load_corpus(session)
+    graph = build_graph(corpus)
+
+    assert graph.counts_by_kind() == {EDGE_OVERLAY: 98, EDGE_LIBRARY: 0}
+    assert sum(1 for item in corpus if item.content_uri_authorities) == 48
+    declared: dict[str, set[str]] = {}
+    for item in corpus:
+        for authority in item.provider_authorities:
+            declared.setdefault(authority, set()).add(item.package)
+    in_corpus_total = 0
+    absent_total = 0
+    for item in corpus:
+        evidence = graph.evidence[item.package]
+        for authority in evidence.content_uri_authorities_in_corpus:
+            assert declared.get(authority, set()) - {item.package}, (
+                f"{item.package} has {authority} in-corpus but nobody else declares it"
+            )
+        in_corpus_total += len(evidence.content_uri_authorities_in_corpus)
+        absent_total += len(evidence.content_uri_authorities_absent)
+    assert in_corpus_total == 82
+    assert absent_total == 147

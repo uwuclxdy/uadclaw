@@ -88,6 +88,7 @@ def corpus_package(row: PackageFact) -> CorpusPackage:
         uses_libraries_optional=tuple(str(name) for name in (row.uses_libraries_optional or ())),
         queries_packages=tuple(str(name) for name in (row.queries_packages or ())),
         provider_authorities=tuple(str(name) for name in (row.provider_authorities or ())),
+        content_uri_authorities=tuple(str(name) for name in (row.content_uri_authorities or ())),
         is_input_method=row.is_input_method,
         handles_home=_handles(filters, HOME_ACTION, HOME_CATEGORY),
         handles_dialer=_handles(filters, DIALER_ACTION),

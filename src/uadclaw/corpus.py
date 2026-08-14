@@ -22,13 +22,16 @@ Everything else is recorded as **evidence and never as an edge**, per the repo r
 - `<uses-library required="true">` names no corpus package provides. Measured on both local
   corpora, every one of these is a platform-provided Java shared library declared in
   `/etc/permissions/*.xml` (`android.test.base`, `com.google.android.dialer.support`, …), so
-  the missing provider is the platform rather than a missing lookup.
-
-**A content-URI reference class is specified in §4 and is NOT implemented here**: matching
-`content://<authority>` strings found in dex against another package's declared authority
-needs the dex bytes, and `extract_facts` deletes the APKs once their facts are stored. The key
-is therefore absent from the evidence rather than present and empty — an empty list would read
-as "looked, found none", which is a different and false claim.
+  the missing provider is the platform rather than a missing lookup;
+- `content://<authority>` strings found in dex (`facts.parse_apk` scans them while the APK
+  still exists), matched by authority string only — the record of the reference, never a
+  resolution of which package it was aimed at. Split like the package queries: declared by
+  another package in the corpus, or declared by nobody (off-corpus, or a runtime-built
+  authority). Measured on the emulator corpus, the literal strings are mostly fragments
+  (`%s` placeholders, off-corpus providers), so the absent half is the common case. The
+  scan also tolerates one leading slash after the scheme — a join artifact of code-built
+  URIs, unexercised by real data. The keys are present-and-empty on a package the scan
+  found nothing on: an empty list now means "looked, found none", which is an honest claim.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -74,6 +77,10 @@ class CorpusPackage:
     uses_libraries_optional: tuple[str, ...] = ()
     queries_packages: tuple[str, ...] = ()
     provider_authorities: tuple[str, ...] = ()
+    # `content://` authorities referenced in this package's dex, matched by authority string
+    # only. Evidence, never an edge: the reference may be optional, runtime-built, or aimed
+    # off-corpus (`docs/pipeline-design.md` §4).
+    content_uri_authorities: tuple[str, ...] = ()
     is_input_method: bool = False
     # (action, category) pairs flattened off the intent filters, so the ladder never has to
     # re-walk the filter structure to count core-intent handlers.
@@ -119,6 +126,12 @@ class PackageEvidence:
     # Declared authorities another package in the corpus also declares. Zero on both local
     # corpora; a non-zero value is a genuine ambiguity a reviewer should see.
     shared_provider_authorities: tuple[str, ...] = ()
+    # `content://` authorities referenced in the package's dex, split like the package
+    # queries: declared by another package in the corpus (a real relation, matched by
+    # authority string only — fuzzy by design), or declared by nobody (off-corpus or
+    # runtime-selected). An authority the package declares itself appears in neither bucket.
+    content_uri_authorities_in_corpus: tuple[str, ...] = ()
+    content_uri_authorities_absent: tuple[str, ...] = ()
     # An `<overlay>` whose target is not in the corpus: the edge cannot be emitted, and the
     # reviewer should know the overlay is not orphaned, just aimed off-corpus.
     overlay_target_absent: str | None = None
@@ -130,6 +143,8 @@ class PackageEvidence:
             "required_libraries_from_platform": list(self.required_libraries_from_platform),
             "required_libraries_unresolved": list(self.required_libraries_unresolved),
             "shared_provider_authorities": list(self.shared_provider_authorities),
+            "content_uri_authorities_in_corpus": list(self.content_uri_authorities_in_corpus),
+            "content_uri_authorities_absent": list(self.content_uri_authorities_absent),
         }
         if self.overlay_target_absent is not None:
             payload["overlay_target_absent"] = self.overlay_target_absent
@@ -227,12 +242,27 @@ def build_graph(
             for authority in item.provider_authorities
             if len(authority_owners.get(authority, ())) > 1
         )
+        # An authority only the package itself declares is excluded from both buckets: a
+        # package reaching its own provider is normal operation, not evidence about another
+        # package — the same self-exclusion the library edge class applies.
+        content_uri_in_corpus = sorted(
+            authority
+            for authority in item.content_uri_authorities
+            if any(owner != item.package for owner in authority_owners.get(authority, ()))
+        )
+        content_uri_absent = sorted(
+            authority
+            for authority in item.content_uri_authorities
+            if not authority_owners.get(authority)
+        )
         evidence[item.package] = PackageEvidence(
             queries_packages_in_corpus=tuple(queried_present),
             queries_packages_absent=tuple(queried_absent),
             required_libraries_from_platform=tuple(sorted(from_platform)),
             required_libraries_unresolved=tuple(sorted(unresolved)),
             shared_provider_authorities=tuple(shared_authorities),
+            content_uri_authorities_in_corpus=tuple(content_uri_in_corpus),
+            content_uri_authorities_absent=tuple(content_uri_absent),
             overlay_target_absent=overlay_absent,
         )
 
