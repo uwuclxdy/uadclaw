@@ -7,6 +7,7 @@ control over what's on disk when each assertion runs.
 """
 
 import asyncio
+import errno
 import time
 import uuid
 from datetime import timedelta
@@ -218,22 +219,37 @@ async def test_dir_size_bytes_survives_a_file_vanishing_mid_walk(tmp_path, monke
     (real_dir / "kept.bin").write_bytes(b"\0" * 100)
     (real_dir / "vanishing.bin").write_bytes(b"\0" * 500)
 
+    # The injection binds to the two calls `_iter_file_sizes` makes itself: `is_file()`
+    # answers True, then the `.stat()` after it raises. That is the window under test, and
+    # "is_file() itself already sees it gone" is a different, already-safe case.
+    #
+    # An earlier version counted plain no-kwargs `Path.stat` calls to infer which layer was
+    # asking, and that is a claim about CPython's internals rather than about this code.
+    # The claim moved twice: 3.12 routes `is_file()` through a plain `Path.stat`, 3.13
+    # through `stat(follow_symlinks=...)`, and 3.14 never touches `Path.stat` at all, so the
+    # counter stopped reaching 2 and the vanished file was silently counted instead.
     original_stat = Path.stat
-    # `is_symlink()` uses `stat(follow_symlinks=False)` and `is_file()` uses a plain
-    # `stat()` internally before our own code ever calls `.stat()` again — to simulate the
-    # file vanishing strictly BETWEEN `is_file()` succeeding and our own `.stat()` call
-    # (not "is_file() itself already sees it gone", a different, already-safe case), only
-    # the SECOND plain, no-kwargs `.stat()` call on this filename fails.
-    plain_stat_calls = {"vanishing.bin": 0}
+    original_is_file = Path.is_file
+    original_is_symlink = Path.is_symlink
 
-    def _flaky_stat(self, *args, **kwargs):
-        if self.name == "vanishing.bin" and not args and not kwargs:
-            plain_stat_calls["vanishing.bin"] += 1
-            if plain_stat_calls["vanishing.bin"] >= 2:
-                raise OSError("simulated: vanished between is_file() and stat()")
+    def _vanished_stat(self, *args, **kwargs):
+        if self.name == "vanishing.bin":
+            raise FileNotFoundError(errno.ENOENT, "simulated: vanished after is_file()")
         return original_stat(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", _flaky_stat)
+    def _not_a_symlink(self, *args, **kwargs):
+        if self.name == "vanishing.bin":
+            return False
+        return original_is_symlink(self, *args, **kwargs)
+
+    def _still_looks_like_a_file(self, *args, **kwargs):
+        if self.name == "vanishing.bin":
+            return True
+        return original_is_file(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_symlink", _not_a_symlink)
+    monkeypatch.setattr(Path, "is_file", _still_looks_like_a_file)
+    monkeypatch.setattr(Path, "stat", _vanished_stat)
 
     size = await _dir_size_bytes(real_dir)
 
