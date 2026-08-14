@@ -11,8 +11,9 @@ jobs:
     services:
       # Job/lease tests need a real Postgres: SKIP LOCKED semantics, lease contention and
       # crash reclaim cannot be proven against a mock. Password and port match conftest's
-      # local-dev defaults (see docker-compose.yml's loopback publish) so no extra env vars
-      # are needed here. tests/conftest.py fails loudly, not skip, when this is unreachable.
+      # local-dev defaults (the loopback publish lives in docker-compose.override.yml, which
+      # compose merges automatically) so no extra env vars are needed here. tests/conftest.py
+      # fails loudly, not skip, when this is unreachable.
       postgres:
         image: postgres:16-alpine
         env:
@@ -35,10 +36,11 @@ jobs:
           # preinstalled /usr/bin/python3.12 (3.12.3) and then refused it against the project
           # floor instead of looking for a newer patch, failing run 31684038235 with "the
           # requested interpreter resolved to Python 3.12.3, which is incompatible". Unset, uv
-          # reads .python-version and requires-python and downloads what they ask for, so the
-          # interpreter has one source of truth and the number lives in one place. It has to
-          # match the image: python:3.12-slim ships 3.12.13, CI was testing 3.12.3, and
-          # `ipaddress` classifies a tunnelled address differently between the two.
+          # reads .python-version and requires-python and downloads what they ask for; the two
+          # spell one floor and are kept in agreement. The floor has to match the image:
+          # python:3.12-slim shipped 3.12.13 at incident time (3.12.14 now; the floor holds
+          # either way), CI was testing 3.12.3, and `ipaddress` classifies a tunnelled address
+          # differently between the two.
           enable-cache: true
 
       - name: uv sync

@@ -137,8 +137,10 @@ def needs_scratch(kind: str) -> bool:
 
 def validate_job_params(kind: JobKind, params: dict[str, Any] | None) -> dict[str, Any]:
     """Parse a job's params into the shape its kind requires, at the boundary, before the
-    row exists. A firmware job whose target is misspelt is a 422 at creation rather than a
-    worker that claims it, waits for the scratch lease and only then discovers the problem.
+    row exists. A firmware job whose target is missing or malformed is a 422 at creation
+    rather than a worker that claims it, waits for the scratch lease and only then discovers
+    the problem. A misspelt but well-formed value still passes creation and fails at run
+    time, when the driver cannot resolve it.
 
     A missing `params` is validated, not waved through: `{"kind": "firmware_analysis"}` and
     `{"kind": "firmware_analysis", "params": {}}` describe the same job and must get the same
