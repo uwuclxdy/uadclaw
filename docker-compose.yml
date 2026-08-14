@@ -198,4 +198,12 @@ services:
       #   sudo git clone https://github.com/<you>/\
       #     universal-android-debloater-next-generation /mnt/ssd-1/upstream
       #   sudo chown -R 65532:65532 /mnt/ssd-1/upstream
+      #   # And the commit identity, which is the clone's own `user.*` config on purpose:
+      #   # the emission refuses `-c user.name`/`-c user.email` flags and strips the identity
+      #   # env, so a clone with none fails the emission naming this step (measured 2026-08-14
+      #   # on the first container drive: git's auto-detect error, since the container has no
+      #   # hostname identity to fall back to). The worker runs as 65532, so its exec writes
+      #   # the file with the right owner:
+      #   docker compose exec worker git -C /upstream config user.name "<your name>"
+      #   docker compose exec worker git -C /upstream config user.email "<your email>"
       - ${UPSTREAM_REPO_DIR:-/mnt/ssd-1/upstream}:/upstream
