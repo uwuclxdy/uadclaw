@@ -90,7 +90,7 @@ The final stage's tool-verification loop checks `7z`, `fsck.erofs`, `simg2img`, 
 
 `.github/workflows/ci.yml` runs two jobs on push to `mommy` and on every PR: `check` (uv sync, ruff check, ruff format --check, pytest against a real `postgres:16-alpine` service container) and `docker-build` (`docker build .` against the Dockerfile above). The `docker-build` job proves only the BuildKit path, since GitHub-hosted runners default to it; `deploy.sh` builds over ssh on whatever builder the deploy host has, which is exactly why the Dockerfile pins the `lpunpack` tarball's sha256 twice.
 
-`docker-build` is currently red on `mommy`; that fix is tracked separately and this doc describes the gate's intent, not today's CI status.
+`docker-build` catches things `check` cannot see. It went red on 2026-08-14 when Docker Hub rebased `python:3.12-slim` from 3.12.13 to 3.12.14 and the repo's `.python-version` still requested the older patch exactly. `check` stayed green throughout. See the interpreter-request note in [Development](Development).
 
 ## The alembic migration step
 
