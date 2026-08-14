@@ -35,12 +35,14 @@ jobs:
           # request rather than a hint: with `python-version: "3.12"` uv resolved the runner's
           # preinstalled /usr/bin/python3.12 (3.12.3) and then refused it against the project
           # floor instead of looking for a newer patch, failing run 31684038235 with "the
-          # requested interpreter resolved to Python 3.12.3, which is incompatible". Unset, uv
-          # reads .python-version and requires-python and downloads what they ask for; the two
-          # spell one floor and are kept in agreement. The floor has to match the image:
-          # python:3.12-slim shipped 3.12.13 at incident time (3.12.14 now; the floor holds
-          # either way), CI was testing 3.12.3, and `ipaddress` classifies a tunnelled address
-          # differently between the two.
+          # requested interpreter resolved to Python 3.12.3, which is incompatible".
+          # `requires-python = ">=3.12.13"` is the repo's only interpreter request now and uv
+          # downloads whatever satisfies it. That floor is a security boundary, not tidiness:
+          # `ipaddress` reads a 6to4-tunnelled metadata address as public on 3.12.3 and
+          # private on 3.12.13, so the SSRF gate held only on the interpreter the image ships.
+          # There is no `.python-version` on purpose. An exact patch pin there is a hard
+          # request the python:3.12-slim builder cannot meet the day Docker Hub rebases the
+          # tag, which is what failed run 31807709082 once the image moved to 3.12.14.
           enable-cache: true
 
       - name: uv sync
