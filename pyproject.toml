@@ -4,6 +4,7 @@ version         = "0.1.0"
 description     = "Automatic LLM-driven bloat classification of Android applications for UAD-ng"
 requires-python = ">=3.12.13"
 license         = { text = "MIT" }
+readme          = "README.md"
 dependencies = [
   "alembic>=1.19.1",
   # Pinned to a minor floor deliberately: androguard 4.x is not a drop-in for 3.x, and this
@@ -38,6 +39,9 @@ dependencies = [
   "sqlalchemy[asyncio]>=2.0.51",
   "uvicorn[standard]>=0.52.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/uwuclxdy/uadclaw"
 
 [dependency-groups]
 dev = [
