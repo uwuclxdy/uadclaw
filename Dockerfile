@@ -84,9 +84,11 @@ RUN mkdir -p /src \
 FROM python:3.12-slim
 WORKDIR /app
 
-# The unpacking toolchain. Versions matter here: 7-Zip >= 24 reads BOTH ext4 and EROFS, which
-# is what collapses selective extraction to a single tool — p7zip 16.02 (the `p7zip-full`
-# transitional package) reads neither. Debian trixie ships 7-Zip 25.01.
+# The unpacking toolchain. Versions matter here: 7-Zip has NO EROFS handler at all — measured
+# 2026-08-11, 7-Zip 26.02 lists Ext and SquashFS only, and pointed at an EROFS image it falls
+# through to its gzip reader and lists 1 file where fsck.erofs recovers 105. EROFS always goes
+# through fsck.erofs; 7z covers ext4. p7zip 16.02 (the `p7zip-full` transitional package) reads
+# neither and is never shipped. Debian trixie ships 7-Zip 25.01.
 #
 # `lpunpack` (dynamic `super.img` partitions) comes from the builder stage above, which is
 # what unblocks the Motorola driver: its chain is zip -> sparsechunk set -> simg2img ->
@@ -123,9 +125,19 @@ COPY --from=lpunpack-builder /src/build/vendor/lpunpack /usr/local/bin/lpunpack
 # the failure is a dynamic-loader error the first time a Motorola job reaches its `super.img`.
 # `/usr/bin/7z` is a `#!/bin/sh` wrapper (its ELF is `7zz`), so for that one `command -v` is
 # the whole check and the ldd half is a deliberate no-op.
+# erofs-utils >= 1.8.5 is a floor, not a nicety: before its fragment-cache fix a real
+# extraction measured 362.3s and after it 20.8s, and a distro-frozen older build extracts
+# correctly but reads as a mysteriously slow job. The worker image ships 1.8.6 (trixie).
 RUN set -eu; \
     for tool in 7z fsck.erofs simg2img lpunpack payload-dumper-go git; do \
       resolved="$(command -v "$tool")" || { echo "missing tool: $tool" >&2; exit 1; }; \
+      if [ "$tool" = fsck.erofs ]; then \
+        version="$(fsck.erofs --version | awk '{print $4}')"; \
+        if [ "$(printf '%s\n' "$version" 1.8.5 | sort -V | head -n1)" != 1.8.5 ]; then \
+          echo "fsck.erofs too old: $version, need >= 1.8.5" >&2; \
+          exit 1; \
+        fi; \
+      fi; \
       if ldd "$resolved" 2>/dev/null | grep -q 'not found'; then \
         echo "unresolved shared libraries in $resolved:" >&2; \
         ldd "$resolved" >&2; \
