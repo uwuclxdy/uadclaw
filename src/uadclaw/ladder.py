@@ -266,6 +266,10 @@ def _base_rules(
     reason = deny_list_reason(item.package)
     if reason is not None:
         fired.append(FiredRule(rule=FloorRule.DENY_LIST, floor=Removal.UNSAFE, detail=reason))
+    # `sharedUserMaxSdkVersion` is deliberately ignored: above its bound the app behaves as if
+    # the sharedUserId were never defined, but a device still running an SDK at or below it
+    # keeps the full shared-uid privilege, so the floor cannot depend on the attribute. Never
+    # measured whether real firmware uses it.
     if item.shared_user_id == SYSTEM_SHARED_USER_ID:
         fired.append(
             FiredRule(

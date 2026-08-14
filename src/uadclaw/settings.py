@@ -390,7 +390,7 @@ class Settings(BaseSettings):
     # and there is one spelling of the blank case.
     upstream_repo_path: str = ""
     # Where `uad_lists.json` lives INSIDE that clone, repo-relative and POSIX-spelled. The
-    # default is upstream's own layout, from `docs/research/upstream-norms.md` (the live 5372
+    # default is upstream's own layout (the live 5372
     # -entry file was fetched from `raw.githubusercontent.com/.../main/resources/assets/
     # uad_lists.json`) and the same path the `./data` refresh command in docker-compose.yml
     # already names. A fork that moved it repoints this.

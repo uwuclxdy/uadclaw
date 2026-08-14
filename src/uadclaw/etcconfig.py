@@ -17,6 +17,13 @@ and `roles.xml` past retention precisely because three ladder inputs are only st
   to no package in the corpus: the provider is the platform, not a removable APK. Recorded so
   that "0 library edges" reads as a measured fact rather than as a broken lookup.
 
+Two `/etc/sysconfig` signals were considered and deliberately not consumed:
+`allow-in-power-save` (a Doze exemption, so removing such a package changes power management,
+not just app availability) and `system-user-blacklisted-app` (a multi-user disable
+declaration, not a removal blocklist — conflating it with one would misread an OEM disable
+list as a debloat signal). The extracted config files still carry both; this note is what
+stops a future reader from wiring them in as ladder inputs.
+
 Dispatch is on the ELEMENT, never on the filename: AOSP states device implementers may choose
 their own file layout as long as every `priv-app` package is allowlisted, so a vendor naming
 its allowlist something unexpected must not silently produce an empty one.

@@ -65,7 +65,11 @@ class UnpackError(RuntimeError):
 
 class UnsupportedContainerError(UnpackError):
     """The bytes are not a container this pipeline knows how to open. Its own type because
-    the fix is "add a format to the dispatch table", not "retry"."""
+    the fix is "add a format to the dispatch table", not "retry". One deliberate absence:
+    f2fs is out of scope by measurement — f2fs-tools has no dump-to-directory flag, and no
+    measured 2024-2026 build holds a system partition on it (userdata/metadata only) — so a
+    future f2fs system partition raises this with the fix being a scope decision, not a
+    table row."""
 
 
 class MissingToolError(UnpackError):
@@ -276,6 +280,11 @@ def partition_may_be_empty(name: str) -> bool:
 # builds, `default-permissions*.xml` is present and is a rule-ladder input, and every
 # partition carries a populated `etc/sysconfig/`. The last three patterns are basename
 # catch-alls for OEMs that file the same inputs somewhere else.
+# APK members only: APEX payloads (`*.apex`) are deliberately outside the harvest. They are
+# mostly system-service and library payloads rather than user-facing apps, so unpacking them
+# costs every device the same walk for packages the triage gate would never show. An OEM
+# shipping a user-facing app inside an APEX would be silently outside the harvest; this note
+# is what records that boundary.
 ARTIFACT_PATTERNS: tuple[str, ...] = (
     "*.apk",
     "*/etc/permissions/*.xml",

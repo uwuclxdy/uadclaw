@@ -11,6 +11,13 @@ configured list path holds a parseable non-empty JSON object at the base ref. Sa
 `unpack.py`'s dispatch-on-the-bytes rule — a name is what an upstream can rename, and a fork
 renames all three of those by definition.
 
+The content check is deliberately not a repo-identity check, and that cuts both ways: the
+ORIGINAL `0x192/universal-android-debloater` repo carries the same list at the same path and
+is stale (last push 2024-08). A clone of it passes `inspect_repo`, and an emission would
+splice into 2024 bytes. UAD-ng is a detached fork; the operator must mount the UAD-ng clone,
+and nothing here can tell the two apart, so the dashboard row's recorded base commit is the
+only on-machine evidence of which repo was used.
+
 `list_bytes` is read with `git cat-file` at the resolved base COMMIT rather than off the working
 tree, so what an emission edits is what the branch will actually be based on, and a clone sitting
 on some other branch cannot silently contribute its own copy.

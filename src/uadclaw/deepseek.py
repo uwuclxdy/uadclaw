@@ -1,4 +1,4 @@
-"""The DeepSeek chat-completions client (`docs/research/deepseek-api.md`).
+"""The DeepSeek chat-completions client.
 
 Deliberate choices, each with a reason that is not obvious from the code:
 

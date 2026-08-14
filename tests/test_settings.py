@@ -345,7 +345,7 @@ def test_the_list_path_default_is_upstreams_own_layout(monkeypatch, tmp_path):
     """That path is what identifies a clone as the upstream repo (`inspect_repo` validates the
     clone by CONTENT at this path, never by its remote), so the default has to be the real one
     rather than a plausible one. Measured against the live file, which was fetched from
-    `.../main/resources/assets/uad_lists.json` — see `docs/research/upstream-norms.md`."""
+    `.../main/resources/assets/uad_lists.json`."""
     _set_required_env(monkeypatch)
 
     settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)

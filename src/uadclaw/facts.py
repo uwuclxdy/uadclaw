@@ -53,7 +53,9 @@ from uadclaw.icons import ANDROID_NS, extract_icon  # noqa: E402
 LABEL_UNKNOWN = "unknown"
 
 # Service/receiver intent actions that make a package a member of a class whose removal has a
-# specific, known consequence (`docs/research/apk-analysis-signals.md` §14).
+# specific, known consequence. Only IME reaches the ladder; carrier removal is
+# operator-conditional ("only if not on <carrier>", never a blanket rating), and
+# admin/accessibility are user-visible-consequence signals, not boot signals.
 INPUT_METHOD_ACTION = "android.view.InputMethod"
 ACCESSIBILITY_SERVICE_ACTION = "android.accessibilityservice.AccessibilityService"
 CARRIER_SERVICE_ACTION = "android.service.carrier.CarrierService"
@@ -473,6 +475,10 @@ def parse_apk(path: Path, *, partition: str, device_path: str) -> ApkFacts:
         version_code=_parse_int(root.get(f"{ANDROID_NS}versionCode")),
         partition=partition,
         device_path=device_path,
+        # priv_app comes from the partition path, never from the manifest's FLAG_SYSTEM: the
+        # platform's own doc says FLAG_SYSTEM "should not be used to make security decisions",
+        # while priv-app is what decides whether removal touches a pre-granted privileged
+        # permission, which is the question the ladder actually asks.
         priv_app="/priv-app/" in device_path,
         sha256=sha256_file(path),
         cert_issuer=cert_issuer,
@@ -483,6 +489,9 @@ def parse_apk(path: Path, *, partition: str, device_path: str) -> ApkFacts:
         persistent=_is_true(_attr(application, "persistent")),
         has_code=has_code,
         overlay_target=_attr(overlay, "targetPackage"),
+        # Parsed and stored; not consumed by the ladder. A static overlay is enabled by
+        # default and immutable, which is why the ladder caps every overlay's floor at
+        # Advanced rather than branching on this flag.
         overlay_static=_is_true(_attr(overlay, "isStatic")),
         overlay_priority=_parse_int(_attr(overlay, "priority")),
         libraries=_libraries(application, "library"),
