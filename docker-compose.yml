@@ -9,6 +9,11 @@ secrets:
   # credential that buys tokens has no business inside the internet-facing container.
   deepseek_key:
     file: ./secrets/deepseek_key
+  # Same posture as deepseek_key: only the worker searches. The FILE must exist even when
+  # blank (compose refuses to start a container whose secret file is missing), and a blank
+  # content is refused at the point of use by the corroboration stage, never at startup.
+  brave_key:
+    file: ./secrets/brave_key
 
 volumes:
   postgres-data:
@@ -118,6 +123,7 @@ services:
       # The classification stage's credential. Absent, every deterministic stage still runs
       # and only a `classification` job fails, naming this setting.
       - deepseek_key
+      - brave_key
       # The UI credential pair, and the worker needs them mounted too even though it serves
       # nothing: `Settings()` refuses blank credentials at load, so without these the
       # process crash-loops before its first line of work. Measured 2026-08-13 on the first
