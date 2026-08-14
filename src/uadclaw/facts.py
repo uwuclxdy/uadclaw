@@ -376,8 +376,8 @@ def _authorities_in_dex(data: bytes) -> tuple[str, ...]:
             # A leading "/" right after the scheme is a join artifact, not part of the
             # authority: app code builds URIs by concatenating "content://" with an
             # authority that carries its own leading slash. Measured 2026-08-14, no
-            # reachable literal on the emulator corpus has that shape (525 two-slash
-            # spans, zero three-slash), so this branch is defensive and unit-pinned.
+            # reachable literal on the emulator corpus has that shape, so this branch
+            # is defensive and unit-pinned.
             if start < len(span) and span[start] == 0x2F:
                 start += 1
             end = span.find(b"/", start)
