@@ -497,7 +497,7 @@ def _missing(
         missing.append("upstream neighbours")
     if classification.unknown_fields:
         unknown = ", ".join(str(field) for field in classification.unknown_fields)
-        missing.append(f"deepseek's answer ({unknown})")
+        missing.append(f"{classification.model}'s answer ({unknown})")
     return tuple(missing)
 
 
