@@ -128,13 +128,16 @@ COPY --from=lpunpack-builder /src/build/vendor/lpunpack /usr/local/bin/lpunpack
 # erofs-utils >= 1.8.5 is a floor, not a nicety: before its fragment-cache fix a real
 # extraction measured 362.3s and after it 20.8s, and a distro-frozen older build extracts
 # correctly but reads as a mysteriously slow job. The worker image ships 1.8.6 (trixie).
+# The version is the first numeric token of `--version`, never a fixed field: the output
+# grew a decompressor list (trixie's second line), and `awk '{print $4}'` then parsed
+# `lz4hc,` out of that line while field 4 of the version line was empty.
 RUN set -eu; \
     for tool in 7z fsck.erofs simg2img lpunpack payload-dumper-go git; do \
       resolved="$(command -v "$tool")" || { echo "missing tool: $tool" >&2; exit 1; }; \
       if [ "$tool" = fsck.erofs ]; then \
-        version="$(fsck.erofs --version | awk '{print $4}')"; \
+        version="$(fsck.erofs --version | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1)"; \
         if [ "$(printf '%s\n' "$version" 1.8.5 | sort -V | head -n1)" != 1.8.5 ]; then \
-          echo "fsck.erofs too old: $version, need >= 1.8.5" >&2; \
+          echo "fsck.erofs too old: ${version:-unparseable}, need >= 1.8.5" >&2; \
           exit 1; \
         fi; \
       fi; \
