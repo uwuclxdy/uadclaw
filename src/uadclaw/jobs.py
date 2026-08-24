@@ -35,6 +35,7 @@ from uadclaw.models import (
     JobStageRun,
     JobState,
 )
+from uadclaw.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -135,12 +136,42 @@ def needs_scratch(kind: str) -> bool:
         ) from exc
 
 
+def _resolve_provider(validated: ClassificationJobParams) -> ClassificationJobParams:
+    """Resolve this classification job's provider against the settings table, at creation.
+
+    `ClassificationJobParams` is pure, so it cannot check ids against settings; this is the
+    seam that can, and it runs before the row exists for the same reason the shape check
+    does: a job naming an unknown provider is a 422 at creation rather than a worker that
+    claims it and only discovers the problem when it is about to spend money. The RESOLVED
+    id is stored, so a job row names the provider it was queued under even if the operator
+    changes `llm_default_provider` or the table before a worker runs it.
+    """
+    settings = get_settings()
+    provider_id = (
+        validated.provider if validated.provider is not None else settings.llm_default_provider
+    )
+    if provider_id not in settings.llm_providers:
+        valid = ", ".join(sorted(settings.llm_providers)) or "(none configured)"
+        raise JobValidationError(
+            f"create_job: params for kind='classification' name provider {provider_id!r}, "
+            f"which is not in the provider table (configured ids: {valid}). Add it to "
+            "LLM_PROVIDERS (or mount secrets/llm_providers), or pass provider=... naming one "
+            "of the configured ids."
+        )
+    return validated.model_copy(update={"provider": provider_id})
+
+
 def validate_job_params(kind: JobKind, params: dict[str, Any] | None) -> dict[str, Any]:
     """Parse a job's params into the shape its kind requires, at the boundary, before the
     row exists. A firmware job whose target is missing or malformed is a 422 at creation
     rather than a worker that claims it, waits for the scratch lease and only then discovers
     the problem. A misspelt but well-formed value still passes creation and fails at run
     time, when the driver cannot resolve it.
+
+    A classification job's `provider` gets the same treatment, except that its failure IS
+    checkable at creation: the id is resolved against the provider table (or the default) and
+    refused when unknown, because the alternative is a job that spends nothing until a worker
+    picks it up and then dies with a configuration error somebody could have seen in the 422.
 
     A missing `params` is validated, not waved through: `{"kind": "firmware_analysis"}` and
     `{"kind": "firmware_analysis", "params": {}}` describe the same job and must get the same
@@ -151,11 +182,15 @@ def validate_job_params(kind: JobKind, params: dict[str, Any] | None) -> dict[st
     if model is None:
         return dict(params or {})
     try:
-        return model.model_validate(params or {}).model_dump(mode="json", exclude_none=True)
+        validated = model.model_validate(params or {})
     except ValidationError as exc:
         raise JobValidationError(
             f"create_job: params for kind={kind.value!r} are not valid: {exc}"
         ) from exc
+    if kind is JobKind.CLASSIFICATION:
+        assert isinstance(validated, ClassificationJobParams)  # noqa: S101
+        validated = _resolve_provider(validated)
+    return validated.model_dump(mode="json", exclude_none=True)
 
 
 async def create_job(

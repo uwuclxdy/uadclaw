@@ -27,10 +27,10 @@ from uadclaw import stages as stages_module
 from uadclaw.classify import UNKNOWN
 from uadclaw.classifystore import ClassificationStoreError, select_candidates
 from uadclaw.corpusstore import load_config_inputs, require_corpus
-from uadclaw.deepseek import DeepSeekBalanceError, DeepSeekClient
 from uadclaw.facts import ApkFacts
 from uadclaw.factstore import record_device_scan, store_device_facts
 from uadclaw.ladder import Removal, compute_floors, danger_rank
+from uadclaw.llm import DeepSeekBalanceError, LlmClient
 from uadclaw.models import JobKind, PackageAnalysis, PackageClassification
 from uadclaw.settings import get_settings
 from uadclaw.stages import llm_stage
@@ -147,12 +147,14 @@ def fake_api(monkeypatch):
         response = item.pop(0) if len(item) > 1 else item[0]
         return response(request) if callable(response) else response
 
-    original = DeepSeekClient.from_settings
+    original = LlmClient.from_settings
 
-    def patched(cls_settings, *, transport=None):
-        return original(cls_settings, transport=httpx.MockTransport(handler))
+    def patched(cls_settings, *, provider_id, transport=None):
+        return original(
+            cls_settings, provider_id=provider_id, transport=httpx.MockTransport(handler)
+        )
 
-    monkeypatch.setattr(DeepSeekClient, "from_settings", patched)
+    monkeypatch.setattr(LlmClient, "from_settings", patched)
     return state
 
 
@@ -161,8 +163,22 @@ def classification_env(monkeypatch, tmp_path):
     path = tmp_path / "uad_lists.json"
     path.write_text(UPSTREAM_JSON, encoding="utf-8")
     monkeypatch.setenv("UPSTREAM_LIST_PATH", str(path))
-    monkeypatch.setenv("DEEPSEEK_KEY", "sk-test-not-a-real-key")
-    monkeypatch.setenv("DEEPSEEK_RETRY_BACKOFF_SECONDS", "0.001")
+    monkeypatch.setenv(
+        "LLM_PROVIDERS",
+        json.dumps(
+            {
+                "deepseek": {
+                    "base_url": "https://api.deepseek.test",
+                    "model": "deepseek-v4-flash",
+                    "thinking": True,
+                    "max_tokens": 4096,
+                    "max_concurrency": 4,
+                }
+            }
+        ),
+    )
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "sk-test-not-a-real-key")
+    monkeypatch.setenv("LLM_RETRY_BACKOFF_SECONDS", "0.001")
     return path
 
 
@@ -977,10 +993,10 @@ async def test_an_empty_balance_aborts_the_job_rather_than_parking_every_package
 async def test_a_missing_key_fails_before_any_call_is_made(
     db_env, classification_env, fake_api, monkeypatch, db_session_factory
 ):
-    monkeypatch.setenv("DEEPSEEK_KEY", "")
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "")
     job_id = await seed(db_session_factory)
 
-    with pytest.raises(Exception, match="DEEPSEEK_KEY is empty"):
+    with pytest.raises(Exception, match="has no API key"):
         await llm_stage(context(job_id, db_session_factory))
 
     assert fake_api["requests"] == []

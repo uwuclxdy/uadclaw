@@ -23,7 +23,7 @@ Two clients, and keeping them apart is a security property rather than tidiness:
 **No retry layer lives here.** The repo rule is one retry layer per concern, and the
 corroboration stage's answer to a failed search is a `search_failed` row rather than a loop:
 the row is per package, cheap to re-run, and says which of "we found nothing" and "we could
-not look" happened. The judge's retries belong to `DeepSeekClient`, which already owns them.
+not look" happened. The judge's retries belong to `LlmClient`, which already owns them.
 
 **This is the one index in this repo whose empty answer is a legitimate result.** Everywhere
 else an extraction or index fetch that yields nothing is an error, because a terms-walled
@@ -115,7 +115,7 @@ class BraveMalformedError(BraveError):
 def require_brave_key(settings: Settings) -> str:
     """The configured token, or a fail-fast error naming where to put one.
 
-    Checked here rather than by a `Settings` validator, exactly as `deepseek.require_api_key`
+    Checked here rather than by a `Settings` validator, exactly as `llm.require_api_key`
     is and for the same reason: the whole deterministic pipeline (acquire through rule_ladder,
     milestone M2) is independently useful and must boot on a box with no search account.
     """
@@ -365,13 +365,13 @@ class BraveClient:
     """One connection to the Brave web-search API.
 
     Holds the token as a plain string rather than the `Settings` object, for the reason
-    `DeepSeekClient` does: pydantic renders every field of a `Settings` on `repr()`, so a
+    `LlmClient` does: pydantic renders every field of a `Settings` on `repr()`, so a
     `Settings` in a traceback frame would put the credential in a job's `log_tail`.
 
     **Concurrency-bounded like the other two clients**, and this one was the exception until a
     review measured it: `corroborate_stage` creates one task per candidate against a ceiling
     of 500, so 200 candidates put 200 searches in flight at once where `PageFetcher` and
-    `DeepSeekClient` allowed 8. Brave's measured policy is `50;w=1` — 50 requests per SECOND —
+    `LlmClient` allowed 8. Brave's measured policy is `50;w=1` — 50 requests per SECOND —
     and `_QueryBudget.take()` decrements BEFORE the request, so every 429 that fanout earns
     burns a query out of the job's ceiling for nothing. A live 44-candidate run returned zero
     `search_failed`; it passed by being smaller than the limit, not by pacing itself.

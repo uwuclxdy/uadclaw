@@ -5,18 +5,27 @@ environment variables (and a local `.env` for dev) of the same name. `secrets_di
 no-op when the directory does not exist, which is what makes the fallback work, and a
 BLANK file there is a no-op too — see `_SkipBlankSecretFiles`.
 
-Every credential is a `SecretStr` and no validation error carries its input, because a
-settings failure is HTTP-readable: five stage handlers call `get_settings()`, `worker.py`
-persists `traceback.format_exc()` into `jobs.failure_reason` plus a line into `log_tail`,
-and both columns are exposed on `JobResponse`.
+Every credential that loads with the model is a `SecretStr` and no validation error carries
+its input, because a settings failure is HTTP-readable: five stage handlers call
+`get_settings()`, `worker.py` persists `traceback.format_exc()` into `jobs.failure_reason`
+plus a line into `log_tail`, and both columns are exposed on `JobResponse`. LLM provider keys
+are the one credential that cannot be a field — provider ids are operator-configurable, so a
+key is read on demand by `provider_key` (secrets file first, environment second, a blank file
+skipped like any other) and never sits on the model at all, which is the same guarantee
+reached from the other direction.
 """
 
+import json
 import logging
+import os
+import re
+from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from pydantic import SecretStr, field_validator
+from dotenv import dotenv_values
+from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -71,7 +80,112 @@ def _ordered_names(raw: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
+class LlmProviderConfig(BaseModel):
+    """One OpenAI-format provider the LLM stages can call, as an entry of `LLM_PROVIDERS`.
+
+    `extra="forbid"` for the params models' reason: a misspelt key is refused at settings
+    load rather than silently ignored while the provider runs with values nobody chose.
+    Every field is required on purpose — the table is the single source of truth about a
+    provider, so nothing about one is a hidden default. `thinking` in particular carries
+    money: reasoning tokens bill as output at ~20x the thinking-off spend, so whether a
+    provider thinks has to be a decision written down, not a fallback. One wire-format
+    caveat travels with the flag: `thinking=false` makes the client send the
+    DeepSeek-specific `{"thinking": {"type": "disabled"}}` field, and a provider that does
+    not know it may answer 400 — which is an unretried `DeepSeekError`, so every package
+    parks. Leave `thinking` true for a provider without a DeepSeek-compatible thinking
+    switch.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # The OpenAI-format endpoint, never `/anthropic` — only the OpenAI envelope carries
+    # `usage.prompt_cache_hit_tokens`/`prompt_cache_miss_tokens`, the two fields the cost
+    # measurement (task 8) reads.
+    base_url: str
+    model: str
+    thinking: bool
+    # Sized for reasoning PLUS the JSON body, not the body alone: reasoning is charged
+    # against this ceiling, and a budget that only covers the answer returns
+    # `finish_reason="length"` with EMPTY content — the trap `llm.py` separates from the
+    # empty-content bug because the fixes are opposite. 16384 is the measured deepseek
+    # default (see `.env.example`).
+    max_tokens: int
+    # In-flight requests. DeepSeek gates on concurrency alone (no documented RPM or TPM)
+    # and counts it account-wide across every key, so a provider entry's ceiling is shared
+    # with whatever else talks to that account.
+    max_concurrency: int
+
+    @field_validator("base_url", "model")
+    @classmethod
+    def _reject_blank_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be empty")
+        return value
+
+    @field_validator("max_tokens", "max_concurrency")
+    @classmethod
+    def _reject_non_positive_count(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("must be >= 1")
+        return value
+
+
+def _dotenv_key(
+    env_file: str | Path | Sequence[str | Path] | None, name: str, encoding: str
+) -> str:
+    """The value `name` holds in the dotenv file(s) pydantic-settings would read, or "".
+
+    Parsed with the same `dotenv_values` call pydantic-settings' `DotEnvSettingsSource`
+    makes and merged the same way (later files win), so a value in `.env` cannot parse
+    differently here than it does for a declared field. Only `provider_key` needs this:
+    declared fields go through the real source, which never mutates `os.environ`.
+    """
+    # list/tuple rather than the `Sequence` ABC on purpose: a bare `str` IS a Sequence, and
+    # would be walked one character at a time.
+    files: Sequence[str | Path] = env_file if isinstance(env_file, (list, tuple)) else (env_file,)
+    value = ""
+    for path in files:
+        if not path:
+            continue
+        try:
+            values = dotenv_values(path, encoding=encoding)
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning("could not read the dotenv file %s for provider keys (%s)", path, exc)
+            continue
+        if name in values:
+            value = (values[name] or "").strip()
+    return value
+
+
+# What a provider id may be. Lowercase letters, digits, `-` and `_`, starting with a letter.
+# The id spells the key file `secrets/llm_<id>_key` and the environment variable
+# `LLM_<ID>_KEY`, so it has to be safe in a filename and in an environment name; a job's
+# `provider` param only ever names an EXISTING id, so validating the table keys here is the
+# one boundary that bounds every path an id can reach.
+_PROVIDER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
 class Settings(BaseSettings):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        # `_secrets_dir` and `_env_file` are consumed by `BaseSettings.__init__` and never
+        # retained on the instance — `model_config` still names the DEFAULTS — so
+        # `provider_key`'s direct file reads would miss a test's or an operator's override
+        # and read /run/secrets plus the default .env instead. Captured here, after init,
+        # for that one consumer. `_env_file` is special: an explicit None (the tests' way
+        # of disabling the repo's own .env) must NOT fall back to the model default, so
+        # "absent from kwargs" and "None" stay distinguishable.
+        self._resolved_secrets_dir = Path(
+            kwargs.get("_secrets_dir") or self.model_config.get("secrets_dir", "/run/secrets")
+        )
+        if "_env_file" in kwargs:
+            self._resolved_env_file = kwargs["_env_file"]
+        else:
+            self._resolved_env_file = self.model_config.get("env_file")
+        self._resolved_env_file_encoding = kwargs.get(
+            "_env_file_encoding"
+        ) or self.model_config.get("env_file_encoding", "utf-8")
+
     model_config = SettingsConfigDict(
         secrets_dir="/run/secrets",
         env_file=".env",
@@ -88,6 +202,15 @@ class Settings(BaseSettings):
         # The trade is that a bad non-secret setting no longer names the value it got, so
         # the validators below name the constraint and where to fix it instead.
         hide_input_in_errors=True,
+        # Complex fields are decoded per SOURCE, inside the source, which breaks the
+        # blank-secret-file contract for `llm_providers`: a 0-byte `secrets/llm_providers`
+        # placeholder would fail `json.loads` before `_SkipBlankSecretFiles` ever saw it,
+        # and crash startup with a decode error nobody can act on. Decoding off means
+        # sources hand the raw string to field validation, where `_parse_provider_table`
+        # decodes it; a blank one is skipped like any other. Every other field is scalar,
+        # so nothing else relied on the per-source decode. A future complex field must do
+        # the same thing its validator does here.
+        enable_decoding=False,
     )
 
     # Postgres
@@ -227,54 +350,37 @@ class Settings(BaseSettings):
     # empty file rather than treating the whole corpus as new.
     upstream_list_path: Path = Path("/data/uad_lists.json")
 
-    # Classification (task 7). Deliberately NOT in `_reject_blank` below, unlike the other
-    # three credentials: the whole deterministic half of this pipeline (acquire through
-    # rule_ladder, milestone M2) is independently useful and must boot on a box that has no
-    # DeepSeek account at all. A blank key is refused at the point of use instead, by
-    # `deepseek.require_api_key`, naming the setting and where to put it.
-    deepseek_key: SecretStr = SecretStr("")
-    # The OpenAI-format endpoint, never `/anthropic`. `usage.prompt_cache_hit_tokens` and
-    # `prompt_cache_miss_tokens` are what the cost measurement (task 8) reads, and the
-    # Anthropic wire format does not carry them.
-    deepseek_base_url: str = "https://api.deepseek.com"
-    # Cheapest of the two live models and 5x the concurrency ceiling of `deepseek-v4-pro`
-    # (2500 vs 500). The legacy `deepseek-chat`/`deepseek-reasoner` ids no longer resolve.
-    deepseek_model: str = "deepseek-v4-flash"
-    # Thinking mode is ON by default on v4-flash and its reasoning tokens bill as output.
-    # Measured on one identical prompt: default 110 completion tokens (104 reasoning),
-    # `reasoning_effort: "low"` 58 (52), `thinking: {"type": "disabled"}` 5 and no reasoning
-    # field at all. So `low` is a discount and `disabled` is the actual off switch. Left ON
-    # here — the API's own default — because whether disabling it costs description quality
-    # is what task 8's measurement answers, and a setting is how both halves get measured.
-    deepseek_thinking: bool = True
-    # Sized for reasoning PLUS the JSON body, not the body alone: reasoning is charged
-    # against this ceiling, and a budget that only covers the answer returns
-    # `finish_reason="length"` with EMPTY content — indistinguishable from DeepSeek's
-    # documented empty-content bug from the envelope, and with the opposite fix.
+    # LLM providers (task 7). The provider table, which REPLACES the single-provider
+    # `DEEPSEEK_*` settings (2026-08-24): every provider the LLM stages may call is one
+    # entry here, and the client is built from the entry a job names. A classification
+    # job's `provider` param names one of these ids — validated at creation, defaulting to
+    # `llm_default_provider` — and a provider id that is not in the table is refused before
+    # any spend. The deepseek entry that reproduces the old defaults verbatim lives in
+    # `.env.example`, because the table is operator configuration now and no entry is
+    # assumed.
     #
-    # 16384 because 4096 stopped being enough. Measured 2026-08-12 over the 48 queued packages
-    # of the real merged corpus: reasoning ran 227 to 3557 tokens on the shipped prompt and one
-    # package spent the whole 4096 on reasoning alone (`finish_reason='length'`,
-    # `reasoning_tokens=4096`, zero content). `DeepSeekBudgetError` is deliberately job-level,
-    # so that one package failed the job at 9 of 48 classified; the identical run at 16384
-    # finished 48 of 48 with zero parks. The 293-595 range recorded 2026-08-11 moved ~6x in a
-    # month on a byte-identical prompt, so this is headroom against a number that moves rather
-    # than a fit to the one measured. `max_tokens`
-    # is a ceiling and not a reservation, so a high one costs nothing on a call under it.
-    deepseek_max_tokens: int = 16384
-    # Concurrency is account-wide across every key (there is no documented RPM or TPM), and
-    # the account is shared with whatever else is talking to DeepSeek, so this defaults far
-    # below the 2500 ceiling rather than near it.
-    deepseek_max_concurrency: int = 4
+    # Deliberately NOT required at load, like the old `deepseek_key`: the whole
+    # deterministic half of this pipeline (acquire through rule_ladder, milestone M2) is
+    # independently useful and must boot on a box with no LLM account at all. A missing
+    # table refuses CLASSIFICATION JOBS at creation, naming the fix; a blank key is refused
+    # at the point of use by `llm.require_api_key`, naming the file and the environment
+    # variable.
+    llm_providers: dict[str, LlmProviderConfig] = {}
+    # The provider id a classification job uses when its params name none. The job row
+    # stores the RESOLVED id at creation, so a default changed later never re-targets a job
+    # that was already queued.
+    llm_default_provider: str = "deepseek"
     # Wire retries WITHIN one call: 3 means one request plus two on a 429/500/503 or a
     # transport error. This bounds a single `complete_json`, never a package — the stage's
-    # own budget below is what bounds spend, so these two do not multiply.
-    deepseek_max_attempts: int = 3
-    # First backoff, doubled per attempt. DeepSeek prescribes none and sends no Retry-After.
-    deepseek_retry_backoff_seconds: float = 2.0
+    # own budget below is what bounds spend, so these two do not multiply. Global rather
+    # than per provider: the retry layer is one, and per-provider retry caps would be a
+    # second set of knobs on the same layer.
+    llm_max_attempts: int = 3
+    # First backoff, doubled per attempt. The API prescribes none and sends no Retry-After.
+    llm_retry_backoff_seconds: float = 2.0
     # Per-request read/connect deadline. The API holds a connection open for up to 10 minutes
     # before inference starts, so this is generous on purpose.
-    deepseek_request_timeout_seconds: float = 300.0
+    llm_request_timeout_seconds: float = 300.0
     # How many packages one classification job may call the API for. A ceiling on spend that
     # a job's own params can lower but never raise, so a mis-typed job cannot bill a corpus.
     classification_max_packages: int = 500
@@ -293,12 +399,12 @@ class Settings(BaseSettings):
     # service that is already failing is not a retry strategy, it is the outage getting help.
     classification_max_calls_per_package: int = 3
 
-    # Corroboration (task 8). Same posture as `deepseek_key` and deliberately NOT in
+    # Corroboration (task 8). Same posture as the LLM provider keys and deliberately NOT in
     # `_reject_blank`: the deterministic half of this pipeline must still boot on a box with
     # no search account. A blank token is refused at the point of use by
     # `brave.require_brave_key`. The consequence is worth stating plainly — a classification
     # job now ENDS at `corroborate`, so finishing one needs a Brave key where it used to need
-    # only a DeepSeek key.
+    # only an LLM provider key.
     brave_key: SecretStr = SecretStr("")
     brave_search_url: str = "https://api.search.brave.com/res/v1/web/search"
     # The API's own `count` parameter. 10 because that is what the top-ten judge input needs
@@ -319,7 +425,7 @@ class Settings(BaseSettings):
     # actually hold; what keeps a job under the per-SECOND limit is `brave_max_concurrency`
     # below and nothing else.
     corroboration_max_queries_per_job: int = 500
-    # Searches in flight at once, the way `DeepSeekClient` and `PageFetcher` bound themselves.
+    # Searches in flight at once, the way `LlmClient` and `PageFetcher` bound themselves.
     # The stage creates one task per candidate against a ceiling of 500, so without this a
     # 200-package job puts 200 queries on the wire simultaneously — measured peak in-flight 200
     # for Brave against 8 for the other two clients on an identical fanout. 8 rather than a
@@ -337,7 +443,7 @@ class Settings(BaseSettings):
     corroboration_max_packages: int = 500
     # Total billed judge requests ONE package may cost, counting every wire retry — the same
     # single-budget shape as `classification_max_calls_per_package`, and for the same reason:
-    # the wire retries inside `DeepSeekClient` and the re-prompts on a rejected verdict must
+    # the wire retries inside `LlmClient` and the re-prompts on a rejected verdict must
     # not multiply into a ceiling nine times the number anybody reads.
     corroboration_max_calls_per_package: int = 3
     # Read/connect deadline for one page fetch. Ten seconds because a slow page is not worth a
@@ -367,7 +473,7 @@ class Settings(BaseSettings):
     # the fully-uncached miss price. Cost is not the constraint; a judge asked to weigh ten
     # full pages is.
     page_text_max_chars: int = 4000
-    # Concurrent page fetches across the whole job, the way `DeepSeekClient` bounds its own.
+    # Concurrent page fetches across the whole job, the way `LlmClient` bounds its own.
     # These go to arbitrary third-party hosts, so this is politeness as much as memory.
     page_fetch_max_concurrency: int = 8
     # Redirect hops one page fetch may take before it gives up. Walked by hand rather than by
@@ -379,10 +485,11 @@ class Settings(BaseSettings):
     # fine, it is identified by content rather than by remote — mounted read-write into the
     # WORKER alone.
     #
-    # Blank is legal and is the same posture `deepseek_key` and `brave_key` keep, deliberately
-    # NOT a required field: the whole deterministic half of this pipeline plus triage has to
-    # boot on a box with no clone on it, and only a `branch_emission` job needs one. The
-    # refusal happens at the point of use, in `stages.branch_stage`, naming this setting.
+    # Blank is legal and is the same posture the LLM provider keys and `brave_key` keep,
+    # deliberately NOT a required field: the whole deterministic half of this pipeline plus
+    # triage has to boot on a box with no clone on it, and only a `branch_emission` job needs
+    # one. The refusal happens at the point of use, in `stages.branch_stage`, naming this
+    # setting.
     #
     # A `str` rather than a `Path` because `Path("")` is `PosixPath(".")` — a real directory,
     # and one that in the worker image is the app root. "Unset" has to stay distinguishable
@@ -417,6 +524,46 @@ class Settings(BaseSettings):
     # markdown link a stranger clicks.
     emission_bundle_base_url: str = ""
 
+    @field_validator("llm_providers", mode="before")
+    @classmethod
+    def _parse_provider_table(cls, value: object) -> object:
+        """Decode the JSON the environment or a mounted `secrets/llm_providers` file hands
+        over. Field validation never sees a credential here — keys live beside the table,
+        not inside it — but `hide_input_in_errors` applies all the same.
+
+        A blank value means "no providers configured", the same state as the field being
+        unset: the deterministic half of the pipeline must boot on a box with no LLM
+        account, and a classification job then fails at creation naming the fix.
+        """
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            return {}
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "LLM_PROVIDERS must be a JSON object mapping provider ids to their configs, "
+                'e.g. {"deepseek": {"base_url": "https://api.deepseek.com", '
+                '"model": "deepseek-v4-flash", "thinking": true, "max_tokens": 16384, '
+                '"max_concurrency": 4}}'
+            ) from exc
+
+    @field_validator("llm_providers")
+    @classmethod
+    def _reject_unusable_provider_ids(
+        cls, value: dict[str, LlmProviderConfig]
+    ) -> dict[str, LlmProviderConfig]:
+        for provider_id in value:
+            if not _PROVIDER_ID_RE.match(provider_id):
+                raise ValueError(
+                    f"provider id {provider_id!r} is unusable: ids are lowercase letters, "
+                    "digits, '-' and '_', starting with a letter. The id spells the key file "
+                    "secrets/llm_<id>_key and the environment variable LLM_<ID>_KEY, so it "
+                    "must be safe in a filename and an environment name."
+                )
+        return value
+
     @field_validator("postgres_password", "auth_password", "session_secret")
     @classmethod
     def _reject_blank(cls, value: SecretStr) -> SecretStr:
@@ -448,8 +595,8 @@ class Settings(BaseSettings):
         "sweep_interval_seconds",
         "stats_lookback_seconds",
         "firmware_http_timeout_seconds",
-        "deepseek_request_timeout_seconds",
-        "deepseek_retry_backoff_seconds",
+        "llm_request_timeout_seconds",
+        "llm_retry_backoff_seconds",
         "brave_request_timeout_seconds",
         "corroboration_search_ttl_days",
         "page_fetch_timeout_seconds",
@@ -462,9 +609,7 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "deepseek_max_tokens",
-        "deepseek_max_concurrency",
-        "deepseek_max_attempts",
+        "llm_max_attempts",
         "classification_max_packages",
         "classification_max_calls_per_package",
         "brave_result_count",
@@ -575,6 +720,52 @@ class Settings(BaseSettings):
         and would render `[hash]()`.
         """
         return self.emission_bundle_base_url.strip() or None
+
+    def provider_key(self, provider_id: str) -> str:
+        """The API key for one provider: secrets file first, the environment second, the
+        dotenv file(s) third.
+
+        Provider keys cannot be declared fields — the ids are operator configuration — so
+        this reads them directly, with the same contract `_SkipBlankSecretFiles` gives the
+        declared credentials: a non-blank `secrets/llm_<id>_key` wins, a BLANK one is
+        skipped with the same warning (a truncated rotation falls back to the environment
+        rather than silently promoting a stale key), and the environment variable
+        `LLM_<ID>_KEY` supplies a local run. The dotenv fallback exists because
+        pydantic-settings' dotenv source feeds the declared fields only and never mutates
+        `os.environ` — without it a key in `.env` would be invisible while the provider
+        TABLE from the same file loads fine, and the refusal would name an environment
+        variable the operator did set. The returned value is a plain `str` that never sits
+        on the model, so a rendered `Settings` cannot carry it.
+
+        Refusing a blank result is the CALLER's job (`llm.require_api_key`), because only
+        the call site knows which operation needs the key and what the fix is.
+        """
+        secrets_dir = self._resolved_secrets_dir
+        path = secrets_dir / f"llm_{provider_id}_key"
+        if path.is_file():
+            try:
+                raw = path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                logger.warning(
+                    "could not read the provider key file %s (%s), falling back to the environment",
+                    path,
+                    exc,
+                )
+                raw = ""
+            if raw:
+                return raw
+            logger.warning(
+                "ignoring blank secret file, falling back to the environment: field=%s "
+                "secrets_dir=%s",
+                f"llm_{provider_id}_key",
+                secrets_dir,
+            )
+        env_name = f"LLM_{provider_id.upper()}_KEY"
+        if env_name in os.environ:
+            # Present-but-blank still wins over the dotenv file, exactly as it does for a
+            # declared field: the environment source outranks the dotenv source.
+            return os.environ[env_name].strip()
+        return _dotenv_key(self._resolved_env_file, env_name, self._resolved_env_file_encoding)
 
     @property
     def database_url(self) -> str:

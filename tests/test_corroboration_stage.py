@@ -35,8 +35,8 @@ from uadclaw.corroborate import (
     description_digest,
 )
 from uadclaw.corroboratestore import CorroborationStoreError, record_failure, store_verdict
-from uadclaw.deepseek import DeepSeekBalanceError, DeepSeekClient
 from uadclaw.ladder import Removal
+from uadclaw.llm import DeepSeekBalanceError, LlmClient
 from uadclaw.models import PackageClassification, PackageCorroboration, PackageSearchResult
 from uadclaw.stages import corroborate_stage
 from uadclaw.worker import StageContext
@@ -148,7 +148,7 @@ def fake_apis(monkeypatch):
 
     original_brave = BraveClient.from_settings
     original_pages = PageFetcher.from_settings
-    original_judge = DeepSeekClient.from_settings
+    original_judge = LlmClient.from_settings
 
     monkeypatch.setattr(
         BraveClient,
@@ -165,10 +165,12 @@ def fake_apis(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        DeepSeekClient,
+        LlmClient,
         "from_settings",
-        lambda settings, *, transport=None: original_judge(
-            settings, transport=httpx.MockTransport(judge_handler)
+        lambda settings, *, provider_id, transport=None: original_judge(
+            settings,
+            provider_id=provider_id,
+            transport=httpx.MockTransport(judge_handler),
         ),
     )
     return state
@@ -197,8 +199,22 @@ def verdict_response(status="corroborated", *, sources=None, reasoning="It says 
 @pytest.fixture
 def corroboration_env(monkeypatch):
     monkeypatch.setenv("BRAVE_KEY", "BSA-test-not-a-real-token")
-    monkeypatch.setenv("DEEPSEEK_KEY", "sk-test-not-a-real-key")
-    monkeypatch.setenv("DEEPSEEK_RETRY_BACKOFF_SECONDS", "0.001")
+    monkeypatch.setenv(
+        "LLM_PROVIDERS",
+        json.dumps(
+            {
+                "deepseek": {
+                    "base_url": "https://api.deepseek.test",
+                    "model": "deepseek-v4-flash",
+                    "thinking": True,
+                    "max_tokens": 4096,
+                    "max_concurrency": 4,
+                }
+            }
+        ),
+    )
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "sk-test-not-a-real-key")
+    monkeypatch.setenv("LLM_RETRY_BACKOFF_SECONDS", "0.001")
     monkeypatch.setenv("BRAVE_SEARCH_URL", "https://api.search.brave.test/res/v1/web/search")
 
 
@@ -487,7 +503,7 @@ async def test_an_unexpected_failure_after_the_search_is_recorded_as_this_packag
     assert await search_rows(db_session_factory, NOTES), "the paid search is cached for the retry"
 
 
-async def test_an_account_level_deepseek_failure_still_aborts_the_whole_job(
+async def test_an_account_level_balance_failure_still_aborts_the_whole_job(
     db_env, corroboration_env, fake_apis, db_session_factory
 ):
     """The control for the containment above. `DeepSeekBalanceError` is about the ACCOUNT, not

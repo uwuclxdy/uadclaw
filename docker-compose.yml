@@ -6,10 +6,12 @@ secrets:
   session_secret:
     file: ./secrets/session_secret
   # Only the worker mounts this one: nothing the web service serves calls the model, and a
-  # credential that buys tokens has no business inside the internet-facing container.
-  deepseek_key:
-    file: ./secrets/deepseek_key
-  # Same posture as deepseek_key: only the worker searches. The FILE must exist even when
+  # credential that buys tokens has no business inside the internet-facing container. One
+  # file per provider in the LLM_PROVIDERS table, named llm_<id>_key (this one is the
+  # default provider's).
+  llm_deepseek_key:
+    file: ./secrets/llm_deepseek_key
+  # Same posture as llm_deepseek_key: only the worker searches. The FILE must exist even when
   # blank (compose refuses to start a container whose secret file is missing), and a blank
   # content is refused at the point of use by the corroboration stage, never at startup.
   brave_key:
@@ -57,6 +59,13 @@ services:
       POSTGRES_USER: uadclaw
       POSTGRES_DB: uadclaw
       COOKIE_SECURE: "false"
+      # The LLM provider table, interpolated from the deploy environment / compose .env.
+      # BOTH services need it: the web process validates a classification job's provider
+      # against the table at CREATION (the 422 seam), and the worker spends against it. The
+      # table carries no credential, so web-side visibility is fine; the per-provider KEYS
+      # stay worker-only file secrets below. Blank means "no providers configured" and a
+      # classification job refuses at creation naming the fix.
+      LLM_PROVIDERS: "${LLM_PROVIDERS:-}"
     secrets:
       - postgres_password
       - auth_password
@@ -105,6 +114,10 @@ services:
       POSTGRES_PORT: "5432"
       POSTGRES_USER: uadclaw
       POSTGRES_DB: uadclaw
+      # The LLM provider table, interpolated from the deploy environment / compose .env.
+      # Both services need it — the web process validates a classification job's provider
+      # at creation and the worker spends against it; see the web service's copy.
+      LLM_PROVIDERS: "${LLM_PROVIDERS:-}"
       # Where the operator's clone is mounted below. Only the worker sets it: the web service
       # has no route that emits and a read-only rootfs besides.
       UPSTREAM_REPO_PATH: /upstream
@@ -120,9 +133,10 @@ services:
       # secrets mounted, /run/secrets is empty, POSTGRES_PASSWORD is unset, and `Settings()`
       # raises before the worker's first line of work.
       - postgres_password
-      # The classification stage's credential. Absent, every deterministic stage still runs
-      # and only a `classification` job fails, naming this setting.
-      - deepseek_key
+      # The classification stage's credential (one per provider in the LLM_PROVIDERS table,
+      # named llm_<id>_key). Absent, every deterministic stage still runs and only a
+      # `classification` job fails, naming this setting.
+      - llm_deepseek_key
       - brave_key
       # The UI credential pair, and the worker needs them mounted too even though it serves
       # nothing: `Settings()` refuses blank credentials at load, so without these the

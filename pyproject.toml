@@ -30,6 +30,12 @@ dependencies = [
   "lz4>=4.4.5",
   "pydantic>=2.13.4",
   "pydantic-settings>=2.15.0",
+  # `settings.provider_key` parses the dotenv fallback for provider keys through the same
+  # `dotenv_values` call pydantic-settings' own dotenv source uses. Declared rather than
+  # leaned on as pydantic-settings' transitive dependency, for the same reason `pyyaml` is:
+  # a dependency this code imports directly is this project's to pin, not something to
+  # inherit from a library that could drop it.
+  "python-dotenv>=0.21.0",
   # Xiaomi publishes no index; the community tracker's is YAML. Declared rather than leaned
   # on as androguard's and uvicorn[standard]'s transitive dependency, which it already is.
   # Starlette parses `request.form()` through this and raises at runtime without it, so the

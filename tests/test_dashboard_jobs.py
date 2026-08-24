@@ -11,6 +11,7 @@ that raises before a client is opened: `MotorolaDriver.list_available` refuses a
 `_open_client()`.
 """
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -23,6 +24,20 @@ from uadclaw.settings import get_settings
 from uadclaw.views import jobs as jobs_view
 
 PASSWORD = "test-only-admin-password"
+
+# A classification job is validated against the provider table at creation, so every launch
+# test needs one configured — the launch goes through the real `jobs.create_job` seam.
+PROVIDERS_JSON = json.dumps(
+    {
+        "deepseek": {
+            "base_url": "https://api.deepseek.test",
+            "model": "deepseek-v4-flash",
+            "thinking": True,
+            "max_tokens": 4096,
+            "max_concurrency": 4,
+        }
+    }
+)
 
 
 async def _login(client) -> None:
@@ -533,6 +548,7 @@ async def test_a_classification_run_carries_the_params_it_was_given(
     db_env, db_session_factory, client, monkeypatch
 ):
     install_drivers(monkeypatch, FakeDriver("pixel"))
+    set_config(monkeypatch, LLM_PROVIDERS=PROVIDERS_JSON, LLM_DEEPSEEK_KEY="sk-test")
     await _login(client)
 
     resp = await client.post(
@@ -549,6 +565,9 @@ async def test_a_classification_run_carries_the_params_it_was_given(
     assert job.params["packages"] == ["com.example.one", "com.example.two"]
     assert job.params["limit"] == 5
     assert job.params["reclassify"] is True
+    # The creation seam resolved the default provider and stored it, so the row names the
+    # provider it was queued under.
+    assert job.params["provider"] == "deepseek"
 
 
 async def test_an_omitted_package_list_and_limit_leave_the_defaults_alone(
@@ -557,6 +576,7 @@ async def test_an_omitted_package_list_and_limit_leave_the_defaults_alone(
     """A blank field is dropped rather than handed over as `""`, so the params model applies
     its own default: no named packages, and the settings ceiling as the limit."""
     install_drivers(monkeypatch, FakeDriver("pixel"))
+    set_config(monkeypatch, LLM_PROVIDERS=PROVIDERS_JSON, LLM_DEEPSEEK_KEY="sk-test")
     await _login(client)
 
     await client.post("/jobs/launch/classification", data={"packages": "", "limit": ""})

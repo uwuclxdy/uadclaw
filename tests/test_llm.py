@@ -1,9 +1,9 @@
-"""The DeepSeek client, against a mocked transport.
+"""The OpenAI-format LLM client, against a mocked transport.
 
 The default suite never touches the network and never needs a key: every response here is
-synthesized by an `httpx.MockTransport`, so a box with no DeepSeek account runs these tests
-identically. `tests/test_deepseek_live.py` is the opt-in half that proves the real API
-accepts the real request shape.
+synthesized by an `httpx.MockTransport`, so a box with no provider account runs these tests
+identically. `tests/test_llm_live.py` is the opt-in half that proves the real API accepts
+the real request shape.
 
 The two failure modes worth naming, because they are the ones the envelope cannot tell apart
 on its own and they have opposite fixes: an empty body with `finish_reason="length"` means
@@ -17,16 +17,16 @@ import json
 import httpx
 import pytest
 
-from uadclaw.deepseek import (
+from uadclaw.llm import (
     ChatResult,
     DeepSeekAuthError,
     DeepSeekBalanceError,
-    DeepSeekBudgetError,
-    DeepSeekClient,
     DeepSeekConfigError,
     DeepSeekError,
     DeepSeekMalformedError,
     DeepSeekUnavailableError,
+    LlmBudgetError,
+    LlmClient,
     require_api_key,
     require_json_prompt,
 )
@@ -75,6 +75,7 @@ def client(responses, **overrides):
         return item
 
     kwargs = {
+        "provider_id": "deepseek",
         "api_key": SECRET,
         "base_url": "https://api.deepseek.test",
         "model": "deepseek-v4-flash",
@@ -86,7 +87,7 @@ def client(responses, **overrides):
         "thinking": True,
     }
     kwargs.update(overrides)
-    return DeepSeekClient(transport=httpx.MockTransport(handler), **kwargs), sent
+    return LlmClient(transport=httpx.MockTransport(handler), **kwargs), sent
 
 
 # --- the request shape ----------------------------------------------------------------------
@@ -164,10 +165,10 @@ async def test_finish_reason_length_is_a_budget_error_and_is_not_retried():
         [httpx.Response(200, json=envelope("", finish_reason="length", reasoning=32))]
     )
     async with api:
-        with pytest.raises(DeepSeekBudgetError) as caught:
+        with pytest.raises(LlmBudgetError) as caught:
             await api.complete_json(system=SYSTEM, user=USER)
     assert len(sent) == 1, "a budget failure must not consume the retry cap"
-    assert "DEEPSEEK_MAX_TOKENS" in str(caught.value)
+    assert "max_tokens in LLM_PROVIDERS" in str(caught.value)
     assert "reasoning_tokens=32" in str(caught.value)
 
 
@@ -178,7 +179,7 @@ async def test_a_truncated_body_is_a_budget_error_rather_than_a_success():
         [httpx.Response(200, json=envelope('{"description": "half a sen', finish_reason="length"))]
     )
     async with api:
-        with pytest.raises(DeepSeekBudgetError):
+        with pytest.raises(LlmBudgetError):
             await api.complete_json(system=SYSTEM, user=USER)
 
 
@@ -187,7 +188,7 @@ async def test_empty_content_with_reasoning_at_the_ceiling_is_a_budget_error():
     while `finish_reason` did not say `length`."""
     api, sent = client([httpx.Response(200, json=envelope("", reasoning=120))], max_tokens=128)
     async with api:
-        with pytest.raises(DeepSeekBudgetError):
+        with pytest.raises(LlmBudgetError):
             await api.complete_json(system=SYSTEM, user=USER)
     assert len(sent) == 1
 
@@ -354,43 +355,46 @@ async def test_an_auth_failure_message_does_not_quote_the_key():
 
 
 def test_a_blank_key_is_refused_at_the_point_of_use_not_at_settings_load(monkeypatch):
-    """The whole deterministic pipeline must boot on a box with no DeepSeek account, so
-    `Settings()` accepts a blank key and the call site is what fails."""
+    """The whole deterministic pipeline must boot on a box with no provider account, so
+    `Settings()` accepts a missing key and the call site is what fails."""
     monkeypatch.setenv("POSTGRES_PASSWORD", "x")
     monkeypatch.setenv("AUTH_PASSWORD", "y")
     monkeypatch.setenv("SESSION_SECRET", "z")
-    monkeypatch.setenv("DEEPSEEK_KEY", "")
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "")
     settings = Settings()
-    assert settings.deepseek_key.get_secret_value() == ""
-    with pytest.raises(DeepSeekConfigError, match="DEEPSEEK_KEY is empty"):
-        require_api_key(settings)
+    assert settings.provider_key("deepseek") == ""
+    with pytest.raises(DeepSeekConfigError, match="has no API key"):
+        require_api_key(settings, "deepseek")
 
 
 def test_a_whitespace_only_key_is_refused_too(monkeypatch):
     monkeypatch.setenv("POSTGRES_PASSWORD", "x")
     monkeypatch.setenv("AUTH_PASSWORD", "y")
     monkeypatch.setenv("SESSION_SECRET", "z")
-    monkeypatch.setenv("DEEPSEEK_KEY", "   ")
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "   ")
     with pytest.raises(DeepSeekConfigError):
-        require_api_key(Settings())
+        require_api_key(Settings(), "deepseek")
 
 
 def test_the_error_names_both_places_the_key_can_live(monkeypatch):
     monkeypatch.setenv("POSTGRES_PASSWORD", "x")
     monkeypatch.setenv("AUTH_PASSWORD", "y")
     monkeypatch.setenv("SESSION_SECRET", "z")
-    monkeypatch.setenv("DEEPSEEK_KEY", "")
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "")
     with pytest.raises(DeepSeekConfigError) as caught:
-        require_api_key(Settings())
-    # An empty mounted secret file SHADOWS a set env var (file secrets win in this repo's
-    # source order), which is a confusing failure the message has to name.
-    assert "secrets/deepseek_key" in str(caught.value)
-    assert "WINS over the environment" in str(caught.value)
+        require_api_key(Settings(), "deepseek")
+    # The message has to name both places: a non-blank file secret wins over the environment
+    # and a blank one falls back to it, so the failure can come from either side of the
+    # split.
+    assert "secrets/llm_deepseek_key" in str(caught.value)
+    assert "LLM_DEEPSEEK_KEY" in str(caught.value)
+    assert "wins over the environment" in str(caught.value)
 
 
 def test_the_client_refuses_to_be_built_with_an_empty_key():
     with pytest.raises(DeepSeekConfigError, match="require_api_key"):
-        DeepSeekClient(
+        LlmClient(
+            provider_id="deepseek",
             api_key="",
             base_url="https://api.deepseek.test",
             model="deepseek-v4-flash",
@@ -403,18 +407,31 @@ def test_the_client_refuses_to_be_built_with_an_empty_key():
         )
 
 
-async def test_deepseek_from_settings_wires_deepseek_max_concurrency_into_the_semaphore(
+async def test_from_settings_wires_the_providers_max_concurrency_into_the_semaphore(
     monkeypatch,
 ):
-    """The concurrency tests construct `DeepSeekClient` directly with the bound, so they observe
+    """The concurrency tests construct `LlmClient` directly with the bound, so they observe
     the semaphore and never the `from_settings` wiring that feeds it — a mutation replacing
-    `settings.deepseek_max_concurrency` with a literal would survive the whole suite."""
+    the provider entry's `max_concurrency` with a literal would survive the whole suite."""
     monkeypatch.setenv("POSTGRES_PASSWORD", "x")
     monkeypatch.setenv("AUTH_PASSWORD", "y")
     monkeypatch.setenv("SESSION_SECRET", "z")
-    monkeypatch.setenv("DEEPSEEK_KEY", "sk-test-not-a-real-key-0000")
-    monkeypatch.setenv("DEEPSEEK_MAX_CONCURRENCY", "7")
-    api = DeepSeekClient.from_settings(Settings())
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "sk-test-not-a-real-key-0000")
+    monkeypatch.setenv(
+        "LLM_PROVIDERS",
+        json.dumps(
+            {
+                "deepseek": {
+                    "base_url": "https://api.deepseek.test",
+                    "model": "deepseek-v4-flash",
+                    "thinking": True,
+                    "max_tokens": 4096,
+                    "max_concurrency": 7,
+                }
+            }
+        ),
+    )
+    api = LlmClient.from_settings(Settings(), provider_id="deepseek")
     try:
         assert api._semaphore._value == 7
     finally:

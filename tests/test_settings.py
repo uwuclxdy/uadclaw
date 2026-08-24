@@ -8,6 +8,7 @@ persists `traceback.format_exc()` into `jobs.failure_reason` plus a line into `l
 and both columns are exposed on `JobResponse`.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,6 @@ FIELD_BY_ENV_NAME = {
     "POSTGRES_PASSWORD": "postgres_password",
     "AUTH_PASSWORD": "auth_password",
     "SESSION_SECRET": "session_secret",
-    "DEEPSEEK_KEY": "deepseek_key",
 }
 # Distinctive per credential, and pairwise disjoint at the window `_leaked_fragment` scans
 # with, so a fragment found in a rendered string names exactly one field.
@@ -32,7 +32,6 @@ CANARIES = {
     "POSTGRES_PASSWORD": "pgpw-8f3a1c9e7b5d2046-canary",
     "AUTH_PASSWORD": "auth-0b6e2f9d4a7c1385-canary",
     "SESSION_SECRET": "sess-4d2b8e6a0c1f3597-canary",
-    "DEEPSEEK_KEY": "dsk-7e1f9c3b5a8d2064-canary",
 }
 
 
@@ -158,7 +157,7 @@ def test_every_credential_is_masked_in_a_settings_repr(monkeypatch, tmp_path, en
         assert "**********" in rendered
 
 
-@pytest.mark.parametrize("env_name", sorted(FIELD_BY_ENV_NAME.keys() - {"DEEPSEEK_KEY"}))
+@pytest.mark.parametrize("env_name", sorted(FIELD_BY_ENV_NAME))
 def test_settings_rejects_an_unset_credential(monkeypatch, tmp_path, env_name):
     """Absent has to fail exactly like blank, and name only the field that is absent."""
     _set_required_env(monkeypatch)
@@ -187,16 +186,17 @@ def test_a_blank_secret_file_does_not_shadow_an_env_credential(monkeypatch, tmp_
 
 
 @pytest.mark.parametrize("blank", ["", "   \n"])
-def test_a_blank_secret_file_does_not_shadow_the_deepseek_key(monkeypatch, tmp_path, blank):
-    """`deepseek_key` takes this the worst: it is allowed to be empty, so a shadowed key
-    is not a startup failure — it is a classification stage that refuses to run."""
-    (tmp_path / "deepseek_key").write_text(blank)
+def test_a_blank_secret_file_does_not_shadow_a_provider_key(monkeypatch, tmp_path, blank):
+    """Provider keys take this the worst: a missing key is not a startup failure — it is a
+    classification stage that refuses to run — so a shadowed key would turn a configured
+    deployment into a broken one with nothing refusing to start."""
+    (tmp_path / "llm_deepseek_key").write_text(blank)
     _set_required_env(monkeypatch)
-    monkeypatch.setenv("DEEPSEEK_KEY", "dsk-from-env")
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "dsk-from-env")
 
     settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
 
-    assert settings.deepseek_key.get_secret_value() == "dsk-from-env"
+    assert settings.provider_key("deepseek") == "dsk-from-env"
 
 
 @pytest.mark.parametrize("field", sorted(FIELD_BY_ENV_NAME.values()))
@@ -206,7 +206,6 @@ def test_a_skipped_blank_secret_file_is_logged(monkeypatch, tmp_path, caplog, fi
     live login credential, and before the skip existed that combination refused to start."""
     (tmp_path / field).write_text("")
     _set_required_env(monkeypatch)
-    monkeypatch.setenv("DEEPSEEK_KEY", "dsk-from-env")
 
     with caplog.at_level("WARNING", logger="uadclaw.settings"):
         Settings(_secrets_dir=str(tmp_path), _env_file=None)
@@ -245,13 +244,12 @@ def test_an_absent_secret_file_logs_nothing(monkeypatch, tmp_path, caplog):
 
 def test_a_non_blank_secret_file_still_outranks_the_environment(monkeypatch, tmp_path):
     """The source ORDER is unchanged; only what a blank file contributes changed."""
-    (tmp_path / "deepseek_key").write_text("dsk-from-file")
-    _set_required_env(monkeypatch)
-    monkeypatch.setenv("DEEPSEEK_KEY", "dsk-from-env")
+    (tmp_path / "postgres_password").write_text("pw-from-file")
+    _set_required_env(monkeypatch, {"POSTGRES_PASSWORD": "pw-from-env"})
 
     settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
 
-    assert settings.deepseek_key.get_secret_value() == "dsk-from-file"
+    assert settings.postgres_password.get_secret_value() == "pw-from-file"
 
 
 def test_a_credential_is_a_secret_str(monkeypatch, tmp_path):
@@ -306,7 +304,7 @@ def test_oppo_model_entries_keep_their_order_and_drop_duplicates(monkeypatch, tm
 
 
 def test_no_upstream_clone_is_a_legal_configuration(monkeypatch, tmp_path):
-    """Same posture `deepseek_key` and `brave_key` keep, and for the same reason: acquire
+    """Same posture the LLM provider keys and `brave_key` keep, and for the same reason: acquire
     through rule_ladder plus the whole triage screen have to boot on a box with no clone of
     somebody else's repository on it. Only a `branch_emission` job needs one, and it refuses
     at the point of use naming the setting."""
@@ -399,3 +397,240 @@ def test_a_branch_prefix_git_would_misread_is_refused_at_load(monkeypatch, tmp_p
     # The failing FIELD, never merely that something failed: a shared validator inverted the
     # wrong way still raises, for one of the other required fields, and reads green.
     assert [error["loc"] for error in excinfo.value.errors()] == [("emission_branch_prefix",)]
+
+
+# --- the LLM provider table -------------------------------------------------------------
+
+
+def _provider_json(**overrides) -> str:
+    entry = {
+        "base_url": "https://api.deepseek.test",
+        "model": "deepseek-v4-flash",
+        "thinking": True,
+        "max_tokens": 4096,
+        "max_concurrency": 4,
+    }
+    entry.update(overrides)
+    return json.dumps({"deepseek": entry})
+
+
+def test_the_provider_table_parses_from_the_environment_into_typed_configs(monkeypatch, tmp_path):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDERS", _provider_json())
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    provider = settings.llm_providers["deepseek"]
+    assert provider.base_url == "https://api.deepseek.test"
+    assert provider.model == "deepseek-v4-flash"
+    assert provider.thinking is True
+    assert provider.max_tokens == 4096
+    assert provider.max_concurrency == 4
+
+
+def test_a_provider_entry_requires_every_field(monkeypatch, tmp_path):
+    """A provider that runs with values nobody chose is exactly what the table exists to
+    stop: every field is required, so a partial entry refuses at load naming the entry."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv(
+        "LLM_PROVIDERS",
+        json.dumps({"deepseek": {"base_url": "https://api.deepseek.test", "model": "m"}}),
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert [error["loc"] for error in exc_info.value.errors()] == [
+        ("llm_providers", "deepseek", "thinking"),
+        ("llm_providers", "deepseek", "max_tokens"),
+        ("llm_providers", "deepseek", "max_concurrency"),
+    ]
+
+
+def test_a_provider_entry_refuses_a_misspelt_key(monkeypatch, tmp_path):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDERS", _provider_json(base_urll="https://api.deepseek.test"))
+
+    with pytest.raises(ValidationError, match="base_urll"):
+        Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+
+def test_a_provider_table_that_is_not_json_names_the_field(monkeypatch, tmp_path):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDERS", "deepseek: not-json")
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert [error["loc"][0] for error in exc_info.value.errors()] == ["llm_providers"]
+    assert "JSON object" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("provider_id", ["9lives", "Deep-Seek", "deep.seek", "../deepseek"])
+def test_a_provider_id_that_is_unsafe_in_a_filename_or_env_name_is_refused(
+    monkeypatch, tmp_path, provider_id
+):
+    """The id spells `secrets/llm_<id>_key` and `LLM_<ID>_KEY`, so it is the one boundary
+    that bounds every path an id can reach — the table keys are validated, and a job's
+    `provider` param only ever names an existing key."""
+    _set_required_env(monkeypatch)
+    entry = {
+        "base_url": "https://api.deepseek.test",
+        "model": "deepseek-v4-flash",
+        "thinking": True,
+        "max_tokens": 4096,
+        "max_concurrency": 4,
+    }
+    monkeypatch.setenv("LLM_PROVIDERS", json.dumps({provider_id: entry}))
+
+    with pytest.raises(ValidationError, match="unusable"):
+        Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+
+def test_an_empty_table_is_a_legal_configuration(monkeypatch, tmp_path):
+    """The deterministic half of the pipeline must boot on a box with no LLM account, so no
+    providers configured is a legal state — a classification job then fails at creation."""
+    _set_required_env(monkeypatch)
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.llm_providers == {}
+    assert settings.llm_default_provider == "deepseek"
+
+
+def test_a_mounted_provider_table_file_wins_over_the_environment(monkeypatch, tmp_path):
+    (tmp_path / "llm_providers").write_text(_provider_json(model="deepseek-v4-pro"))
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDERS", _provider_json())
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.llm_providers["deepseek"].model == "deepseek-v4-pro"
+
+
+@pytest.mark.parametrize("blank", ["", "   \n"])
+def test_a_blank_provider_table_file_falls_back_to_the_environment(monkeypatch, tmp_path, blank):
+    """The blank-file contract holds for the table too: a 0-byte `secrets/llm_providers`
+    placeholder must not crash settings load with a JSON decode error — it is skipped like
+    any other blank file secret."""
+    (tmp_path / "llm_providers").write_text(blank)
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDERS", _provider_json(model="deepseek-v4-flash"))
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.llm_providers["deepseek"].model == "deepseek-v4-flash"
+
+
+# --- provider keys ----------------------------------------------------------------------
+
+
+def test_a_provider_key_reads_the_secrets_file_first(monkeypatch, tmp_path):
+    (tmp_path / "llm_deepseek_key").write_text("dsk-from-file")
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "dsk-from-env")
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.provider_key("deepseek") == "dsk-from-file"
+
+
+def test_a_provider_key_reads_the_environment_when_no_file_exists(monkeypatch, tmp_path):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "dsk-from-env")
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.provider_key("deepseek") == "dsk-from-env"
+
+
+def test_a_missing_provider_key_reads_as_empty_never_as_an_exception(monkeypatch, tmp_path):
+    """The refusal is `llm.require_api_key`'s job, at the point of use — the loader itself
+    answers "no key" and lets the deterministic pipeline boot."""
+    _set_required_env(monkeypatch)
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.provider_key("deepseek") == ""
+
+
+def test_a_blank_provider_key_file_falls_back_with_a_warning(monkeypatch, tmp_path, caplog):
+    (tmp_path / "llm_deepseek_key").write_text("")
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "dsk-from-env")
+
+    with caplog.at_level("WARNING", logger="uadclaw.settings"):
+        settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.provider_key("deepseek") == "dsk-from-env"
+    assert any(
+        "ignoring blank secret file" in record.getMessage() and record.args[0] == "llm_deepseek_key"
+        for record in caplog.records
+    )
+
+
+def test_the_provider_key_never_sits_on_the_model(monkeypatch, tmp_path):
+    """Provider keys cannot be declared fields (the ids are operator configuration), so the
+    render-proof guarantee is that they never sit on the model at all: no `repr(settings)`
+    can carry one."""
+    (tmp_path / "llm_deepseek_key").write_text("dsk-7e1f9c3b5a8d2064-canary")
+    _set_required_env(monkeypatch)
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    for rendered in (repr(settings), str(settings)):
+        assert _leaked_fragment("dsk-7e1f9c3b5a8d2064-canary", rendered) is None
+    assert settings.provider_key("deepseek") == "dsk-7e1f9c3b5a8d2064-canary"
+
+
+def test_a_provider_key_reads_the_dotenv_file_when_no_env_var_is_set(monkeypatch, tmp_path):
+    """pydantic-settings' dotenv source feeds declared fields only and never mutates
+    os.environ, so a key that lives in `.env` has to be read the same way the table from
+    that file is — otherwise the refusal names an environment variable the operator did
+    set, in the file the loader documents reading."""
+    dotenv_path = tmp_path / "provider.env"
+    dotenv_path.write_text("LLM_DEEPSEEK_KEY=dsk-from-dotenv\n", encoding="utf-8")
+    _set_required_env(monkeypatch)
+
+    settings = Settings(_secrets_dir=str(tmp_path / "no-secrets"), _env_file=dotenv_path)
+
+    assert settings.provider_key("deepseek") == "dsk-from-dotenv"
+
+
+def test_the_environment_beats_the_dotenv_file_for_a_provider_key(monkeypatch, tmp_path):
+    dotenv_path = tmp_path / "provider.env"
+    dotenv_path.write_text("LLM_DEEPSEEK_KEY=dsk-from-dotenv\n", encoding="utf-8")
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "dsk-from-env")
+
+    settings = Settings(_secrets_dir=str(tmp_path / "no-secrets"), _env_file=dotenv_path)
+
+    assert settings.provider_key("deepseek") == "dsk-from-env"
+
+
+def test_the_secrets_file_beats_both_env_and_dotenv_for_a_provider_key(monkeypatch, tmp_path):
+    (tmp_path / "llm_deepseek_key").write_text("dsk-from-file")
+    dotenv_path = tmp_path / "provider.env"
+    dotenv_path.write_text("LLM_DEEPSEEK_KEY=dsk-from-dotenv\n", encoding="utf-8")
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "dsk-from-env")
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=dotenv_path)
+
+    assert settings.provider_key("deepseek") == "dsk-from-file"
+
+
+def test_a_present_but_blank_env_var_shadows_the_dotenv_file_for_a_provider_key(
+    monkeypatch, tmp_path
+):
+    """Same shadowing a declared field gets: the environment source outranks the dotenv
+    source, so a blank env var is the operator's real state and not a hole to fill from a
+    stale file."""
+    dotenv_path = tmp_path / "provider.env"
+    dotenv_path.write_text("LLM_DEEPSEEK_KEY=dsk-from-dotenv\n", encoding="utf-8")
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "")
+
+    settings = Settings(_secrets_dir=str(tmp_path / "no-secrets"), _env_file=dotenv_path)
+
+    assert settings.provider_key("deepseek") == ""

@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import shutil
+import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -82,16 +83,6 @@ from uadclaw.corroboratestore import (
     store_verdict,
 )
 from uadclaw.corroboratestore import select_candidates as select_corroboration_candidates
-from uadclaw.deepseek import (
-    ChatResult,
-    DeepSeekAuthError,
-    DeepSeekBalanceError,
-    DeepSeekBudgetError,
-    DeepSeekClient,
-    DeepSeekError,
-    DeepSeekMalformedError,
-    DeepSeekUnavailableError,
-)
 from uadclaw.emission import (
     BranchEmissionJobParams,
     already_carried,
@@ -119,6 +110,16 @@ from uadclaw.firmware import (
     select_ref,
 )
 from uadclaw.ladder import RemovalFloor, compute_floors
+from uadclaw.llm import (
+    ChatResult,
+    DeepSeekAuthError,
+    DeepSeekBalanceError,
+    DeepSeekError,
+    DeepSeekMalformedError,
+    DeepSeekUnavailableError,
+    LlmBudgetError,
+    LlmClient,
+)
 from uadclaw.models import Job
 from uadclaw.settings import Settings, get_settings
 from uadclaw.unpack import canonical_device_path, extract_artifacts, unpack_to_partitions
@@ -605,8 +606,30 @@ async def _classification_params(ctx: StageContext) -> ClassificationJobParams:
         ) from exc
 
 
+def _require_provider(
+    settings: Settings, params: ClassificationJobParams, *, job_id: uuid.UUID
+) -> str:
+    """The provider this job's model calls go to, or a fail-fast refusal naming the job.
+
+    Creation already refused an unknown id, so reaching this with one means the provider
+    table changed between creation and run — or the row was written by hand, which the stage
+    guard exists for anyway. Either way the refusal names the job, the bad id and the valid
+    ids, before a single request is made.
+    """
+    provider_id = params.provider if params.provider is not None else settings.llm_default_provider
+    if provider_id not in settings.llm_providers:
+        valid = ", ".join(sorted(settings.llm_providers)) or "(none configured)"
+        raise StageInputError(
+            f"job {job_id}: provider {provider_id!r} is not in the provider table "
+            f"(configured ids: {valid}). Add it to LLM_PROVIDERS (or mount "
+            "secrets/llm_providers), or re-create the job with a provider param naming one "
+            "of the configured ids."
+        )
+    return provider_id
+
+
 async def _classify_one(
-    client: DeepSeekClient,
+    client: LlmClient,
     bundle: EvidenceBundle,
     *,
     floor: RemovalFloor,
@@ -634,7 +657,7 @@ async def _classify_one(
     already retried the wire and the budget is spent, and re-entering the loop would send the
     identical prompt into a transport that just refused it three times.
 
-    A `DeepSeekBudgetError`, a bad credential and an empty balance still abort the whole job:
+    A `LlmBudgetError`, a bad credential and an empty balance still abort the whole job:
     none of them is about this package, and burning 48 packages' budgets against a dead
     account is not a diagnosis. Every OTHER failure is contained by `_classify_and_store`,
     which reads `spent` — a one-element list rather than the return value, because the count
@@ -691,6 +714,8 @@ async def llm_stage(ctx: StageContext) -> None:
     """
     settings = get_settings()
     params = await _classification_params(ctx)
+    provider_id = _require_provider(settings, params, job_id=ctx.job_id)
+    provider = settings.llm_providers[provider_id]
     limit = min(
         params.limit or settings.classification_max_packages, settings.classification_max_packages
     )
@@ -726,12 +751,14 @@ async def llm_stage(ctx: StageContext) -> None:
         return
 
     logger.info(
-        "job %s llm: classifying %d of %d queued package(s) with %s (thinking=%s)",
+        "job %s llm: classifying %d of %d queued package(s) with provider %s model %s "
+        "(thinking=%s)",
         ctx.job_id,
         len(candidates),
         len(queue),
-        settings.deepseek_model,
-        settings.deepseek_thinking,
+        provider_id,
+        provider.model,
+        provider.thinking,
     )
     counts = {"classified": 0, "parked": 0}
     # Packages whose own recovery write failed. Collected rather than raised where it happens:
@@ -743,7 +770,10 @@ async def llm_stage(ctx: StageContext) -> None:
     # — so 47 more packages would keep spending their retry cap against a dead account, and
     # would then be writing rows through a session and an HTTP client this block has already
     # closed. A TaskGroup cancels the siblings and waits for them before it raises.
-    async with DeepSeekClient.from_settings(settings) as client, asyncio.TaskGroup() as group:
+    async with (
+        LlmClient.from_settings(settings, provider_id=provider_id) as client,
+        asyncio.TaskGroup() as group,
+    ):
         for package in candidates:
             group.create_task(
                 _classify_and_store(
@@ -776,7 +806,7 @@ async def llm_stage(ctx: StageContext) -> None:
 
 async def _classify_and_store(
     ctx: StageContext,
-    client: DeepSeekClient,
+    client: LlmClient,
     bundle: EvidenceBundle,
     *,
     floor: RemovalFloor,
@@ -801,7 +831,7 @@ async def _classify_and_store(
 
     Three exceptions still take the whole job down, unchanged and deliberately, exactly as
     `_corroborate_and_store` and this stage's own docstring have it: `DeepSeekAuth`,
-    `DeepSeekBalance` and `DeepSeekBudget` are facts about the ACCOUNT or the configuration
+    `DeepSeekBalance` and `LlmBudget` are facts about the ACCOUNT or the configuration
     rather than about this package, and burning 47 more packages' budgets against a dead
     account is not a diagnosis.
 
@@ -825,7 +855,7 @@ async def _classify_and_store(
             counts=counts,
             spent=spent,
         )
-    except (DeepSeekAuthError, DeepSeekBalanceError, DeepSeekBudgetError):
+    except (DeepSeekAuthError, DeepSeekBalanceError, LlmBudgetError):
         raise
     except Exception as exc:
         logger.exception("classification failed for %s", bundle.package)
@@ -852,7 +882,7 @@ async def _classify_and_store(
 
 async def _classify_and_store_one(
     ctx: StageContext,
-    client: DeepSeekClient,
+    client: LlmClient,
     bundle: EvidenceBundle,
     *,
     floor: RemovalFloor,
@@ -926,7 +956,7 @@ class _QueryBudget:
 
 
 async def _judge_one(
-    client: DeepSeekClient,
+    client: LlmClient,
     *,
     package: str,
     description: str,
@@ -1039,7 +1069,7 @@ async def _corroborate_and_store(
     *,
     brave: BraveClient,
     fetcher: PageFetcher,
-    judge: DeepSeekClient,
+    judge: LlmClient,
     package: str,
     description: str,
     settings: Settings,
@@ -1060,7 +1090,7 @@ async def _corroborate_and_store(
     after them it is `judge_failed` (a retry re-reads the cached rows and spends none).
 
     Three exceptions still take the whole job down, unchanged and deliberately: `DeepSeekAuth`,
-    `DeepSeekBalance` and `DeepSeekBudget` are facts about the ACCOUNT rather than about this
+    `DeepSeekBalance` and `LlmBudget` are facts about the ACCOUNT rather than about this
     package, exactly as `llm_stage` documents, and letting 499 more packages burn their budgets
     against a dead account is not a diagnosis.
 
@@ -1085,7 +1115,7 @@ async def _corroborate_and_store(
             counts=counts,
             phase=phase,
         )
-    except (DeepSeekAuthError, DeepSeekBalanceError, DeepSeekBudgetError):
+    except (DeepSeekAuthError, DeepSeekBalanceError, LlmBudgetError):
         raise
     except Exception as exc:
         logger.exception("corroboration failed for %s", package)
@@ -1111,7 +1141,7 @@ async def _corroborate_one(
     *,
     brave: BraveClient,
     fetcher: PageFetcher,
-    judge: DeepSeekClient,
+    judge: LlmClient,
     package: str,
     description: str,
     settings: Settings,
@@ -1218,6 +1248,10 @@ async def corroborate_stage(ctx: StageContext) -> None:
     """
     settings = get_settings()
     params = await _classification_params(ctx)
+    # The same provider the job's `llm` stage used: the judge is a model call of the SAME
+    # job, and the job's params are what picked the provider. Resolved here too, fail-fast,
+    # before a single query or call.
+    provider_id = _require_provider(settings, params, job_id=ctx.job_id)
     limit = min(
         params.limit or settings.corroboration_max_packages, settings.corroboration_max_packages
     )
@@ -1259,7 +1293,7 @@ async def corroborate_stage(ctx: StageContext) -> None:
     async with (
         BraveClient.from_settings(settings) as brave,
         PageFetcher.from_settings(settings) as fetcher,
-        DeepSeekClient.from_settings(settings) as judge,
+        LlmClient.from_settings(settings, provider_id=provider_id) as judge,
         asyncio.TaskGroup() as group,
     ):
         for package in candidates:

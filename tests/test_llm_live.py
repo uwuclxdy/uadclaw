@@ -1,9 +1,9 @@
-"""The real DeepSeek API, opt-in and billed.
+"""The real DeepSeek API, opt-in and billed, through the generic client.
 
-    UADCLAW_LIVE_API_TESTS=1 uv run pytest -n0 tests/test_deepseek_live.py
+    UADCLAW_LIVE_API_TESTS=1 uv run pytest -n0 tests/test_llm_live.py
 
 Excluded from the default suite, mirroring `UADCLAW_HEAVY_TESTS=1`. Everything the client
-does is already pinned against a mocked transport in `test_deepseek.py`; what only the live
+does is already pinned against a mocked transport in `test_llm.py`; what only the live
 API can prove is that the request shape this repo ships is one it accepts, and that the
 `usage` fields the whole cost measurement depends on are actually returned. A mock proves the
 code does what the mock was written to expect, which is the wrong question for a wire format
@@ -24,13 +24,8 @@ import pytest
 from uadclaw.bundle import PackageIdentity, build_bundle
 from uadclaw.classify import SYSTEM_PROMPT, derive_list, user_prompt, validate_response
 from uadclaw.corpus import CorpusPackage
-from uadclaw.deepseek import (
-    CACHE_HIT_TOKENS,
-    CACHE_MISS_TOKENS,
-    DeepSeekBudgetError,
-    DeepSeekClient,
-)
 from uadclaw.ladder import Removal, compute_floors
+from uadclaw.llm import CACHE_HIT_TOKENS, CACHE_MISS_TOKENS, LlmBudgetError, LlmClient
 from uadclaw.settings import Settings
 
 pytestmark = [
@@ -60,14 +55,22 @@ FLOORS = compute_floors(CORPUS)
 @pytest.fixture
 def settings(test_env) -> Settings:
     """`test_env` first, and not for the database: a `Settings()` that fails validation
-    renders EVERY field it had already collected into the ValidationError, the real
-    DEEPSEEK_KEY among them, and that traceback ends up in pytest output and in a job's
-    `log_tail`. Satisfying the three required credentials keeps this construction from being
-    the thing that prints one.
+    renders EVERY field it had already collected into the ValidationError, the real provider
+    key among them, and that traceback ends up in pytest output and in a job's `log_tail`.
+    Satisfying the three required credentials keeps this construction from being the thing
+    that prints one.
+
+    The provider table is now part of what the live run needs: the deepseek entry has to be
+    in `LLM_PROVIDERS` (the old `DEEPSEEK_*` settings are gone) and its key beside it.
     """
     loaded = Settings()
-    if not loaded.deepseek_key.get_secret_value().strip():
-        pytest.skip("DEEPSEEK_KEY is not configured on this box")
+    if "deepseek" not in loaded.llm_providers:
+        pytest.skip("the deepseek provider is not in LLM_PROVIDERS on this box")
+    if not loaded.provider_key("deepseek"):
+        pytest.skip(
+            "the deepseek provider key (LLM_DEEPSEEK_KEY / secrets/llm_deepseek_key) "
+            "is not configured on this box"
+        )
     return loaded
 
 
@@ -84,11 +87,12 @@ async def test_the_real_api_accepts_the_shipped_request_shape(settings):
     """The whole point of this file: json_object mode, the shipped system prompt, a real
     evidence bundle, and a response the shipped validator accepts."""
     evidence = bundle(1)
-    async with DeepSeekClient.from_settings(settings) as client:
+    async with LlmClient.from_settings(settings, provider_id="deepseek") as client:
         result = await client.complete_json(system=SYSTEM_PROMPT, user=user_prompt(evidence))
 
+    provider = settings.llm_providers["deepseek"]
     assert result.finish_reason == "stop", (
-        f"finish_reason={result.finish_reason!r} with max_tokens={settings.deepseek_max_tokens}; "
+        f"finish_reason={result.finish_reason!r} with max_tokens={provider.max_tokens}; "
         f"reasoning spent {result.reasoning_tokens}"
     )
     payload = result.json_object()
@@ -106,7 +110,7 @@ async def test_the_real_api_accepts_the_shipped_request_shape(settings):
 async def test_the_usage_envelope_carries_the_cache_fields_the_cost_measurement_reads(settings):
     """The reason this repo calls the OpenAI-format endpoint rather than /anthropic. If these
     two fields ever stop being returned, the cost measurement silently reads zero."""
-    async with DeepSeekClient.from_settings(settings) as client:
+    async with LlmClient.from_settings(settings, provider_id="deepseek") as client:
         result = await client.complete_json(system=SYSTEM_PROMPT, user=user_prompt(bundle(1)))
 
     assert CACHE_HIT_TOKENS in result.usage, sorted(result.usage)
@@ -121,7 +125,7 @@ async def test_a_repeated_shared_prefix_eventually_reports_a_cache_hit(settings)
     asserts the mechanism exists at all rather than a hit rate."""
     evidence = bundle(0)
     hits = []
-    async with DeepSeekClient.from_settings(settings) as client:
+    async with LlmClient.from_settings(settings, provider_id="deepseek") as client:
         for _ in range(3):
             result = await client.complete_json(system=SYSTEM_PROMPT, user=user_prompt(evidence))
             hits.append(result.cache_hit_tokens)
@@ -140,12 +144,12 @@ async def test_a_too_small_budget_reports_a_budget_failure_rather_than_a_malform
     """The measured trap: reasoning is charged against `max_tokens` and thinking is on by
     default, so a small ceiling returns EMPTY content that looks exactly like DeepSeek's
     documented empty-content bug and has the opposite fix."""
-    async with DeepSeekClient.from_settings(settings) as client:
+    async with LlmClient.from_settings(settings, provider_id="deepseek") as client:
         client.max_tokens = 32
         client.max_attempts = 1
-        with pytest.raises(DeepSeekBudgetError) as caught:
+        with pytest.raises(LlmBudgetError) as caught:
             await client.complete_json(system=SYSTEM_PROMPT, user=user_prompt(bundle(1)))
-    assert "DEEPSEEK_MAX_TOKENS" in str(caught.value)
+    assert "max_tokens in LLM_PROVIDERS" in str(caught.value)
 
 
 async def test_the_model_respects_the_floor_on_a_package_the_ladder_pins_at_unsafe(settings):
@@ -153,7 +157,7 @@ async def test_the_model_respects_the_floor_on_a_package_the_ladder_pins_at_unsa
     for exactly that — so this records what actually came back rather than demanding
     compliance. A rejection here is a prompt finding, not a test failure."""
     evidence = bundle(0)
-    async with DeepSeekClient.from_settings(settings) as client:
+    async with LlmClient.from_settings(settings, provider_id="deepseek") as client:
         result = await client.complete_json(system=SYSTEM_PROMPT, user=user_prompt(evidence))
     payload = result.json_object()
     assert payload["removal"] in list(Removal), payload

@@ -1,4 +1,8 @@
-"""The DeepSeek chat-completions client.
+"""The OpenAI-format chat-completions client every LLM provider runs behind.
+
+One client, any provider: `Settings.llm_providers` is the operator's provider table and this
+module builds the client from the entry a classification job named, so a new provider is a
+row in `LLM_PROVIDERS` plus a key file — never a second client.
 
 Deliberate choices, each with a reason that is not obvious from the code:
 
@@ -23,14 +27,15 @@ Deliberate choices, each with a reason that is not obvious from the code:
 Three failure classes are kept apart because they have three different fixes, and the
 envelope alone does not distinguish two of them:
 
-- `DeepSeekBudgetError` — `finish_reason == "length"`, or empty content with the reasoning
+- `LlmBudgetError` — `finish_reason == "length"`, or empty content with the reasoning
   spend at the ceiling. Measured 2026-08-11 against the live API: a call with
   `max_tokens: 32` returned `finish_reason="length"`, EMPTY content and
   `usage.completion_tokens_details.reasoning_tokens: 32`, i.e. thinking consumed the whole
   budget and left nothing for the body; the identical request at 512 answered normally. That
   is indistinguishable from the documented empty-content bug *from the response*, and the fix
-  is the opposite one — raise `DEEPSEEK_MAX_TOKENS`, do not re-prompt — so retrying it as
-  malformed burns the whole cap and parks a package that would have answered. Not retryable.
+  is the opposite one — raise the provider's `max_tokens`, do not re-prompt — so retrying it
+  as malformed burns the whole cap and parks a package that would have answered. Not
+  retryable.
 - `DeepSeekMalformedError` — empty content with `finish_reason == "stop"` (DeepSeek's own
   documented, unresolved bug) or a body that is not a JSON object. Retryable.
 - `DeepSeekUnavailableError` — 429/500/503. The docs prescribe no backoff and send no
@@ -52,7 +57,7 @@ from typing import Any
 
 import httpx
 
-from uadclaw.settings import Settings
+from uadclaw.settings import LlmProviderConfig, Settings
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +99,7 @@ class DeepSeekBalanceError(DeepSeekError):
     """402 insufficient balance. Never retried: it cannot resolve inside a retry window."""
 
 
-class DeepSeekBudgetError(DeepSeekError):
+class LlmBudgetError(DeepSeekError):
     """`max_tokens` was too small for reasoning plus the JSON body. Never retried: the same
     request will fail the same way, and the fix is a bigger budget rather than a re-prompt."""
 
@@ -137,34 +142,52 @@ class ChatResult:
             parsed = json.loads(self.content)
         except json.JSONDecodeError as exc:
             raise DeepSeekMalformedError(
-                f"deepseek: model {self.model} answered with something that is not JSON "
+                f"llm: model {self.model} answered with something that is not JSON "
                 f"({exc}); first 200 characters: {self.content[:200]!r}"
             ) from exc
         if not isinstance(parsed, dict):
             raise DeepSeekMalformedError(
-                f"deepseek: model {self.model} answered with a JSON "
+                f"llm: model {self.model} answered with a JSON "
                 f"{type(parsed).__name__}, not an object. The prompt asks for one object per "
                 "package."
             )
         return parsed
 
 
-def require_api_key(settings: Settings) -> str:
-    """The configured key, or a fail-fast error naming where to put one.
+def resolve_provider(settings: Settings, provider_id: str) -> LlmProviderConfig:
+    """The table entry for one provider id, or a fail-fast error naming the valid ids.
+
+    The creation seam already refuses an unknown id, so reaching this with one means the
+    table changed between creation and run — the error names both rather than surfacing as a
+    KeyError on a job somebody queued earlier.
+    """
+    try:
+        return settings.llm_providers[provider_id]
+    except KeyError as exc:
+        valid = ", ".join(sorted(settings.llm_providers)) or "(none configured)"
+        raise DeepSeekConfigError(
+            f"llm: provider {provider_id!r} is not in the provider table (configured ids: "
+            f"{valid}). Add it to LLM_PROVIDERS (or mount secrets/llm_providers), or re-create "
+            "the job with a provider param naming one of them."
+        ) from exc
+
+
+def require_api_key(settings: Settings, provider_id: str) -> str:
+    """The configured key for one provider, or a fail-fast error naming where to put one.
 
     Checked here rather than by a `Settings` validator on purpose: the three other
     credentials are refused at load because the app is unsafe without them, but the whole
     deterministic pipeline (acquire through rule_ladder, milestone M2) is independently
-    useful and must boot on a box with no DeepSeek account at all.
+    useful and must boot on a box with no LLM account at all.
     """
-    key = settings.deepseek_key.get_secret_value().strip()
+    key = settings.provider_key(provider_id).strip()
     if not key:
         raise DeepSeekConfigError(
-            "deepseek: DEEPSEEK_KEY is empty, so the classification stage has nothing to "
-            "authenticate with. Put the key in secrets/deepseek_key (docker mounts it at "
-            "/run/secrets/deepseek_key, which WINS over the environment variable — an empty "
-            "file there shadows a set DEEPSEEK_KEY) or set DEEPSEEK_KEY for a local run. "
-            "Every other stage runs without it."
+            f"llm: provider {provider_id!r} has no API key, so its calls have nothing to "
+            f"authenticate with. Put the key in secrets/llm_{provider_id}_key (docker mounts "
+            "it at /run/secrets/llm_<id>_key; a non-blank FILE wins over the environment "
+            f"variable, a blank one falls back to it) or set LLM_{provider_id.upper()}_KEY "
+            "for a local run. Every other stage runs without it."
         )
     return key
 
@@ -181,30 +204,35 @@ def require_json_prompt(*parts: str) -> None:
     joined = "\n".join(parts)
     if "json" not in joined.lower():
         raise DeepSeekConfigError(
-            "deepseek: the prompt must contain the word 'json'. Without it the model may "
+            "llm: the prompt must contain the word 'json'. Without it the model may "
             "emit an unbounded whitespace stream until it hits max_tokens, which reads as a "
             "stuck request rather than as a failure."
         )
     if "{" not in joined or "}" not in joined:
         raise DeepSeekConfigError(
-            "deepseek: the prompt must include an example of the desired JSON object. The "
+            "llm: the prompt must include an example of the desired JSON object. The "
             "JSON Output guide requires one, and json_object mode constrains the syntax "
             "only, never the shape."
         )
 
 
-class DeepSeekClient:
-    """One bounded, retrying connection to the API.
+class LlmClient:
+    """One bounded, retrying connection to a provider's OpenAI-format API.
 
-    Concurrency is capped by a semaphore because DeepSeek gates on in-flight requests alone —
-    no documented RPM or TPM — and counts them **account-wide across every API key**, so the
-    ceiling is shared with whatever else the account is doing and a client that paced itself
-    against the published 2500 would be pacing against the wrong number.
+    Concurrency is capped by a semaphore because the provider gates on in-flight requests
+    alone — no documented RPM or TPM — and counts them **account-wide across every API key**
+    (measured on DeepSeek), so the ceiling is shared with whatever else the account is doing
+    and a client that paced itself against the published ceiling would be pacing against the
+    wrong number.
+
+    `provider_id` is held for messages only: an error that names the provider is one an
+    operator can fix without tracing which job built which client.
     """
 
     def __init__(
         self,
         *,
+        provider_id: str,
         api_key: str,
         base_url: str,
         model: str,
@@ -218,9 +246,11 @@ class DeepSeekClient:
     ) -> None:
         if not api_key:
             raise DeepSeekConfigError(
-                "DeepSeekClient: refusing to build with an empty api_key; call "
-                "`require_api_key(settings)` so the failure names the setting to fix"
+                "LlmClient: refusing to build with an empty api_key; call "
+                "`require_api_key(settings, provider_id)` so the failure names the setting "
+                "to fix"
             )
+        self.provider_id = provider_id
         self._api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -237,18 +267,24 @@ class DeepSeekClient:
 
     @classmethod
     def from_settings(
-        cls, settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None
-    ) -> "DeepSeekClient":
+        cls,
+        settings: Settings,
+        *,
+        provider_id: str,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> "LlmClient":
+        provider = resolve_provider(settings, provider_id)
         return cls(
-            api_key=require_api_key(settings),
-            base_url=settings.deepseek_base_url,
-            model=settings.deepseek_model,
-            max_tokens=settings.deepseek_max_tokens,
-            max_concurrency=settings.deepseek_max_concurrency,
-            max_attempts=settings.deepseek_max_attempts,
-            retry_backoff_seconds=settings.deepseek_retry_backoff_seconds,
-            request_timeout_seconds=settings.deepseek_request_timeout_seconds,
-            thinking=settings.deepseek_thinking,
+            provider_id=provider_id,
+            api_key=require_api_key(settings, provider_id),
+            base_url=provider.base_url,
+            model=provider.model,
+            max_tokens=provider.max_tokens,
+            max_concurrency=provider.max_concurrency,
+            max_attempts=settings.llm_max_attempts,
+            retry_backoff_seconds=settings.llm_retry_backoff_seconds,
+            request_timeout_seconds=settings.llm_request_timeout_seconds,
+            thinking=provider.thinking,
             transport=transport,
         )
 
@@ -256,11 +292,11 @@ class DeepSeekClient:
         # Explicit, not the default: the default would be harmless today and would start
         # printing the key the moment somebody makes this a dataclass.
         return (
-            f"DeepSeekClient(base_url={self.base_url!r}, model={self.model!r}, "
-            f"max_tokens={self.max_tokens}, thinking={self.thinking})"
+            f"LlmClient(provider_id={self.provider_id!r}, base_url={self.base_url!r}, "
+            f"model={self.model!r}, max_tokens={self.max_tokens}, thinking={self.thinking})"
         )
 
-    async def __aenter__(self) -> "DeepSeekClient":
+    async def __aenter__(self) -> "LlmClient":
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
@@ -329,7 +365,8 @@ class DeepSeekClient:
                     break
                 delay = self.retry_backoff_seconds * (2 ** (attempt - 1))
                 logger.warning(
-                    "deepseek attempt %d/%d failed (%s); retrying in %.1fs",
+                    "llm provider=%s attempt %d/%d failed (%s); retrying in %.1fs",
+                    self.provider_id,
                     attempt,
                     allowance,
                     type(exc).__name__,
@@ -352,10 +389,11 @@ class DeepSeekClient:
         except httpx.HTTPError as exc:
             # `exc` carries the request URL, never the headers, so this cannot leak the key.
             raise DeepSeekUnavailableError(
-                f"deepseek: POST {self.base_url}{CHAT_COMPLETIONS_PATH} failed at the "
-                f"transport ({type(exc).__name__}: {exc})"
+                f"llm: provider {self.provider_id} POST "
+                f"{self.base_url}{CHAT_COMPLETIONS_PATH} failed at the transport "
+                f"({type(exc).__name__}: {exc})"
             ) from exc
-        _raise_for_status(response, self.base_url)
+        _raise_for_status(response, self.base_url, provider_id=self.provider_id)
         return self._result(response, attempt)
 
     def _result(self, response: httpx.Response, attempt: int) -> ChatResult:
@@ -363,13 +401,13 @@ class DeepSeekClient:
             envelope = response.json()
         except ValueError as exc:
             raise DeepSeekMalformedError(
-                f"deepseek: HTTP {response.status_code} body is not JSON at all "
+                f"llm: HTTP {response.status_code} body is not JSON at all "
                 f"({exc}); first 200 characters: {response.text[:200]!r}"
             ) from exc
         choices = envelope.get("choices")
         if not isinstance(choices, list) or not choices:
             raise DeepSeekMalformedError(
-                f"deepseek: response carries no choices (keys: {sorted(envelope)}), so there "
+                f"llm: response carries no choices (keys: {sorted(envelope)}), so there "
                 "is no completion to validate"
             )
         choice = choices[0]
@@ -389,7 +427,7 @@ class DeepSeekClient:
         self._check_budget(result)
         if not result.content.strip():
             raise DeepSeekMalformedError(
-                "deepseek: the model returned empty content with "
+                "llm: the model returned empty content with "
                 f"finish_reason={finish_reason!r} and no token pressure "
                 f"(reasoning_tokens={result.reasoning_tokens}, max_tokens={self.max_tokens}). "
                 "This is the empty-content bug DeepSeek documents as unresolved in its JSON "
@@ -408,19 +446,19 @@ class DeepSeekClient:
         pressure = reasoning >= self.max_tokens * _REASONING_PRESSURE_RATIO
         if result.finish_reason != "length" and not (pressure and not result.content.strip()):
             return
-        raise DeepSeekBudgetError(
-            f"deepseek: model {result.model} hit the output ceiling "
+        raise LlmBudgetError(
+            f"llm: provider {self.provider_id} model {result.model} hit the output ceiling "
             f"(finish_reason={result.finish_reason!r}, max_tokens={self.max_tokens}, "
             f"reasoning_tokens={reasoning}, content {len(result.content)} chars). Reasoning "
             "is charged against max_tokens and thinking is ON by default on this model, so "
             "the JSON body can be truncated or missing entirely with nothing else wrong. "
-            "Raise DEEPSEEK_MAX_TOKENS, or set DEEPSEEK_THINKING=false to stop paying the "
-            "reasoning budget out of the same ceiling. Not retried: the same request fails "
-            "the same way."
+            "Raise this provider's max_tokens in LLM_PROVIDERS, or set its thinking to false "
+            "to stop paying the reasoning budget out of the same ceiling. Not retried: the "
+            "same request fails the same way."
         )
 
 
-def _raise_for_status(response: httpx.Response, base_url: str) -> None:
+def _raise_for_status(response: httpx.Response, base_url: str, *, provider_id: str) -> None:
     status = response.status_code
     if status < 400:
         return
@@ -429,22 +467,24 @@ def _raise_for_status(response: httpx.Response, base_url: str) -> None:
     detail = response.text[:400]
     if status in (401, 403):
         raise DeepSeekAuthError(
-            f"deepseek: {base_url} rejected the credential (HTTP {status}). Check "
-            f"secrets/deepseek_key. Not retried. Body: {detail}"
+            f"llm: provider {provider_id} at {base_url} rejected the credential (HTTP "
+            f"{status}). Check secrets/llm_{provider_id}_key or "
+            f"LLM_{provider_id.upper()}_KEY. Not retried. Body: {detail}"
         )
     if status == 402:
         raise DeepSeekBalanceError(
-            f"deepseek: HTTP 402 insufficient balance on the account behind DEEPSEEK_KEY. "
-            "Top it up before re-running the classification job; not retried, because a "
-            f"balance does not refill inside a retry window. Body: {detail}"
+            f"llm: provider {provider_id} answered HTTP 402 insufficient balance on the "
+            "account behind its key. Top it up before re-running the classification job; "
+            f"not retried, because a balance does not refill inside a retry window. Body: {detail}"
         )
     if status in (429, 500, 503):
         raise DeepSeekUnavailableError(
-            f"deepseek: HTTP {status} from {base_url}. DeepSeek gates on account-wide "
+            f"llm: HTTP {status} from {base_url}. The provider gates on account-wide "
             "concurrency and prescribes no backoff of its own, so this is retried on our "
-            f"own schedule; lower DEEPSEEK_MAX_CONCURRENCY if it persists. Body: {detail}"
+            f"own schedule; lower provider {provider_id}'s max_concurrency in LLM_PROVIDERS "
+            f"if it persists. Body: {detail}"
         )
     raise DeepSeekError(
-        f"deepseek: unexpected HTTP {status} from {base_url}{CHAT_COMPLETIONS_PATH}. Not "
+        f"llm: unexpected HTTP {status} from {base_url}{CHAT_COMPLETIONS_PATH}. Not "
         f"retried, because nothing documents this status as transient. Body: {detail}"
     )

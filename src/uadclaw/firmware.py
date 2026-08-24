@@ -106,7 +106,7 @@ class _NoHttpsDowngradeTransport(httpx.AsyncBaseTransport):
     (`allow_env_proxies = trust_env and transport is None`), so `HTTP_PROXY`/`HTTPS_PROXY` no
     longer route firmware traffic. Deliberate rather than an accident, and stated here so it
     never reads as one: the worker image pulls from public CDNs and sets no proxy, while
-    `deepseek`/`brave` build their own clients and still honour the env. Flag it rather than
+    `llm`/`brave` build their own clients and still honour the env. Flag it rather than
     widening it — a proxied firmware deployment is a follow-up, not this task.
     """
 

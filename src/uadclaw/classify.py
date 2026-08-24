@@ -134,6 +134,12 @@ class ClassificationJobParams(BaseModel):
     # the model is not reproducible, so a re-run costs money and produces a different answer
     # to the same question, and that has to be asked for rather than happen by accident.
     reclassify: bool = False
+    # Which provider this job's model calls go to, as an id in the settings provider table.
+    # `None` means the default (`llm_default_provider`). This module is pure, so the id is
+    # only CHECKED at the creation seam (`jobs.validate_job_params`), which resolves it
+    # against the table, refuses an unknown one before any spend, and stores the RESOLVED id
+    # on the row — a job then names its provider even if the default changes later.
+    provider: str | None = None
 
 
 class ClassificationRejected(ValueError):

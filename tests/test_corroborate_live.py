@@ -2,7 +2,7 @@
 
     UADCLAW_LIVE_API_TESTS=1 uv run pytest -n0 -s tests/test_corroborate_live.py
 
-Excluded from the default suite, mirroring `test_deepseek_live.py` and `test_oppo_live.py`.
+Excluded from the default suite, mirroring `test_llm_live.py` and `test_oppo_live.py`.
 Everything the clients do is already pinned against a mocked transport in `test_brave.py` and
 `test_corroboration_stage.py`; what only the live API can prove is that the response SHAPE this
 repo parses is the shape Brave actually sends. A mock proves the code does what the mock was
@@ -31,7 +31,7 @@ from uadclaw.corroborate import (
     user_prompt,
     validate_verdict,
 )
-from uadclaw.deepseek import DeepSeekClient
+from uadclaw.llm import LlmClient
 from uadclaw.settings import Settings
 
 pytestmark = [
@@ -61,8 +61,10 @@ def settings(test_env) -> Settings:
     loaded = Settings()
     if not loaded.brave_key.get_secret_value().strip():
         pytest.skip("BRAVE_KEY is not configured on this box")
-    if not loaded.deepseek_key.get_secret_value().strip():
-        pytest.skip("DEEPSEEK_KEY is not configured on this box")
+    if "deepseek" not in loaded.llm_providers:
+        pytest.skip("the deepseek provider is not in LLM_PROVIDERS on this box")
+    if not loaded.provider_key("deepseek"):
+        pytest.skip("the deepseek provider key is not configured on this box")
     return loaded
 
 
@@ -125,7 +127,7 @@ async def test_a_real_package_is_judged_against_real_sources(settings):
     """Recorded rather than demanded: whether obscure OEM package names corroborate is the
     open question, so a rejection here is a finding and not a test failure."""
     sources = await evidence(settings, REAL_PACKAGE)
-    async with DeepSeekClient.from_settings(settings) as judge:
+    async with LlmClient.from_settings(settings, provider_id="deepseek") as judge:
         result = await judge.complete_json(
             system=SYSTEM_PROMPT,
             user=user_prompt(REAL_PACKAGE, REAL_DESCRIPTION, sources),
@@ -163,7 +165,7 @@ async def test_an_invented_package_never_produces_a_fabricated_citation(settings
     maintainer: a judge that answers corroborated for a package that does not exist must cite
     a url it was actually given, or the validator refuses the whole response."""
     sources = await evidence(settings, INVENTED_PACKAGE)
-    async with DeepSeekClient.from_settings(settings) as judge:
+    async with LlmClient.from_settings(settings, provider_id="deepseek") as judge:
         result = await judge.complete_json(
             system=SYSTEM_PROMPT,
             user=user_prompt(INVENTED_PACKAGE, INVENTED_DESCRIPTION, sources),

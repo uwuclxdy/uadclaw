@@ -29,7 +29,7 @@ from uadclaw.corroborate import (
     user_prompt,
     validate_verdict,
 )
-from uadclaw.deepseek import require_json_prompt
+from uadclaw.llm import require_json_prompt
 
 PACKAGE = "com.example.vendor.notes"
 DESCRIPTION = "Vendor notes application. Removing it loses locally stored notes."
