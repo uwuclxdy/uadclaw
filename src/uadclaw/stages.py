@@ -912,7 +912,7 @@ async def _classify_and_store_one(
                 bundle_sha256=bundle.sha256,
                 model=client.model,
                 thinking=client.thinking,
-                reason=reason or "the model produced nothing usable",
+                reason=reason or "the LLM produced nothing usable",
                 usage=usage,
                 attempts=attempts,
                 at=at,

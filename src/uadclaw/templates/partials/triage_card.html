@@ -26,7 +26,7 @@
        and the source count a badge on the section that lists the sources. #}
     <div class="badge-row" style="justify-content:flex-end">
       {% if c.removal %}<span class="tag tag-default" title="the rating this entry would ship with">removal {{ c.removal|lower }}</span>{% endif %}
-      {% if c.parked %}<span class="tag tag-danger" title="the model could not answer">no answer</span>{% endif %}
+      {% if c.parked %}<span class="tag tag-danger" title="the LLM could not answer">no answer</span>{% endif %}
       {% if c.has_conflict %}<span class="tag tag-info" title="devices disagree on a fact">conflict</span>{% endif %}
     </div>
   </div>
@@ -51,7 +51,7 @@
   {% if c.parked %}
     <div class="callout callout-danger" style="margin-bottom:var(--space-4)">
       <div class="callout-body">
-        <span class="callout-title">the model gave no answer</span>
+        <span class="callout-title">the LLM gave no answer</span>
         {{ c.parked_reason }}
       </div>
     </div>
@@ -204,7 +204,7 @@
   </div>
 </article>
 
-{# --- the model's answer ------------------------------------------------------------------- #}
+{# --- the LLM's answer --------------------------------------------------------------------- #}
 <article class="card" style="margin-bottom:var(--space-4)">
   <div class="label" style="margin-bottom:var(--space-3)">the LLM's answer</div>
   {% if c.description %}

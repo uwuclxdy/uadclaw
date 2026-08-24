@@ -125,7 +125,7 @@ def corroboration_label(status: str | None, sources: int) -> str:
 # badge: a `title` on a non-focusable `<span>` exists for a pointer and for nothing else.
 BADGE_MEANINGS: tuple[tuple[str, str], ...] = (
     ("removal", "the rating this entry would ship with, never below the minimum rating."),
-    ("no answer", "the model could not answer. read the reason, then edit or reject."),
+    ("no answer", "the LLM could not answer. read the reason, then edit or reject."),
     ("shipped", "this approval already went out on a branch. no longer awaiting emission."),
     ("conflict", "devices disagree on a fact. shown, never filtered on."),
     ("n sources", "how many sources back the description. 13.6% of packages have any."),

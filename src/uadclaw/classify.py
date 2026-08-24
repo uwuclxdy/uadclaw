@@ -411,7 +411,7 @@ def _check_removal(removal: Removal, floor: RemovalFloor) -> None:
             f"answered {removal} for a package whose computed floor is {floor.floor} "
             f"(set by {floor.rule}: "
             f"{floor.fired[0].detail if floor.fired else 'no rule'}). The floor is a lower "
-            "bound the model may raise and never lower, and this is REJECTED rather than "
+            "bound the LLM may raise and never lower, and this is REJECTED rather than "
             "raised to the floor: an answer below it came from misreading the same evidence "
             "the description was written from, so correcting the number would keep the "
             "misreading and hide it.",
@@ -423,7 +423,7 @@ def _check_list(proposed: UadList, derivation: ListDerivation) -> None:
         raise ClassificationRejected(
             "list",
             f"answered {proposed} where the deterministic rule decided "
-            f"{derivation.value} ({derivation.rule}: {derivation.detail}). The model only "
+            f"{derivation.value} ({derivation.rule}: {derivation.detail}). The LLM only "
             "breaks ties the rules leave open.",
         )
 

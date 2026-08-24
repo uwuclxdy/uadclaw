@@ -613,8 +613,8 @@ async def test_a_parked_package_is_reachable_behind_its_own_filter(
 
     assert "com.example.parked" not in await screen(client)
     parked = await screen(client, "?view=parked")
-    assert "the model gave no answer" in parked
-    assert 'title="the model could not answer"' in parked
+    assert "the LLM gave no answer" in parked
+    assert 'title="the LLM could not answer"' in parked
 
 
 # --- the edit path ----------------------------------------------------------------------------
@@ -1008,7 +1008,7 @@ async def test_every_badge_is_explained_where_a_keyboard_can_reach_it(
     # values off the same table the template renders proves the table is rendered and never
     # that the table says anything.
     assert "how many sources back the description" in legend
-    assert "the model could not answer" in legend
+    assert "the LLM could not answer" in legend
     for badge, meaning in triage_view.BADGE_MEANINGS:
         assert f">{badge}</span>" in legend, badge
         assert meaning in legend, meaning

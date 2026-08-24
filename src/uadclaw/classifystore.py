@@ -443,7 +443,7 @@ async def store_human_edit(
     if existing is None:
         raise ClassificationStoreError(
             f"store_human_edit: {package} has no classification row to edit. Only a package "
-            "the model has already proposed something for can be edited; queue a "
+            "the LLM has already proposed something for can be edited; queue a "
             "classification job for it first."
         )
 
