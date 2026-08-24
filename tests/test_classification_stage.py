@@ -30,7 +30,7 @@ from uadclaw.corpusstore import load_config_inputs, require_corpus
 from uadclaw.facts import ApkFacts
 from uadclaw.factstore import record_device_scan, store_device_facts
 from uadclaw.ladder import Removal, compute_floors, danger_rank
-from uadclaw.llm import DeepSeekBalanceError, LlmClient
+from uadclaw.llm import LlmBalanceError, LlmClient
 from uadclaw.models import JobKind, PackageAnalysis, PackageClassification
 from uadclaw.settings import get_settings
 from uadclaw.stages import llm_stage
@@ -766,7 +766,7 @@ async def test_an_unexpected_http_status_parks_one_package_without_cancelling_it
     db_env, classification_env, fake_api, db_session_factory
 ):
     """A 502 out of a proxy in front of the API is an ordinary event, and it raises a bare
-    `DeepSeekError` — neither the malformed class nor the unavailable one, so `_classify_one`
+    `LlmError` — neither the malformed class nor the unavailable one, so `_classify_one`
     caught nothing, `complete_json` never retried it, and it escaped into the TaskGroup. That
     cancelled every sibling package, answers already paid for included, and left no row at
     all: the siblings looked like they had never been asked and the failing package was
@@ -966,7 +966,7 @@ async def test_an_account_level_failure_on_one_package_still_aborts_the_whole_jo
     with pytest.raises(BaseExceptionGroup) as caught:
         await llm_stage(context(job_id, db_session_factory))
 
-    assert caught.group_contains(DeepSeekBalanceError)
+    assert caught.group_contains(LlmBalanceError)
     stored = await rows(db_session_factory)
     assert failing not in stored, "no park row for a failure that is not the package's"
 
@@ -984,7 +984,7 @@ async def test_an_empty_balance_aborts_the_job_rather_than_parking_every_package
     with pytest.raises(BaseExceptionGroup) as caught:
         await llm_stage(context(job_id, db_session_factory))
 
-    assert any(isinstance(exc, DeepSeekBalanceError) for exc in caught.value.exceptions)
+    assert any(isinstance(exc, LlmBalanceError) for exc in caught.value.exceptions)
     assert await rows(db_session_factory) == {}, (
         "no park row for a failure that is not the package's"
     )

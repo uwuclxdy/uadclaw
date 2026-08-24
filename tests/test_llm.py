@@ -19,14 +19,14 @@ import pytest
 
 from uadclaw.llm import (
     ChatResult,
-    DeepSeekAuthError,
-    DeepSeekBalanceError,
-    DeepSeekConfigError,
-    DeepSeekError,
-    DeepSeekMalformedError,
-    DeepSeekUnavailableError,
+    LlmAuthError,
+    LlmBalanceError,
     LlmBudgetError,
     LlmClient,
+    LlmConfigError,
+    LlmError,
+    LlmMalformedError,
+    LlmUnavailableError,
     require_api_key,
     require_json_prompt,
 )
@@ -140,19 +140,19 @@ async def test_the_system_message_is_byte_identical_across_calls():
 
 
 def test_a_prompt_without_the_word_json_is_refused_before_it_is_sent():
-    with pytest.raises(DeepSeekConfigError, match="must contain the word 'json'"):
+    with pytest.raises(LlmConfigError, match="must contain the word 'json'"):
         require_json_prompt("Describe this package.", "{}")
 
 
 def test_a_prompt_without_an_example_object_is_refused():
-    with pytest.raises(DeepSeekConfigError, match="example of the desired JSON"):
+    with pytest.raises(LlmConfigError, match="example of the desired JSON"):
         require_json_prompt("Answer in json.", "no example here")
 
 
 async def test_the_guard_runs_before_any_request_is_made():
     api, sent = client([httpx.Response(200, json=envelope())])
     async with api:
-        with pytest.raises(DeepSeekConfigError):
+        with pytest.raises(LlmConfigError):
             await api.complete_json(system="describe it", user="please")
     assert sent == []
 
@@ -168,6 +168,7 @@ async def test_finish_reason_length_is_a_budget_error_and_is_not_retried():
         with pytest.raises(LlmBudgetError) as caught:
             await api.complete_json(system=SYSTEM, user=USER)
     assert len(sent) == 1, "a budget failure must not consume the retry cap"
+    assert caught.value.attempts == 1, "the base handler must charge the request that failed"
     assert "max_tokens in LLM_PROVIDERS" in str(caught.value)
     assert "reasoning_tokens=32" in str(caught.value)
 
@@ -210,7 +211,7 @@ async def test_empty_content_with_no_token_pressure_is_the_documented_bug_and_re
 async def test_the_empty_content_bug_exhausts_the_cap_and_raises_the_last_failure():
     api, sent = client([httpx.Response(200, json=envelope(""))])
     async with api:
-        with pytest.raises(DeepSeekMalformedError, match="empty-content bug"):
+        with pytest.raises(LlmMalformedError, match="empty-content bug"):
             await api.complete_json(system=SYSTEM, user=USER)
     assert len(sent) == 3
 
@@ -232,7 +233,7 @@ async def test_a_retryable_status_is_retried_then_succeeds(status):
 async def test_the_retry_cap_is_honoured():
     api, sent = client([httpx.Response(503, text="overloaded")])
     async with api:
-        with pytest.raises(DeepSeekUnavailableError):
+        with pytest.raises(LlmUnavailableError):
             await api.complete_json(system=SYSTEM, user=USER)
     assert len(sent) == 3
 
@@ -240,7 +241,7 @@ async def test_the_retry_cap_is_honoured():
 async def test_402_is_not_retried():
     api, sent = client([httpx.Response(402, text="Insufficient Balance")])
     async with api:
-        with pytest.raises(DeepSeekBalanceError, match="insufficient balance"):
+        with pytest.raises(LlmBalanceError, match="insufficient balance"):
             await api.complete_json(system=SYSTEM, user=USER)
     assert len(sent) == 1
 
@@ -249,7 +250,7 @@ async def test_402_is_not_retried():
 async def test_a_rejected_credential_is_not_retried(status):
     api, sent = client([httpx.Response(status, text="Authentication Fails")])
     async with api:
-        with pytest.raises(DeepSeekAuthError):
+        with pytest.raises(LlmAuthError):
             await api.complete_json(system=SYSTEM, user=USER)
     assert len(sent) == 1
 
@@ -257,9 +258,9 @@ async def test_a_rejected_credential_is_not_retried(status):
 async def test_an_undocumented_status_is_not_retried():
     api, sent = client([httpx.Response(418, text="teapot")])
     async with api:
-        with pytest.raises(DeepSeekError) as caught:
+        with pytest.raises(LlmError) as caught:
             await api.complete_json(system=SYSTEM, user=USER)
-    assert type(caught.value) is DeepSeekError
+    assert type(caught.value) is LlmError
     assert len(sent) == 1
 
 
@@ -288,7 +289,7 @@ async def test_a_non_json_body_is_malformed_and_retried():
 async def test_a_response_with_no_choices_is_malformed():
     api, _ = client([httpx.Response(200, json={"id": "x", "usage": {}})])
     async with api:
-        with pytest.raises(DeepSeekMalformedError, match="no choices"):
+        with pytest.raises(LlmMalformedError, match="no choices"):
             await api.complete_json(system=SYSTEM, user=USER)
 
 
@@ -296,7 +297,7 @@ def test_content_that_is_not_an_object_is_malformed():
     result = ChatResult(
         content="[1, 2]", model="m", finish_reason="stop", usage={}, attempts=1, thinking=True
     )
-    with pytest.raises(DeepSeekMalformedError, match="JSON list, not an object"):
+    with pytest.raises(LlmMalformedError, match="JSON list, not an object"):
         result.json_object()
 
 
@@ -309,7 +310,7 @@ def test_content_that_is_not_json_names_what_came_back():
         attempts=1,
         thinking=True,
     )
-    with pytest.raises(DeepSeekMalformedError, match="Sure! Here you go"):
+    with pytest.raises(LlmMalformedError, match="Sure! Here you go"):
         result.json_object()
 
 
@@ -335,7 +336,7 @@ async def test_the_raw_usage_envelope_reaches_the_caller():
 async def test_the_key_is_sent_as_a_bearer_header_and_appears_nowhere_else():
     api, sent = client([httpx.Response(500, text="server error")])
     async with api:
-        with pytest.raises(DeepSeekUnavailableError) as caught:
+        with pytest.raises(LlmUnavailableError) as caught:
             await api.complete_json(system=SYSTEM, user=USER)
     assert sent[0].headers["authorization"] == f"Bearer {SECRET}"
     assert SECRET not in str(caught.value)
@@ -346,7 +347,7 @@ async def test_the_key_is_sent_as_a_bearer_header_and_appears_nowhere_else():
 async def test_an_auth_failure_message_does_not_quote_the_key():
     api, _ = client([httpx.Response(401, text="Authentication Fails, Your api key is invalid")])
     async with api:
-        with pytest.raises(DeepSeekAuthError) as caught:
+        with pytest.raises(LlmAuthError) as caught:
             await api.complete_json(system=SYSTEM, user=USER)
     assert SECRET not in str(caught.value)
 
@@ -363,7 +364,7 @@ def test_a_blank_key_is_refused_at_the_point_of_use_not_at_settings_load(monkeyp
     monkeypatch.setenv("LLM_DEEPSEEK_KEY", "")
     settings = Settings()
     assert settings.provider_key("deepseek") == ""
-    with pytest.raises(DeepSeekConfigError, match="has no API key"):
+    with pytest.raises(LlmConfigError, match="has no API key"):
         require_api_key(settings, "deepseek")
 
 
@@ -372,7 +373,7 @@ def test_a_whitespace_only_key_is_refused_too(monkeypatch):
     monkeypatch.setenv("AUTH_PASSWORD", "y")
     monkeypatch.setenv("SESSION_SECRET", "z")
     monkeypatch.setenv("LLM_DEEPSEEK_KEY", "   ")
-    with pytest.raises(DeepSeekConfigError):
+    with pytest.raises(LlmConfigError):
         require_api_key(Settings(), "deepseek")
 
 
@@ -381,7 +382,7 @@ def test_the_error_names_both_places_the_key_can_live(monkeypatch):
     monkeypatch.setenv("AUTH_PASSWORD", "y")
     monkeypatch.setenv("SESSION_SECRET", "z")
     monkeypatch.setenv("LLM_DEEPSEEK_KEY", "")
-    with pytest.raises(DeepSeekConfigError) as caught:
+    with pytest.raises(LlmConfigError) as caught:
         require_api_key(Settings(), "deepseek")
     # The message has to name both places: a non-blank file secret wins over the environment
     # and a blank one falls back to it, so the failure can come from either side of the
@@ -392,7 +393,7 @@ def test_the_error_names_both_places_the_key_can_live(monkeypatch):
 
 
 def test_the_client_refuses_to_be_built_with_an_empty_key():
-    with pytest.raises(DeepSeekConfigError, match="require_api_key"):
+    with pytest.raises(LlmConfigError, match="require_api_key"):
         LlmClient(
             provider_id="deepseek",
             api_key="",

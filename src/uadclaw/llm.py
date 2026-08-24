@@ -36,9 +36,9 @@ envelope alone does not distinguish two of them:
   is the opposite one — raise the provider's `max_tokens`, do not re-prompt — so retrying it
   as malformed burns the whole cap and parks a package that would have answered. Not
   retryable.
-- `DeepSeekMalformedError` — empty content with `finish_reason == "stop"` (DeepSeek's own
+- `LlmMalformedError` — empty content with `finish_reason == "stop"` (DeepSeek's own
   documented, unresolved bug) or a body that is not a JSON object. Retryable.
-- `DeepSeekUnavailableError` — 429/500/503. The docs prescribe no backoff and send no
+- `LlmUnavailableError` — 429/500/503. The docs prescribe no backoff and send no
   `Retry-After`, so the schedule is ours. Retryable.
 
 `402 insufficient balance` is never retried: it will not resolve inside a retry window and a
@@ -74,7 +74,7 @@ CACHE_MISS_TOKENS = "prompt_cache_miss_tokens"
 _REASONING_PRESSURE_RATIO = 0.9
 
 
-class DeepSeekError(RuntimeError):
+class LlmError(RuntimeError):
     """Base for every failure of the model call. Distinct from a bug in this module.
 
     `attempts` is how many requests actually reached the wire before this was raised, set by
@@ -87,28 +87,28 @@ class DeepSeekError(RuntimeError):
     attempts: int = 0
 
 
-class DeepSeekConfigError(DeepSeekError):
+class LlmConfigError(LlmError):
     """The client cannot be built from the current configuration. Operator input."""
 
 
-class DeepSeekAuthError(DeepSeekError):
+class LlmAuthError(LlmError):
     """401/403. The key is missing, wrong, or revoked. Never retried."""
 
 
-class DeepSeekBalanceError(DeepSeekError):
+class LlmBalanceError(LlmError):
     """402 insufficient balance. Never retried: it cannot resolve inside a retry window."""
 
 
-class LlmBudgetError(DeepSeekError):
+class LlmBudgetError(LlmError):
     """`max_tokens` was too small for reasoning plus the JSON body. Never retried: the same
     request will fail the same way, and the fix is a bigger budget rather than a re-prompt."""
 
 
-class DeepSeekMalformedError(DeepSeekError):
+class LlmMalformedError(LlmError):
     """The response body is not a usable JSON object. Retryable."""
 
 
-class DeepSeekUnavailableError(DeepSeekError):
+class LlmUnavailableError(LlmError):
     """429/500/503, or a transport failure. Retryable."""
 
 
@@ -137,16 +137,16 @@ class ChatResult:
         return value if isinstance(value, int) else 0
 
     def json_object(self) -> dict[str, Any]:
-        """The content parsed as a JSON object, or `DeepSeekMalformedError`."""
+        """The content parsed as a JSON object, or `LlmMalformedError`."""
         try:
             parsed = json.loads(self.content)
         except json.JSONDecodeError as exc:
-            raise DeepSeekMalformedError(
+            raise LlmMalformedError(
                 f"llm: model {self.model} answered with something that is not JSON "
                 f"({exc}); first 200 characters: {self.content[:200]!r}"
             ) from exc
         if not isinstance(parsed, dict):
-            raise DeepSeekMalformedError(
+            raise LlmMalformedError(
                 f"llm: model {self.model} answered with a JSON "
                 f"{type(parsed).__name__}, not an object. The prompt asks for one object per "
                 "package."
@@ -165,7 +165,7 @@ def resolve_provider(settings: Settings, provider_id: str) -> LlmProviderConfig:
         return settings.llm_providers[provider_id]
     except KeyError as exc:
         valid = ", ".join(sorted(settings.llm_providers)) or "(none configured)"
-        raise DeepSeekConfigError(
+        raise LlmConfigError(
             f"llm: provider {provider_id!r} is not in the provider table (configured ids: "
             f"{valid}). Add it to LLM_PROVIDERS (or mount secrets/llm_providers), or re-create "
             "the job with a provider param naming one of them."
@@ -182,7 +182,7 @@ def require_api_key(settings: Settings, provider_id: str) -> str:
     """
     key = settings.provider_key(provider_id).strip()
     if not key:
-        raise DeepSeekConfigError(
+        raise LlmConfigError(
             f"llm: provider {provider_id!r} has no API key, so its calls have nothing to "
             f"authenticate with. Put the key in secrets/llm_{provider_id}_key (docker mounts "
             "it at /run/secrets/llm_<id>_key; a non-blank FILE wins over the environment "
@@ -203,13 +203,13 @@ def require_json_prompt(*parts: str) -> None:
     """
     joined = "\n".join(parts)
     if "json" not in joined.lower():
-        raise DeepSeekConfigError(
+        raise LlmConfigError(
             "llm: the prompt must contain the word 'json'. Without it the model may "
             "emit an unbounded whitespace stream until it hits max_tokens, which reads as a "
             "stuck request rather than as a failure."
         )
     if "{" not in joined or "}" not in joined:
-        raise DeepSeekConfigError(
+        raise LlmConfigError(
             "llm: the prompt must include an example of the desired JSON object. The "
             "JSON Output guide requires one, and json_object mode constrains the syntax "
             "only, never the shape."
@@ -245,7 +245,7 @@ class LlmClient:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if not api_key:
-            raise DeepSeekConfigError(
+            raise LlmConfigError(
                 "LlmClient: refusing to build with an empty api_key; call "
                 "`require_api_key(settings, provider_id)` so the failure names the setting "
                 "to fix"
@@ -344,21 +344,21 @@ class LlmClient:
         body = self._body(system, user)
         allowance = self.max_attempts if max_calls is None else min(self.max_attempts, max_calls)
         if allowance < 1:
-            raise DeepSeekConfigError(
+            raise LlmConfigError(
                 f"complete_json: max_calls={max_calls} leaves no requests to make. A caller "
                 "tracking a budget must stop before it reaches zero rather than asking for a "
                 "call it cannot pay for."
             )
-        last: DeepSeekError | None = None
+        last: LlmError | None = None
         for attempt in range(1, allowance + 1):
             try:
                 async with self._semaphore:
                     return await self._attempt(body, attempt)
-            except DeepSeekError as exc:
+            except LlmError as exc:
                 # Every failure carries what it actually spent, retryable or not: the caller's
                 # budget is in REQUESTS, so a 402 on the second attempt has to decrement two.
                 exc.attempts = attempt
-                if not isinstance(exc, DeepSeekUnavailableError | DeepSeekMalformedError):
+                if not isinstance(exc, LlmUnavailableError | LlmMalformedError):
                     raise
                 last = exc
                 if attempt >= allowance:
@@ -388,7 +388,7 @@ class LlmClient:
             )
         except httpx.HTTPError as exc:
             # `exc` carries the request URL, never the headers, so this cannot leak the key.
-            raise DeepSeekUnavailableError(
+            raise LlmUnavailableError(
                 f"llm: provider {self.provider_id} POST "
                 f"{self.base_url}{CHAT_COMPLETIONS_PATH} failed at the transport "
                 f"({type(exc).__name__}: {exc})"
@@ -400,13 +400,13 @@ class LlmClient:
         try:
             envelope = response.json()
         except ValueError as exc:
-            raise DeepSeekMalformedError(
+            raise LlmMalformedError(
                 f"llm: HTTP {response.status_code} body is not JSON at all "
                 f"({exc}); first 200 characters: {response.text[:200]!r}"
             ) from exc
         choices = envelope.get("choices")
         if not isinstance(choices, list) or not choices:
-            raise DeepSeekMalformedError(
+            raise LlmMalformedError(
                 f"llm: response carries no choices (keys: {sorted(envelope)}), so there "
                 "is no completion to validate"
             )
@@ -426,7 +426,7 @@ class LlmClient:
         )
         self._check_budget(result)
         if not result.content.strip():
-            raise DeepSeekMalformedError(
+            raise LlmMalformedError(
                 "llm: the model returned empty content with "
                 f"finish_reason={finish_reason!r} and no token pressure "
                 f"(reasoning_tokens={result.reasoning_tokens}, max_tokens={self.max_tokens}). "
@@ -466,25 +466,25 @@ def _raise_for_status(response: httpx.Response, base_url: str, *, provider_id: s
     # Authorization header, so it is safe to put in a message.
     detail = response.text[:400]
     if status in (401, 403):
-        raise DeepSeekAuthError(
+        raise LlmAuthError(
             f"llm: provider {provider_id} at {base_url} rejected the credential (HTTP "
             f"{status}). Check secrets/llm_{provider_id}_key or "
             f"LLM_{provider_id.upper()}_KEY. Not retried. Body: {detail}"
         )
     if status == 402:
-        raise DeepSeekBalanceError(
+        raise LlmBalanceError(
             f"llm: provider {provider_id} answered HTTP 402 insufficient balance on the "
             "account behind its key. Top it up before re-running the classification job; "
             f"not retried, because a balance does not refill inside a retry window. Body: {detail}"
         )
     if status in (429, 500, 503):
-        raise DeepSeekUnavailableError(
+        raise LlmUnavailableError(
             f"llm: HTTP {status} from {base_url}. The provider gates on account-wide "
             "concurrency and prescribes no backoff of its own, so this is retried on our "
             f"own schedule; lower provider {provider_id}'s max_concurrency in LLM_PROVIDERS "
             f"if it persists. Body: {detail}"
         )
-    raise DeepSeekError(
+    raise LlmError(
         f"llm: unexpected HTTP {status} from {base_url}{CHAT_COMPLETIONS_PATH}. Not "
         f"retried, because nothing documents this status as transient. Body: {detail}"
     )

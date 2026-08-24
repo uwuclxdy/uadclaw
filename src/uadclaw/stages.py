@@ -112,13 +112,13 @@ from uadclaw.firmware import (
 from uadclaw.ladder import RemovalFloor, compute_floors
 from uadclaw.llm import (
     ChatResult,
-    DeepSeekAuthError,
-    DeepSeekBalanceError,
-    DeepSeekError,
-    DeepSeekMalformedError,
-    DeepSeekUnavailableError,
+    LlmAuthError,
+    LlmBalanceError,
     LlmBudgetError,
     LlmClient,
+    LlmError,
+    LlmMalformedError,
+    LlmUnavailableError,
 )
 from uadclaw.models import Job
 from uadclaw.settings import Settings, get_settings
@@ -673,7 +673,7 @@ async def _classify_one(
             result = await client.complete_json(
                 system=SYSTEM_PROMPT, user=user, max_calls=max_calls - calls
             )
-        except (DeepSeekMalformedError, DeepSeekUnavailableError) as exc:
+        except (LlmMalformedError, LlmUnavailableError) as exc:
             # Terminal, and charged for what it really spent — `exc.attempts`, not one.
             calls += exc.attempts
             spent[0] = calls
@@ -690,7 +690,7 @@ async def _classify_one(
             classification = validate_response(
                 payload, bundle=bundle, floor=floor, derivation=derivation, model=result.model
             )
-        except (ClassificationRejected, DeepSeekMalformedError) as exc:
+        except (ClassificationRejected, LlmMalformedError) as exc:
             reason = f"after {calls} request(s): {exc}"
             logger.warning("classification rejected: package=%s %s", bundle.package, reason)
             continue
@@ -821,7 +821,7 @@ async def _classify_and_store(
     must not discard 29 answers that were already paid for.
 
     This runs inside a `TaskGroup`, so anything that escapes here cancels every sibling. It
-    used to: a 400, a 404 or a proxy's 502 is a bare `DeepSeekError`, which is neither of the
+    used to: a 400, a 404 or a proxy's 502 is a bare `LlmError`, which is neither of the
     two classes `_classify_one` catches and which the client does not retry. Measured on a
     four-package group with one 502 in it: four requests reached the wire, all four were paid
     for, and `package_classification` came out EMPTY — three answers lost to a sibling and no
@@ -830,8 +830,8 @@ async def _classify_and_store(
     row naming what happened.
 
     Three exceptions still take the whole job down, unchanged and deliberately, exactly as
-    `_corroborate_and_store` and this stage's own docstring have it: `DeepSeekAuth`,
-    `DeepSeekBalance` and `LlmBudget` are facts about the ACCOUNT or the configuration
+    `_corroborate_and_store` and this stage's own docstring have it: `LlmAuth`,
+    `LlmBalance` and `LlmBudget` are facts about the ACCOUNT or the configuration
     rather than about this package, and burning 47 more packages' budgets against a dead
     account is not a diagnosis.
 
@@ -855,11 +855,11 @@ async def _classify_and_store(
             counts=counts,
             spent=spent,
         )
-    except (DeepSeekAuthError, DeepSeekBalanceError, LlmBudgetError):
+    except (LlmAuthError, LlmBalanceError, LlmBudgetError):
         raise
     except Exception as exc:
         logger.exception("classification failed for %s", bundle.package)
-        attempts = spent[0] + (exc.attempts if isinstance(exc, DeepSeekError) else 0)
+        attempts = spent[0] + (exc.attempts if isinstance(exc, LlmError) else 0)
         try:
             async with ctx.session_factory() as session, session.begin():
                 await park_package(
@@ -984,7 +984,7 @@ async def _judge_one(
             result = await client.complete_json(
                 system=JUDGE_SYSTEM_PROMPT, user=user, max_calls=max_calls - calls
             )
-        except (DeepSeekMalformedError, DeepSeekUnavailableError) as exc:
+        except (LlmMalformedError, LlmUnavailableError) as exc:
             # Terminal, and charged for what it really spent — `exc.attempts`, not one.
             calls += exc.attempts
             reason = f"after {calls} request(s): {exc}"
@@ -1001,7 +1001,7 @@ async def _judge_one(
                 sources=sources,
                 model=result.model,
             )
-        except (CorroborationRejected, DeepSeekMalformedError) as exc:
+        except (CorroborationRejected, LlmMalformedError) as exc:
             reason = f"after {calls} request(s): {exc}"
             logger.warning("corroboration verdict rejected: package=%s %s", package, reason)
             continue
@@ -1089,8 +1089,8 @@ async def _corroborate_and_store(
     the sources are in hand it is `search_failed` (a retry re-searches and spends a query),
     after them it is `judge_failed` (a retry re-reads the cached rows and spends none).
 
-    Three exceptions still take the whole job down, unchanged and deliberately: `DeepSeekAuth`,
-    `DeepSeekBalance` and `LlmBudget` are facts about the ACCOUNT rather than about this
+    Three exceptions still take the whole job down, unchanged and deliberately: `LlmAuth`,
+    `LlmBalance` and `LlmBudget` are facts about the ACCOUNT rather than about this
     package, exactly as `llm_stage` documents, and letting 499 more packages burn their budgets
     against a dead account is not a diagnosis.
 
@@ -1115,7 +1115,7 @@ async def _corroborate_and_store(
             counts=counts,
             phase=phase,
         )
-    except (DeepSeekAuthError, DeepSeekBalanceError, LlmBudgetError):
+    except (LlmAuthError, LlmBalanceError, LlmBudgetError):
         raise
     except Exception as exc:
         logger.exception("corroboration failed for %s", package)

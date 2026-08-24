@@ -91,7 +91,7 @@ class LlmProviderConfig(BaseModel):
     provider thinks has to be a decision written down, not a fallback. One wire-format
     caveat travels with the flag: `thinking=false` makes the client send the
     DeepSeek-specific `{"thinking": {"type": "disabled"}}` field, and a provider that does
-    not know it may answer 400 — which is an unretried `DeepSeekError`, so every package
+    not know it may answer 400 — which is an unretried `LlmError`, so every package
     parks. Leave `thinking` true for a provider without a DeepSeek-compatible thinking
     switch.
     """

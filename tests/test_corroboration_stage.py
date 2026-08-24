@@ -36,7 +36,7 @@ from uadclaw.corroborate import (
 )
 from uadclaw.corroboratestore import CorroborationStoreError, record_failure, store_verdict
 from uadclaw.ladder import Removal
-from uadclaw.llm import DeepSeekBalanceError, LlmClient
+from uadclaw.llm import LlmBalanceError, LlmClient
 from uadclaw.models import PackageClassification, PackageCorroboration, PackageSearchResult
 from uadclaw.stages import corroborate_stage
 from uadclaw.worker import StageContext
@@ -506,7 +506,7 @@ async def test_an_unexpected_failure_after_the_search_is_recorded_as_this_packag
 async def test_an_account_level_balance_failure_still_aborts_the_whole_job(
     db_env, corroboration_env, fake_apis, db_session_factory
 ):
-    """The control for the containment above. `DeepSeekBalanceError` is about the ACCOUNT, not
+    """The control for the containment above. `LlmBalanceError` is about the ACCOUNT, not
     about this package, so burning 499 more packages' budgets against it is not a diagnosis —
     a boundary that swallowed everything would turn this into 500 quiet `judge_failed` rows."""
     fake_apis["judge"] = lambda _prompt: httpx.Response(402, text="Insufficient Balance")
@@ -517,7 +517,7 @@ async def test_an_account_level_balance_failure_still_aborts_the_whole_job(
     with pytest.raises(BaseExceptionGroup) as caught:
         await corroborate_stage(context(job_id, db_session_factory))
 
-    assert caught.group_contains(DeepSeekBalanceError)
+    assert caught.group_contains(LlmBalanceError)
     assert await rows(db_session_factory) == {}, "no package was recorded as its own failure"
 
 
