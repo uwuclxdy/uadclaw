@@ -1,4 +1,4 @@
-"""The removal-rating floor (`docs/pipeline-design.md` §6). Safety-critical.
+"""The removal-rating floor. Safety-critical.
 
 `removal` reaches real phones through Canta, AppManager and android-debloat-list as well as
 uad-ng, so a wrong `Recommended` is the failure this whole pipeline is shaped around. The
@@ -20,8 +20,7 @@ That is enforced by shape rather than by review:
   returns `max(proposal, floor)`. There is no expressible operation that returns less than a
   floor: lowering is not "forbidden", it is absent from the API.
 
-Two clauses are stated here as well as in `docs/domain-knowledge.md`, because both are easy to
-get backwards:
+Two clauses are stated here in full because both are easy to get backwards:
 
 - **The privileged-permission allowlist is an integration score, never a boot-risk flag.**
   AOSP refuses to boot when a package that is STILL PRESENT requests a privileged permission
@@ -50,7 +49,7 @@ SYSTEM_SHARED_USER_ID = "android.uid.system"
 class Removal(enum.StrEnum):
     """The upstream `removal` tiers, spelled exactly as `uad_lists.json` carries them.
 
-    Definitions, from the upstream wiki (`docs/domain-knowledge.md`):
+    Definitions, from the upstream wiki:
     `Recommended` safe to uninstall · `Advanced` breaks obscure or minor functionality,
     overlays, or replaceable apps · `Expert` breaks widespread or important functionality but
     nothing vital to the OS · `Unsafe` can break vital parts of the OS, or is illegal to

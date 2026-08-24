@@ -1,5 +1,5 @@
-"""Approved entries into `uad_lists.json` bytes and into the PR body that discloses them
-(`docs/pipeline-design.md` §10). Pure: no DB, no filesystem, no subprocess, no network, no
+"""Approved entries into `uad_lists.json` bytes and into the PR body that discloses them.
+Pure: no DB, no filesystem, no subprocess, no network, no
 clock — the same posture as `bundle.py` and for the same reason. A clock in here would make
 the emitted bytes differ between two runs over the same approved batch, and "the question is
 pinned even though the answer is not" is the only reproducibility claim this project makes.

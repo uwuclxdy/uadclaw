@@ -20,9 +20,9 @@ measured traps at once — `7z x -r 'sysconfig/*'` extracts ZERO files while the
 dozens exist, and `debugfs -R "ls -l /app"` walks nothing on an image where 7z finds 64 APKs
 because the partition carries a nested `system/` root.
 
-EROFS takes a different tool, measured 2026-08-11 and contrary to what
-`docs/research/local-probe.md` records: 7-Zip 26.02 has NO EROFS handler at all (`7z i` lists
-`Ext` and `SquashFS` and nothing else of the kind). Pointed at an EROFS image it silently
+EROFS takes a different tool, measured 2026-08-11: 7-Zip 26.02 has NO EROFS handler at all
+(`7z i` lists `Ext` and `SquashFS` and nothing else of the kind). Pointed at an EROFS image it
+silently
 falls through to its gzip reader and lists ONE entry where `fsck.erofs --extract` recovers
 105 — an under-extraction that raises nothing and looks exactly like a sparse partition. So
 EROFS goes through `fsck.erofs`, and the archive type is forced on every 7z call rather than
@@ -530,7 +530,7 @@ def _tool_path(name: str, configured: str | None = None) -> str:
     if resolved is None:
         raise MissingToolError(
             f"_tool_path: {candidate!r} is not on PATH. Install it "
-            f"({_TOOL_PROVIDERS.get(name, 'see docs/research/local-probe.md')}) or point the "
+            f"({_TOOL_PROVIDERS.get(name, 'no provider recorded')}) or point the "
             "matching setting at it."
         )
     return resolved

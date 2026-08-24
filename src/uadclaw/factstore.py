@@ -1,7 +1,7 @@
 """Facts into Postgres: one observation per APK, one merged row per package name.
 
-The merge is the part with teeth. `docs/pipeline-design.md` §3 keys facts by package name and
-merges them across devices, and the count of distinct devices is the primary triage ranking
+The merge is the part with teeth. Facts are keyed by package name and merged across devices,
+and the count of distinct devices is the primary triage ranking
 signal — so the interesting failures are not parse errors but silent ones: two devices'
 identical package collapsing into two rows (the ranking then reads 1 and 1 where it should
 read 2), or two genuinely different packages sharing a name and collapsing into one row whose

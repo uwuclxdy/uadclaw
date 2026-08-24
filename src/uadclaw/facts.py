@@ -1,8 +1,8 @@
 """One APK's manifest turned into typed facts. Pure: no database, no filesystem beyond the
 file it is handed.
 
-androguard rather than aapt2, per `docs/pipeline-design.md` §3: aapt2 resolves everything we
-need but drags the Android SDK and a JRE into the worker image, and androguard is pure Python.
+androguard rather than aapt2: aapt2 resolves everything we need but drags the Android SDK and
+a JRE into the worker image, and androguard is pure Python.
 Measured 2026-08-11 over all 312 APKs of `oriole-cp2a.260705.006.a1`: 312 parsed, zero errors.
 
 Two measured shapes this module encodes rather than rediscovers:
@@ -111,7 +111,7 @@ class LibraryFact:
 
 @dataclass(frozen=True, slots=True)
 class ApkFacts:
-    """Everything `docs/pipeline-design.md` §3 asks for, off one APK.
+    """Everything the pipeline asks for, off one APK.
 
     Frozen because these are observations: nothing downstream may adjust a fact in place, and
     the merge in `uadclaw.factstore` builds new values rather than mutating these.
@@ -142,11 +142,11 @@ class ApkFacts:
     provider_authorities: tuple[str, ...] = ()
     # `<queries><package name="X">`. Deliberately NOT a dependency edge: a caller is expected
     # to handle the queried package being absent, so this is evidence for the human and the
-    # model only (`docs/pipeline-design.md` §4).
+    # model only.
     queries_packages: tuple[str, ...] = ()
     # `content://` strings in dex, matched by authority string only. Deliberately NOT a
     # dependency edge: the reference may be optional, built at runtime, or aimed at a provider
-    # outside the corpus (`docs/pipeline-design.md` §4). Evidence for the human and the model
+    # outside the corpus. Evidence for the human and the model
     # only.
     content_uri_authorities: tuple[str, ...] = ()
     intent_filters: tuple[IntentFilterFact, ...] = field(default_factory=tuple)

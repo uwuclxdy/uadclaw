@@ -16,9 +16,9 @@ Device 1 is a real Pixel 6 (`oriole-cp2a.260705.006.a1`), an already-extracted
 `UADCLAW_HEAVY_APK_DIR` points straight at an `artifacts` directory from a previous run and
 `unpack.py` regenerates one from the factory zip in about ten minutes. Device 2 is the local
 Android 16 emulator system image, unpacked here by the pipeline's own code, whose 228 package
-names are recorded in `docs/research/emulator-a16-packages.tsv` from an independent `aapt2`
-extraction. That file is the cross-check the design doc asks for: aapt2 and androguard
-disagreeing about a package name is a bug signal, and it is asserted rather than assumed.
+names are recorded from an independent `aapt2` extraction. That record is the cross-check the
+design doc asks for: aapt2 and androguard disagreeing about a package name is a bug signal,
+and it is asserted rather than assumed.
 
 Every count below was measured on 2026-08-11 and is asserted exactly. A signal that silently
 stops being extracted (a namespace typo on `coreApp`, an `<overlay>` lookup that stops
@@ -275,9 +275,9 @@ def test_androguard_agrees_with_the_aapt2_ground_truth_on_every_package(
     emulator_artifacts, emulator_facts
 ):
     """The design keeps aapt2 as a local cross-check because a disagreement between the two is
-    a bug signal. `docs/research/emulator-a16-packages.tsv` is that aapt2 run, preserved."""
+    a bug signal. The ground truth is that aapt2 run, preserved."""
     if not EMULATOR_GROUND_TRUTH.is_file():
-        pytest.skip(f"ground truth missing (docs/ is gitignored): {EMULATOR_GROUND_TRUTH}")
+        pytest.skip(f"ground truth missing: {EMULATOR_GROUND_TRUTH}")
     expected = {}
     for row in EMULATOR_GROUND_TRUTH.read_text(encoding="utf-8").splitlines():
         if row.strip():

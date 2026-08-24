@@ -1,9 +1,9 @@
 """The corroboration validator and its prompt. Pure — no DB, no network, no key.
 
-The one assertion this file exists for is the fabricated-citation gate. `docs/todo.md` §8's
-verify line asks that an invented package name produce an uncorroborated verdict rather than a
-fabricated citation, and a judge that answers `corroborated` while citing a URL nobody handed
-it is the failure upstream's review bar was written to catch. Rejection, never repair.
+The one assertion this file exists for is the fabricated-citation gate: an invented package
+name must produce an uncorroborated verdict rather than a fabricated citation, and a judge that
+answers `corroborated` while citing a URL nobody handed it is the failure upstream's review bar
+was written to catch. Rejection, never repair.
 """
 
 import json
@@ -158,8 +158,8 @@ def test_a_fetch_error_is_capped_where_every_fetch_failure_funnels_through():
 
 
 def test_a_verdict_citing_only_an_invented_url_is_rejected_not_downgraded():
-    """The `docs/todo.md` §8 shape: an invented package name whose judge answers corroborated
-    with a made-up link must not become a corroborated row with the link quietly removed."""
+    """An invented package name whose judge answers corroborated with a made-up link must not
+    become a corroborated row with the link quietly removed."""
     with pytest.raises(CorroborationRejected, match="fabricated citation"):
         validate(verdict(sources=["https://nope.example/x"]))
 
@@ -376,7 +376,7 @@ def test_a_page_that_extracts_to_less_than_its_own_snippet_falls_back_to_the_sni
     """Measured live 2026-08-12: four of ten results for `com.android.cellbroadcastreceiver`
     were `www.reddit.com`, every one answered 200 `text/html`, and every one extracted to the
     six characters "Reddit" — the JS shell reddit serves a non-browser client. Reddit is where
-    §8 says packages actually corroborate, so a plain "use the body when there is one" rule
+    packages actually corroborate, so a plain "use the body when there is one" rule
     hands the judge six characters in place of a snippet drawn from the same page.
     """
     shell = SourceEvidence(

@@ -959,9 +959,9 @@ async def test_a_long_package_name_still_reaches_its_icon(db_env, db_session_fac
     Tightening it 404s real packages, and a 404 renders the monogram — visually identical to
     "this package has no icon", so nothing on the screen would ever say why.
 
-    Not hypothetical: 3 of the 227 real names in `docs/research/emulator-a16-packages.tsv`
-    are over 64 characters and the longest is 81, because `auto_generated_rro_product__` is a
-    28-character SUFFIX on an already-long name."""
+    Not hypothetical: 3 of the 227 real names are over 64 characters and the longest is 81,
+    because `auto_generated_rro_product__` is a 28-character SUFFIX on an already-long
+    name."""
     package = "com.example." + "a" * 190
     await store(
         db_session_factory,

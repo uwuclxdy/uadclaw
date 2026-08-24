@@ -175,7 +175,7 @@ async def test_the_real_etc_trees_carry_the_ladder_inputs_no_apk_states(oriole_f
 async def test_the_filter_survival_ratio_against_the_15_to_1_baseline(
     db_env, db_session_factory, oriole_facts, emulator_facts, upstream
 ):
-    """`docs/research/local-probe.md` measured the noise floor by hand on the emulator image:
+    """The local probe measured the noise floor by hand on the emulator image:
     228 packages, 152 already upstream, 76 missing, 40 of those emulator artifacts or
     auto-generated RRO, ~5 genuinely worth an entry — a 15:1 junk ratio on the RAW misses.
 

@@ -451,10 +451,9 @@ async def test_the_list_page_carries_a_keyboard_reachable_badge_legend(
 async def test_filter_verdict_never_renders_its_raw_enum_spelling(
     db_env, db_session_factory, client
 ):
-    """The bug named in docs/todo.md §16: `package_analysis.filter_verdict` rendered as its raw
-    `already_upstream` spelling on the corpus detail screen. `FILTER_VERDICT_LABEL` maps every
-    defined member to display text; this pins that the raw spelling never reaches either
-    screen, list or detail."""
+    """The bug: `package_analysis.filter_verdict` rendered as its raw `already_upstream` spelling
+    on the corpus detail screen. `FILTER_VERDICT_LABEL` maps every defined member to display
+    text; this pins that the raw spelling never reaches either screen, list or detail."""
     await _seed(
         db_session_factory,
         _fact("com.example.mapped"),

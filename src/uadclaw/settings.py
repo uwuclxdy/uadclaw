@@ -257,9 +257,9 @@ class Settings(BaseSettings):
     # package spent the whole 4096 on reasoning alone (`finish_reason='length'`,
     # `reasoning_tokens=4096`, zero content). `DeepSeekBudgetError` is deliberately job-level,
     # so that one package failed the job at 9 of 48 classified; the identical run at 16384
-    # finished 48 of 48 with zero parks. The 293-595 range recorded 2026-08-11 in
-    # `docs/domain-knowledge.md` moved ~6x in a month on a byte-identical prompt, so this is
-    # headroom against a number that moves rather than a fit to the one measured. `max_tokens`
+    # finished 48 of 48 with zero parks. The 293-595 range recorded 2026-08-11 moved ~6x in a
+    # month on a byte-identical prompt, so this is headroom against a number that moves rather
+    # than a fit to the one measured. `max_tokens`
     # is a ceiling and not a reservation, so a high one costs nothing on a call under it.
     deepseek_max_tokens: int = 16384
     # Concurrency is account-wide across every key (there is no documented RPM or TPM), and

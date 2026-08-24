@@ -1,4 +1,4 @@
-"""The corpus snapshot and the two mechanical dependency edges (`docs/pipeline-design.md` §4).
+"""The corpus snapshot and the two mechanical dependency edges.
 
 This is the stage that produces something no human contributor can produce at scale:
 `uad_lists.json` has `dependencies` populated on 43 of 5372 entries and `neededBy` on 26, all
@@ -79,7 +79,7 @@ class CorpusPackage:
     provider_authorities: tuple[str, ...] = ()
     # `content://` authorities referenced in this package's dex, matched by authority string
     # only. Evidence, never an edge: the reference may be optional, runtime-built, or aimed
-    # off-corpus (`docs/pipeline-design.md` §4).
+    # off-corpus.
     content_uri_authorities: tuple[str, ...] = ()
     is_input_method: bool = False
     # (action, category) pairs flattened off the intent filters, so the ladder never has to

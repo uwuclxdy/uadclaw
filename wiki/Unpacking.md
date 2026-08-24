@@ -100,4 +100,4 @@ Extraction is selective by construction rather than a bulk unpack: an ext4 parti
 
 ## What could not be verified against source
 
-- Exact byte counts, device names, and measurement dates cited above (the Motorola `rtwo` chunk counts, the Samsung `AP_` tar size, the PLK110 partition file counts) are carried from `docs/domain-knowledge.md`, a gitignored operator notebook this reconciliation could read but not independently re-run.
+- Exact byte counts, device names, and measurement dates cited above (the Motorola `rtwo` chunk counts, the Samsung `AP_` tar size, the PLK110 partition file counts) are carried from a gitignored operator notebook this reconciliation could read but not independently re-run.

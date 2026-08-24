@@ -1,5 +1,5 @@
 """The corpus screen: what the deterministic core concluded, `package_facts` joined to
-`package_analysis`. Read-only — see `docs/pipeline-design.md` §3-6 for what each stage writes.
+`package_analysis`. Read-only.
 
 Three things this view has to get right that are easy to get backwards, all measured and all
 recorded on `models.py`/`ladder.py`:

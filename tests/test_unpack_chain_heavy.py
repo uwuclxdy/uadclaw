@@ -8,8 +8,8 @@ under `UADCLAW_HEAVY_TESTS=1`:
     UADCLAW_HEAVY_TESTS=1 UADCLAW_HEAVY_WORKDIR=/var/tmp/uadclaw-heavy \\
       uv run pytest -n0 -m heavy tests/test_unpack_chain_heavy.py
 
-The corpus is the local emulator system image recorded in `docs/research/local-probe.md`: a
-GPT disk whose `super` partition holds five dynamic partitions, four ext4 and one EROFS. It
+The corpus is the local emulator system image: a GPT disk whose `super` partition holds five
+dynamic partitions, four ext4 and one EROFS. It
 exercises the branch a Pixel factory zip does NOT take (GPT -> lpunpack -> mixed
 filesystems), which is exactly why it is worth keeping alongside the real-firmware run.
 """
@@ -63,7 +63,7 @@ def chain(tmp_path_factory):
     if not IMAGE.is_file():
         pytest.skip(f"heavy corpus image not on this box: {IMAGE}")
     if not GROUND_TRUTH.is_file():
-        pytest.skip(f"ground-truth manifest missing (docs/ is gitignored): {GROUND_TRUTH}")
+        pytest.skip(f"ground-truth manifest missing: {GROUND_TRUTH}")
 
     work = Path(os.environ.get("UADCLAW_HEAVY_WORKDIR", str(tmp_path_factory.mktemp("heavy"))))
     work.mkdir(parents=True, exist_ok=True)

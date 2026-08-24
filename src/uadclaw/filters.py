@@ -1,4 +1,4 @@
-"""What reaches the additions queue (`docs/pipeline-design.md` §5).
+"""What reaches the additions queue.
 
 This is where the 15:1 junk ratio collapses. The measured baseline: a Google emulator image
 yields 228 packages, 152 of them already in `uad_lists.json`, 76 missing, and of those roughly

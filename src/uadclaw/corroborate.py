@@ -1,9 +1,9 @@
-"""The corroboration verdict and the validator that decides whether it may exist
-(`docs/pipeline-design.md` §8, `docs/todo.md` §8). Pure: no DB, no network, no clock.
+"""The corroboration verdict and the validator that decides whether it may exist.
+Pure: no DB, no network, no clock.
 
 Upstream's stated review bar is per-package external corroboration of an AI-written
-description — maintainer `@AnonymousWP` on PR #1180, quoted in `docs/domain-knowledge.md`
-§ Upstream. This module owns the half of that bar a validator can enforce.
+description — maintainer `@AnonymousWP` on PR #1180. This module owns the half of that bar a
+validator can enforce.
 
 **The fabricated-citation gate is the safety property here.** A judge that answers
 `corroborated` while citing a URL nobody handed it has invented the evidence, which is the
@@ -58,9 +58,9 @@ REASONING_MAX_CHARS = 400
 FETCH_ERROR_MAX_CHARS = 500
 
 # Which Brave block a result came out of. Kept on the row because they are different source
-# CLASSES: `docs/todo.md` §8 measured that real packages corroborate off forum threads
-# (Reddit, Stack Exchange, Google support) rather than vendor docs, and those land in
-# `discussions` while a client reading only `web` never sees them.
+# CLASSES: real packages corroborate off forum threads (Reddit, Stack Exchange, Google
+# support) rather than vendor docs, and those land in `discussions` while a client reading
+# only `web` never sees them.
 WEB_BLOCK = "web"
 DISCUSSIONS_BLOCK = "discussions"
 SEARCH_BLOCKS: tuple[str, ...] = (WEB_BLOCK, DISCUSSIONS_BLOCK)
@@ -135,7 +135,7 @@ class SourceEvidence:
         a rare shape: measured live 2026-08-12 against `com.android.cellbroadcastreceiver`,
         four of the ten top results were `www.reddit.com` and every one of them extracted to
         the six characters `"Reddit"` — a JS shell served to any client that is not a browser.
-        Reddit is precisely where `docs/todo.md` §8 says real packages corroborate, so those
+        Reddit is precisely where real packages corroborate, so those
         four were the results that mattered most, and a plain "use the body when there is one"
         rule hands the judge six characters in place of a snippet drawn from the same page.
 
@@ -259,9 +259,8 @@ def _check_sources(
 
     A cited URL outside the handed set is a refusal of the WHOLE response, never a repair by
     dropping it: the judge claimed to have read something it was never given, so its reading
-    of the sources it WAS given is not evidence either. `docs/todo.md` §8's verify line asks
-    exactly this — an invented package name must produce an uncorroborated verdict rather than
-    a fabricated citation.
+    of the sources it WAS given is not evidence either. An invented package name must produce
+    an uncorroborated verdict rather than a fabricated citation.
 
     A source handed over with NO text at all is refused the same way, one step short of
     fabrication: `judged_text` is empty when the fetch failed and the search returned no

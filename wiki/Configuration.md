@@ -78,7 +78,7 @@ Every other setting either has a working default or is refused later, at the poi
 | `PIXEL_INDEX_URL` | `https://developers.google.com/android/images` | str | Pixel factory-image index |
 | `PIXEL_TERMS_ACK_COOKIE_NAME` | `devsite_wall_acks` | str | the terms-acknowledgement cookie's name |
 | `PIXEL_TERMS_ACK_COOKIE_VALUE` | `""` | str | acceptance of Google's factory-image terms, unset by default so nothing accepts a licence on the operator's behalf. Blank means `PixelDriver.list_available` raises `FirmwareTermsNotAcknowledgedError` at the `acquire` stage rather than reporting an empty index |
-| `XIAOMI_INDEX_URL` | XiaomiFirmwareUpdater's `data/latest.yml` | str | Xiaomi's only machine-readable index |
+| `XIAOMI_INDEX_URL` | [the tracker index](https://github.com/XiaomiFirmwareUpdater/miui-updates-tracker/blob/master/data/latest.yml) | str | Xiaomi's only machine-readable index |
 | `NOTHING_RELEASES_URL` | `https://api.github.com/repos/spike0en/nothing_archive/releases` | str | Nothing's GitHub releases index, unauthenticated |
 | `MOTOROLA_MIRROR_URL` | `https://mirrors.lolinet.com` | str | the h5ai mirror Motorola firmware and its index both hang off |
 | `MOTOROLA_DEVICES` | `""` | str, comma-separated | codenames to enumerate (e.g. `rtwo,bronco`). Blank means `MotorolaDriver.list_available` raises at `acquire` naming the setting: lolinet publishes no index, so there is nothing to enumerate without an operator-named list |

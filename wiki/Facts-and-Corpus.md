@@ -82,5 +82,5 @@ Two axes bound recursion separately. `_MAX_DRAWABLE_DEPTH` (8) bounds reference 
 
 ## What could not be verified against source
 
-- The exact byte counts and dates cited for `docs/domain-knowledge.md`-sourced measurements (the 34.5% icon-column payload figure, the 123 KB androguard log measurement, the dex-scan timing comparison) are carried from that gitignored operator notebook and `docs/pipeline-design.md` rather than something this reconciliation re-ran.
+- The exact byte counts and dates cited for the measurements above (the 34.5% icon-column payload figure, the 123 KB androguard log measurement, the dex-scan timing comparison) are carried from gitignored operator notes rather than something this reconciliation re-ran.
 - Whether a future OEM corpus ever produces a nonzero `EDGE_LIBRARY` count is unmeasured by construction; the zero recorded here describes only the two local corpora measured to date.

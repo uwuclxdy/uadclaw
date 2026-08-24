@@ -1,5 +1,5 @@
-"""The model's proposal and the validator that decides whether it may exist
-(`docs/pipeline-design.md` §7). Pure: no DB, no network, no clock.
+"""The model's proposal and the validator that decides whether it may exist.
+Pure: no DB, no network, no clock.
 
 This is the safety-critical half of the classification stage. `removal` reaches real phones
 through Canta, AppManager and android-debloat-list as well as uad-ng, so the question this

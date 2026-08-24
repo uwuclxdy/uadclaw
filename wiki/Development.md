@@ -48,7 +48,7 @@ Tests marked `heavy` run the real extraction chain against a multi-GB local firm
 UADCLAW_HEAVY_TESTS=1 uv run pytest -m heavy
 ```
 
-Individual heavy test files add their own environment variables for the specific corpus or workdir they need (`UADCLAW_HEAVY_APK_DIR`, `UADCLAW_HEAVY_WORKDIR`, `UADCLAW_HEAVY_IMAGE`); each test file's own docstring or header comment states which apply. Several assert exact package counts against a ground-truth manifest at `docs/research/emulator-a16-packages.tsv`. `docs/` is gitignored, so that file is not part of the repo checkout: tests that need it skip with a message naming the path when it's absent, rather than failing outright. Heavy tests never accept "it didn't raise" as success; they assert counts.
+Individual heavy test files add their own environment variables for the specific corpus or workdir they need (`UADCLAW_HEAVY_APK_DIR`, `UADCLAW_HEAVY_WORKDIR`, `UADCLAW_HEAVY_IMAGE`); each test file's own docstring or header comment states which apply. Several assert exact package counts against a ground-truth manifest that lives outside the repo checkout, so tests that need it skip with a message naming the path when it's absent, rather than failing outright. Heavy tests never accept "it didn't raise" as success; they assert counts.
 
 ## Running the app from source
 

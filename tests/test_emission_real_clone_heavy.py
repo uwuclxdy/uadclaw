@@ -1,8 +1,7 @@
 """One approved package, emitted end to end onto a REAL clone of the upstream repo.
 
-Closes the two open `docs/todo.md` §10 bullets the fast suites cannot reach. Every git test
-so far — `test_branch_stage.py` and `test_upstream_repo.py` — drives the stage against a
-`git init` throwaway carrying a two-entry list, and the byte-level splice pins in
+Every git test so far — `test_branch_stage.py` and `test_upstream_repo.py` — drives the stage
+against a `git init` throwaway carrying a two-entry list, and the byte-level splice pins in
 `test_emission.py` never run the STAGE against the real 1.6 MB file. This drives
 `stages.branch_stage` — the worker's and the dashboard's path — over the real 393-package
 corpus against a fresh clone of the real upstream repo, with one package approved the way

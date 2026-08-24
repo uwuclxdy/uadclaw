@@ -27,9 +27,9 @@ not look" happened. The judge's retries belong to `DeepSeekClient`, which alread
 
 **This is the one index in this repo whose empty answer is a legitimate result.** Everywhere
 else an extraction or index fetch that yields nothing is an error, because a terms-walled
-index answers 200 with zero links. Here it is not: `docs/todo.md` §8 measured an invented
-package name returning 5 unrelated results, so the judge carries the whole verdict and a
-genuinely empty `web.results` is an answer. What is still refused is an envelope carrying
+index answers 200 with zero links. Here it is not: an invented package name returns 5
+unrelated results, so the judge carries the whole verdict and a genuinely empty `web.results`
+is an answer. What is still refused is an envelope carrying
 NEITHER result block, because that is a shape change wearing zero results' clothes — and the
 two failures are not symmetric. A shape change read as "zero results" marks every package
 uncorroborated in silence; a zero-result answer read as a failure marks one package
@@ -308,9 +308,9 @@ def merge_results(payload: Mapping[str, Any], *, limit: int) -> list[SourceEvide
     """The `web` and `discussions` blocks as one ranked list.
 
     Both blocks, because they are different source classes and only one of them is where real
-    packages corroborate: `docs/todo.md` §8 measured 10 `web` results beside 13 `discussions`
-    for one probe, and forum threads (Reddit, Stack Exchange, Google support) land in the
-    latter. A client reading only `web` drops the exact class this stage exists to find.
+    packages corroborate: one probe measured 10 `web` results beside 13 `discussions`, and
+    forum threads (Reddit, Stack Exchange, Google support) land in the latter. A client
+    reading only `web` drops the exact class this stage exists to find.
 
     Order comes from `mixed.main`, which is the interleaved order Brave itself would display,
     and anything `mixed.main` does not mention is appended in block order rather than dropped —

@@ -12,8 +12,8 @@ Deliberately small: a handful of searches, a handful of page fetches, two judge 
 full-corpus run is a separate, deliberate spend.
 
 The verdict assertions are recorded rather than demanded. Whether an obscure OEM package name
-corroborates at all is `docs/todo.md` §8's open hypothesis, and a test that failed on an
-uncorroborated answer would be asserting the answer to the question the stage exists to ask.
+corroborates at all is an open hypothesis, and a test that failed on an uncorroborated answer
+would be asserting the answer to the question the stage exists to ask.
 The ONE thing this file does demand is the fabricated-citation gate: an invented package name
 must not come back with a made-up link.
 """
@@ -123,7 +123,7 @@ async def test_an_invented_package_still_returns_results_so_the_judge_carries_th
 
 async def test_a_real_package_is_judged_against_real_sources(settings):
     """Recorded rather than demanded: whether obscure OEM package names corroborate is the
-    open question §8 asks, so a rejection here is a finding and not a test failure."""
+    open question, so a rejection here is a finding and not a test failure."""
     sources = await evidence(settings, REAL_PACKAGE)
     async with DeepSeekClient.from_settings(settings) as judge:
         result = await judge.complete_json(

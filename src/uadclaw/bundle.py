@@ -1,4 +1,4 @@
-"""The per-package evidence bundle the model is shown (`docs/pipeline-design.md` §7).
+"""The per-package evidence bundle the model is shown.
 
 **This is the project's reproducibility anchor.** DeepSeek has no seed and no determinism
 guarantee — not even on a cache hit, since caching reuses the input prefix's compute and not

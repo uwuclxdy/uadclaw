@@ -1,8 +1,8 @@
 """The in-flight disabled state, observed firing in a real browser for the first time.
 
-docs/todo.md §16 names the gap this closes: `hx-disabled-elt` had a test for its
-PRESENCE (`test_dashboard_jobs.py`) and had never been seen to FIRE, because nothing
-in the suite executes htmx's JS during an in-flight fetch. This boots the real app on
+`hx-disabled-elt` had a test for its PRESENCE (`test_dashboard_jobs.py`) and had never
+been seen to FIRE, because nothing in the suite executes htmx's JS during an in-flight
+fetch. This boots the real app on
 a loopback port and drives it with system chrome through playwright. The load-devices
 index fetch — the multi-second vendor request the attribute exists for — is slowed
 inside the driver, so the in-flight window is observable; the button being disabled
@@ -107,7 +107,7 @@ async def test_load_devices_disables_the_button_for_the_in_flight_fetch(
     the button answers the click by disabling for the duration of the index fetch, and
     the same button — it sits OUTSIDE the swap target — is enabled again after the
     swap. The presence test stays green with the attribute dead inside htmx's JS; this
-    one cannot, which is the distinction docs/todo.md §16 asks for."""
+    one cannot, which is the distinction."""
     import uvicorn
     from playwright.async_api import Error, async_playwright
 

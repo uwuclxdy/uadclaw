@@ -578,8 +578,8 @@ async def test_a_paid_search_reaches_the_database_whatever_the_fetch_phase_does(
 async def test_a_verdict_citing_a_url_that_was_never_fetched_is_refused_and_parks(
     db_env, corroboration_env, fake_apis, db_session_factory
 ):
-    """`docs/todo.md` §8's verify line, at the stage level: a judge that answers corroborated
-    with an invented link must not produce a corroborated row."""
+    """At the stage level: a judge that answers corroborated with an invented link must not
+    produce a corroborated row."""
     fake_apis["judge"] = verdict_response(
         "corroborated", sources=["https://invented.test/com.example.notes"]
     )

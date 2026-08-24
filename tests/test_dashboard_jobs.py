@@ -242,12 +242,12 @@ async def test_the_firmware_sources_table_opens_and_flags_unacknowledged_drivers
 async def test_the_load_devices_button_carries_hx_disabled_elt(
     db_env, db_session_factory, client, monkeypatch
 ):
-    """docs/todo.md §16: `hx-disabled-elt="this"` disables the button while
-    `POST /jobs/launch/devices` is in flight — a multi-second vendor request per the module
-    docstring — and had never been observed to fire, because the only browser that could drive
-    it failed instantly. Observing it actually fire still needs a browser running htmx's JS,
-    which nothing in this suite does; what a request/response test can pin is that the wiring
-    survives, so a regression dropping the attribute is caught rather than silently shipped."""
+    """`hx-disabled-elt="this"` disables the button while `POST /jobs/launch/devices` is in
+    flight — a multi-second vendor request per the module docstring — and had never been
+    observed to fire, because the only browser that could drive it failed instantly. Observing
+    it actually fire still needs a browser running htmx's JS, which nothing in this suite does;
+    what a request/response test can pin is that the wiring survives, so a regression dropping
+    the attribute is caught rather than silently shipped."""
     install_drivers(monkeypatch, FakeDriver("pixel"))
     await _login(client)
 
@@ -260,11 +260,11 @@ async def test_the_load_devices_button_carries_hx_disabled_elt(
 async def test_a_realistic_sized_index_renders_grouped_by_device_not_by_ref(
     db_env, db_session_factory, client, monkeypatch
 ):
-    """docs/todo.md §16: no screen had ever rendered a real vendor index. The Pixel index is
-    2293 refs across 58 devices, and `_device_options` groups by device, so the rendered
-    `<select>` should be bounded by device count rather than ref count — reasoning the todo
-    item names as unmeasured. This renders a stubbed index of that exact shape through the
-    real view and template and measures the result instead of reasoning about it."""
+    """No screen had ever rendered a real vendor index. The Pixel index is 2293 refs across 58
+    devices, and `_device_options` groups by device, so the rendered `<select>` should be
+    bounded by device count rather than ref count — reasoning that was unmeasured. This
+    renders a stubbed index of that exact shape through the real view and template and
+    measures the result instead of reasoning about it."""
     device_count = 58
     total_refs = 2293
     base, extra = divmod(total_refs, device_count)

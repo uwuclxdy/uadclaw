@@ -35,7 +35,7 @@ Every other driver sorts its own index oldest-first before returning it, so `sel
 | Driver | Index source | Ref identity | Terms risk |
 |---|---|---|---|
 | `pixel` | `developers.google.com/android/images` | codename + build id (`CP2A.260705.006`) | acknowledgement |
-| `xiaomi` | `XiaomiFirmwareUpdater/miui-updates-tracker`'s `data/latest.yml` | codename + version | public |
+| `xiaomi` | [the tracker index](https://github.com/XiaomiFirmwareUpdater/miui-updates-tracker/blob/master/data/latest.yml) | codename + version | public |
 | `nothing` | `spike0en/nothing_archive` GitHub releases | codename + build from the release tag | restricted |
 | `motorola` | `mirrors.lolinet.com` h5ai JSON API | device + `<build_id>_<channel>` | restricted |
 | `samsung` | `fota-cloud-dn.ospserver.net/firmware/{CSC}/{MODEL}/version.xml` | model + `<PDA>_<CSC>` | reverse_engineered |
@@ -53,7 +53,7 @@ Measured gotchas: one link of 2293 carries an uppercase build id in its URL (`ra
 
 ## Xiaomi
 
-Reads `XiaomiFirmwareUpdater/miui-updates-tracker`'s `data/latest.yml` (`XIAOMI_INDEX_URL`), the only machine-readable index of Xiaomi's own CDN that exists; Xiaomi publishes none. A ref is identified by `codename` plus `version`.
+Reads [the tracker index](https://github.com/XiaomiFirmwareUpdater/miui-updates-tracker/blob/master/data/latest.yml) (`XIAOMI_INDEX_URL`), the only machine-readable index of Xiaomi's own CDN that exists; Xiaomi publishes none. A ref is identified by `codename` plus `version`.
 
 - **Only `Recovery` rows are offered.** `OPENABLE_METHOD = "Recovery"`. The 1,522 `Fastboot` rows are `.tgz`, matching no magic in [Unpacking](Unpacking)'s dispatch table, so listing them would hand the acquire stage builds that always fail one stage later.
 - **The CDN host in the index lies about reachability.** `cdn_url()` rewrites `bigota.d.miui.com` and `ultimateota.d.miui.com` (`BROKEN_CDN_HOSTS`) to `cdnorg.d.miui.com` (`WORKING_CDN_HOST`). `bigota` answers HEAD 200 with a correct Content-Length; a plain GET intermittently returns a CloudFront 503 instead, so a HEAD-based reachability check reports a healthy source that cannot be downloaded. The rewrite runs both at index parse time and again in `fetch()`, because a ref can arrive from a job's params carrying whatever URL an operator pasted out of the tracker.
@@ -105,5 +105,5 @@ Two sources, each answering a different question. `roms.danielspringer.at/api/ot
 
 ## What could not be verified against source
 
-- The precise host-rewrite reasoning for Xiaomi (why `cdnorg` in particular serves reliably) rests on a probe result recorded in `docs/domain-knowledge.md` rather than anything assertable from the driver code alone; the code enforces the rewrite but not the underlying CDN behaviour.
-- Xiaomi's, Nothing's, Motorola's, Samsung's, and Oppo's exact request/response byte counts and probe dates are taken from `docs/domain-knowledge.md` and `docs/pipeline-design.md`, which are gitignored operator notes rather than something this reconciliation could re-run.
+- The precise host-rewrite reasoning for Xiaomi (why `cdnorg` in particular serves reliably) rests on a probe result recorded in a gitignored operator notebook rather than anything assertable from the driver code alone; the code enforces the rewrite but not the underlying CDN behaviour.
+- Xiaomi's, Nothing's, Motorola's, Samsung's, and Oppo's exact request/response byte counts and probe dates are taken from gitignored operator notes rather than something this reconciliation could re-run.

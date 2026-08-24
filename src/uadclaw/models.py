@@ -511,7 +511,7 @@ class PackageAnalysis(Base):
     # Privileged-permission allowlist membership, an INTEGRATION score and never a boot-risk
     # flag: AOSP's "device won't boot" clause fires when a package that is still present
     # requests a permission that is not allowlisted, which is a ROM-build error. Removing the
-    # app removes the request. See `docs/domain-knowledge.md` § AOSP semantics.
+    # app removes the request.
     privapp_allowlisted: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     privapp_permission_count: Mapped[int | None] = mapped_column(nullable=True)
 
@@ -809,8 +809,6 @@ class PackageSearchResult(Base):
 
 class PackageCorroboration(Base):
     """Whether an independent source supports the model's description for one package.
-
-    Upstream's stated review bar, per package — see `docs/domain-knowledge.md` § Upstream.
 
     A separate table from `package_classification` for the reason that one is separate from
     `package_analysis`: the corroboration stage writes only here, so "the classification row
