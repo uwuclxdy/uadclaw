@@ -35,11 +35,13 @@ mkdir -p secrets
 printf 'a long random postgres password' > secrets/postgres_password
 printf 'a long random login password'    > secrets/auth_password
 printf 'a long random session secret'    > secrets/session_secret
-touch secrets/deepseek_key   # blank is fine; the file must exist
+touch secrets/llm_deepseek_key   # blank is fine; the file must exist
 touch secrets/brave_key      # blank is fine; the file must exist
 ```
 
-`postgres_password`, `auth_password` and `session_secret` mount into both `web` and `worker`: `Settings()` refuses to construct with any of the three blank, so both processes need real values just to start, even though the worker serves no HTTP. `deepseek_key` and `brave_key` mount into `worker` only, never `web`: nothing the web service serves calls the model or the search API, so a credential that spends money has no business inside the internet-facing container. Both may be blank content, but the file has to exist, since compose refuses to start a container whose declared secret file is missing. See [Configuration](Configuration) for what a blank `deepseek_key`/`brave_key` gates.
+`postgres_password`, `auth_password` and `session_secret` mount into both `web` and `worker`: `Settings()` refuses to construct with any of the three blank, so both processes need real values just to start, even though the worker serves no HTTP. `llm_deepseek_key` and `brave_key` mount into `worker` only, never `web`: nothing the web service serves calls the model or the search API, so a credential that spends money has no business inside the internet-facing container. Both may be blank content, but the file has to exist, since compose refuses to start a container whose declared secret file is missing. See [Configuration](Configuration) for what a blank `llm_deepseek_key`/`brave_key` gates.
+
+The LLM provider table (`LLM_PROVIDERS`) is configuration, not a credential, and compose interpolates it into BOTH containers from the deploy environment (or the compose `.env`). The web process needs it to validate a classification job's provider at creation — a table only the worker can see means every launch from the dashboard is a 422.
 
 ## Bind mounts
 

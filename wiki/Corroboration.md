@@ -30,7 +30,7 @@ Two IPv6 transition blocks (6to4 `2002::/16`, Teredo `2001::/32`) are refused by
 
 ## The judge and its four statuses
 
-`corroborate.py` is pure: no database, no network, no clock. The judge is `DeepSeekClient` again, reusing its one retry layer, but the prompt asks a different question: given the package name, the proposed description, and the search results, does any source support the claim?
+`corroborate.py` is pure: no database, no network, no clock. The judge is `LlmClient` again — the job's own provider — reusing its one retry layer, but the prompt asks a different question: given the package name, the proposed description, and the search results, does any source support the claim?
 
 | Status | Set by | Meaning | Retryable |
 |---|---|---|---|

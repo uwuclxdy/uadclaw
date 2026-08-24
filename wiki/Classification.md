@@ -16,9 +16,9 @@ DeepSeek has no seed and no determinism guarantee, not even on a cache hit. Noth
 
 `nearest_entries` picks up to `DEFAULT_ANCHOR_COUNT` (4) existing upstream entries as style anchors, ranked by longest shared dotted package-name prefix, ties broken by name. A package needs at least `MIN_ANCHOR_SHARED_SEGMENTS` (2) shared segments to get an anchor at all; a package with no namespace neighbor gets none rather than the alphabetically nearest strangers.
 
-## `deepseek.py`: the only retry layer
+## `llm.py`: the only retry layer
 
-`DeepSeekClient` owns retry, backoff and the concurrency bound, and nothing else in this repo may add a second layer. The repo rule is one retry layer per concern: a second layer in the stage would multiply the caps, turning a documented 3 attempts into 9 silent ones against a paid API.
+`LlmClient` owns retry, backoff and the concurrency bound, and nothing else in this repo may add a second layer. The repo rule is one retry layer per concern: a second layer in the stage would multiply the caps, turning a documented 3 attempts into 9 silent ones against a paid API. One client serves every provider: `Settings.llm_providers` is the operator's provider table, and a classification job's `provider` param names which entry the client is built from (default `deepseek`), so a new provider is a table row plus a key file, never a second client.
 
 It calls the OpenAI-format `/chat/completions` endpoint rather than the `/anthropic` one, because only that envelope returns `usage.prompt_cache_hit_tokens` and `usage.prompt_cache_miss_tokens`, which is the cost and cache measurement this project reads off real production rows. `response_format` is `{"type": "json_object"}`; DeepSeek has no `json_schema` strict mode, so the hand-written validator in `classify.py` is the real gate either way.
 
@@ -28,13 +28,13 @@ It calls the OpenAI-format `/chat/completions` endpoint rather than the `/anthro
 |---|---|---|
 | `DeepSeekAuthError` | HTTP 401/403 | no |
 | `DeepSeekBalanceError` | HTTP 402 insufficient balance | no, will not resolve inside a retry window |
-| `DeepSeekBudgetError` | `finish_reason == "length"`, or empty content with reasoning at the ceiling | no, raising `max_tokens` is the fix |
+| `LlmBudgetError` | `finish_reason == "length"`, or empty content with reasoning at the ceiling | no, raising `max_tokens` is the fix |
 | `DeepSeekMalformedError` | empty content with `finish_reason == "stop"`, or a non-JSON body | yes |
 | `DeepSeekUnavailableError` | HTTP 429/500/503, or a transport failure | yes |
 
 ### The budget failure and the empty-content bug are opposite fixes
 
-`_check_budget` separates a too-small `max_tokens` from DeepSeek's documented, unresolved empty-content bug, because both present as an unusable body and the envelope alone cannot distinguish them. Thinking is on by default and billed against `max_tokens`, so a call can spend its whole budget on reasoning and leave nothing for the JSON body. `_REASONING_PRESSURE_RATIO` (0.9) decides how close the reasoning spend has to get to the ceiling before an empty body reads as a budget failure rather than the malformed-response bug. Treating a budget failure as malformed burns the whole retry cap on a request that cannot succeed at that ceiling; treating the malformed-response bug as a budget failure never retries a request a bigger budget would not have fixed anyway. `deepseek_max_tokens` defaults to 16384; `deepseek_thinking` defaults to `true` and setting it `false` removes the reasoning spend entirely rather than halving it.
+`_check_budget` separates a too-small `max_tokens` from DeepSeek's documented, unresolved empty-content bug, because both present as an unusable body and the envelope alone cannot distinguish them. Thinking is on by default and billed against `max_tokens`, so a call can spend its whole budget on reasoning and leave nothing for the JSON body. `_REASONING_PRESSURE_RATIO` (0.9) decides how close the reasoning spend has to get to the ceiling before an empty body reads as a budget failure rather than the malformed-response bug. Treating a budget failure as malformed burns the whole retry cap on a request that cannot succeed at that ceiling; treating the malformed-response bug as a budget failure never retries a request a bigger budget would not have fixed anyway. The deepseek entry's `max_tokens` defaults to 16384 and its `thinking` defaults to `true`; setting `thinking` `false` removes the reasoning spend entirely rather than halving it, and sends the DeepSeek-specific `{"thinking": {"type": "disabled"}}` wire field, which a provider that does not know it may refuse with a 400.
 
 `require_json_prompt` refuses to send a prompt that does not contain the word "json" and a `{`-shaped example, per DeepSeek's own JSON-mode guide, because without both the model may emit an unbounded whitespace stream until it hits `max_tokens`.
 

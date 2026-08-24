@@ -43,11 +43,13 @@ uadclaw pulls official OEM firmware and extracts every preinstalled APK. It deri
 
 ## LLM providers
 
+One OpenAI-format client serves every provider. The provider table in settings (`LLM_PROVIDERS`, or a mounted `secrets/llm_providers` file) names each provider with its base url, model, thinking flag, output ceiling and concurrency; one key file per provider id sits beside it (`secrets/llm_<id>_key` or `LLM_<ID>_KEY`). A classification job's params may name any id in the table, validated at creation and stored on the job row; jobs that name none use `LLM_DEFAULT_PROVIDER` (`deepseek`). An unknown id is a 422 at creation, never a failed worker. The table carries no credential, so both containers read it — the web process validates at creation and the worker spends. `thinking: false` sends the DeepSeek-specific `{"thinking": {"type": "disabled"}}` wire field; a provider that does not speak it may 400, so leave thinking true for one without a DeepSeek-compatible thinking switch.
+
 | provider | models | used for |
 |---|---|---|
-| DeepSeek | deepseek-v4-flash, deepseek-v4-pro | classification and the corroboration judge |
+| DeepSeek (default) | deepseek-v4-flash, deepseek-v4-pro | classification and the corroboration judge |
 
-DeepSeek is the only provider wired today. The client speaks the OpenAI wire format, so another one is a base URL plus a key.
+DeepSeek is the only provider measured end to end; the migration from the old `DEEPSEEK_*` settings to the table shape is documented in `.env.example`.
 
 ## Install
 
@@ -62,7 +64,7 @@ mkdir -p secrets
 printf 'a long random postgres password' > secrets/postgres_password
 printf 'a long random login password'    > secrets/auth_password
 printf 'a long random session secret'    > secrets/session_secret
-touch secrets/deepseek_key secrets/brave_key
+touch secrets/llm_deepseek_key secrets/brave_key
 docker compose up -d --wait postgres
 docker compose run --rm web alembic upgrade head
 docker compose up -d
@@ -98,7 +100,8 @@ Settings load from mounted docker secrets first, then the environment, then `.en
 | `PIXEL_TERMS_ACK_COOKIE_VALUE` | unset | accepts Google's factory-image terms; the Pixel driver refuses to fetch without it |
 | `SAMSUNG_MODELS` / `SAMSUNG_REGIONS` | unset | the model by CSC grid the Samsung driver probes |
 | `MOTOROLA_DEVICES` | unset | the codenames the Motorola driver crawls |
-| `DEEPSEEK_KEY` | unset | the classification key; refused at the first call, not at startup |
+| `LLM_PROVIDERS` | unset | the provider table; a classification job naming a provider outside it is refused at creation |
+| `LLM_DEEPSEEK_KEY` | unset | the default provider's key; refused at the first call, not at startup |
 | `BRAVE_KEY` | unset | the corroboration key; blank means a classification job ends at corroborate |
 | `UPSTREAM_REPO_PATH` | unset | the operator's clone the emission commits into |
 | `PIPELINE_COMMIT_SHA` | unset | the commit of this pipeline; branch emission refuses without it |
@@ -150,7 +153,7 @@ The [wiki](https://github.com/uwuclxdy/uadclaw/wiki) is the full reference.
 | [Unpacking](https://github.com/uwuclxdy/uadclaw/wiki/Unpacking) | magic-number dispatch, the container chains, partition handling, path safety |
 | [Facts and corpus](https://github.com/uwuclxdy/uadclaw/wiki/Facts-and-Corpus) | manifest facts, the cross-device merge, the dependency graph's two edge classes |
 | [Rule ladder](https://github.com/uwuclxdy/uadclaw/wiki/Rule-Ladder) | the removal floor, the rules that set it, provenance, the queue filters |
-| [Classification](https://github.com/uwuclxdy/uadclaw/wiki/Classification) | the evidence bundle, the DeepSeek client, the response validator, persistence |
+| [Classification](https://github.com/uwuclxdy/uadclaw/wiki/Classification) | the evidence bundle, the OpenAI-format LLM client, the response validator, persistence |
 | [Corroboration](https://github.com/uwuclxdy/uadclaw/wiki/Corroboration) | the two Brave clients, the SSRF gate, the judge, the fabricated-citation refusal |
 | [Jobs and worker](https://github.com/uwuclxdy/uadclaw/wiki/Jobs-and-Worker) | job kinds, the per-kind stage walk, claiming, the ownership fence, scratch leases |
 | [Triage and emission](https://github.com/uwuclxdy/uadclaw/wiki/Triage-and-Emission) | the human gate, the decision log, the append-only splice, branch safety |

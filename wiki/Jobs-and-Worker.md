@@ -18,7 +18,7 @@ Three job kinds exist (`models.JobKind`): `firmware_analysis`, `classification`,
 
 The worker no-ops any stage with no registered handler. `worker.default_stage_handlers` maps every `PIPELINE_STAGES` name to a no-op by default, and only the names in `stages.pipeline_stage_handlers()` get a real one. If a single global list decided every job's walk, a `firmware_analysis` job would classify the whole corpus against a paid API the moment it finished unpacking, because the `llm` handler exists and nothing kind-scoped would stop the walk from reaching it. `FIRMWARE_ANALYSIS` ends at `rule_ladder` for that reason. It used to no-op through `llm`, `corroborate`, `triage` and `branch` and finish at `branch` instead, recording four stage runs that did nothing.
 
-`classification` and `branch_emission` are separate kinds a human queues on purpose. Classification spends a DeepSeek budget on both its stages, plus a Brave search quota on the second. Emission commits into somebody else's git clone.
+`classification` and `branch_emission` are separate kinds a human queues on purpose. Classification spends an LLM provider budget on both its stages, plus a Brave search quota on the second. Emission commits into somebody else's git clone.
 
 `jobs.stages_for(kind)` raises `JobValidationError` for an unrecognized kind rather than defaulting to the full pipeline. A new kind cannot silently inherit the firmware walk this way. `jobs.next_stage(current, kind)` reads the same table to find the stage after `current`, or `None` once the kind's last stage is done. A stage recorded before a kind's walk shrank (a firmware job once reached `corroborate` while `FIRMWARE_ANALYSIS` still no-oped through it) is treated as finished rather than raised on, via `jobs._is_retired_stage`.
 
@@ -111,8 +111,8 @@ Whether a kind needs scratch (`JOB_KIND_NEEDS_SCRATCH`) is a property of the kin
 | `corpus_graph` | firmware_analysis | parses the `/etc` config XMLs, records `device_scans.config_inputs`, writes `package_analysis.dependencies`/`needed_by`/`edges`/`evidence` corpus-wide |
 | `filter` | firmware_analysis | loads `uad_lists.json`, writes `package_analysis.upstream_present`/`queued`/`filter_verdict`/`upstream_provenance` |
 | `rule_ladder` | firmware_analysis | computes removal floors from the corpus and the `/etc` inputs, writes `package_analysis.floor`/`floor_rule`/`floor_reasons`/`privapp_*` |
-| `llm` | classification | classifies queued candidates against DeepSeek, writes `package_classification` (a proposal, or a parked row) |
-| `corroborate` | classification | searches Brave, fetches source pages, judges each description against DeepSeek, writes `package_corroboration` and `package_search_results` |
+| `llm` | classification | classifies queued candidates against the job's provider, writes `package_classification` (a proposal, or a parked row) |
+| `corroborate` | classification | searches Brave, fetches source pages, judges each description against the job's provider, writes `package_corroboration` and `package_search_results` |
 | `branch` | branch_emission | commits an approved vendor batch into the operator's clone, writes `branch_emission`/`branch_emission_package` |
 
 See [Firmware-Drivers](Firmware-Drivers), [Unpacking](Unpacking), [Facts-and-Corpus](Facts-and-Corpus) and [Rule-Ladder](Rule-Ladder) for the firmware-side stages; [Classification](Classification) and [Corroboration](Corroboration) for the model stages; [Triage-and-Emission](Triage-and-Emission) for `triage` and `branch`.

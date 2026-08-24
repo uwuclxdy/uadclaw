@@ -35,7 +35,7 @@ Every other setting either has a working default or is refused later, at the poi
 | `POSTGRES_PASSWORD` | none, required | secret | Postgres connection password |
 | `AUTH_PASSWORD` | none, required | secret | the single login password |
 | `SESSION_SECRET` | none, required | secret | HMAC key signing the session cookie |
-| `DEEPSEEK_KEY` | `""` | secret | the classification and corroboration-judge API key. Blank boots fine; refused only at the first DeepSeek call (`deepseek.require_api_key`), naming the setting. In docker it is a secret file mounted into the worker only, never the web service |
+| `LLM_<ID>_KEY` | `""` | secret | one provider's API key (`LLM_DEEPSEEK_KEY` for the default). Blank boots fine; refused only at the first call (`llm.require_api_key`), naming the file and the environment variable. In docker it is a secret file `secrets/llm_<id>_key` mounted into the worker only, never the web service |
 | `BRAVE_KEY` | `""` | secret | the corroboration search API key. Same posture: blank boots fine, refused at the point of use (`brave.require_brave_key`). A blank key means a classification job ends at `corroborate` instead of finishing it |
 
 ## Postgres
@@ -103,20 +103,17 @@ Every other setting either has a working default or is refused later, at the poi
 |---|---|---|---|
 | `UPSTREAM_LIST_PATH` | `/data/uad_lists.json` | path | the operator-supplied upstream list the filter stage reads to know what is already carried. The worker image mounts `./data` read-only at `/data`. `load_upstream_list` refuses a missing or empty file rather than treating the whole corpus as new, and records the copy's sha256 and mtime on every row it decides |
 
-## Classification (DeepSeek)
+## Classification (LLM providers)
 
-The deterministic pipeline (`acquire` through `rule_ladder`) needs none of these; a `classification` job needs them.
+The deterministic pipeline (`acquire` through `rule_ladder`) needs none of these; a `classification` job needs them. The old `DEEPSEEK_*` settings are gone (2026-08-24 provider generalization): the per-provider values live in the provider table, and only the three global client knobs remain flat.
 
 | key | default | type | what it does |
 |---|---|---|---|
-| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | str | the OpenAI-format endpoint, never `/anthropic`: the cost measurement reads `usage.prompt_cache_hit_tokens`, which the Anthropic wire format does not carry |
-| `DEEPSEEK_MODEL` | `deepseek-v4-flash` | str | the model id. The legacy `deepseek-chat`/`deepseek-reasoner` ids no longer resolve |
-| `DEEPSEEK_THINKING` | `true` | bool | thinking mode, on by default (the API's own default). Its reasoning tokens bill as output |
-| `DEEPSEEK_MAX_TOKENS` | `16384` | int, must be `>= 1` | output ceiling per call, covering reasoning plus the JSON body. Too small returns `finish_reason="length"` with empty content, indistinguishable from DeepSeek's documented empty-content bug from the envelope alone |
-| `DEEPSEEK_MAX_CONCURRENCY` | `4` | int, must be `>= 1` | in-flight requests. DeepSeek's concurrency ceiling is account-wide across every key with no documented RPM/TPM |
-| `DEEPSEEK_MAX_ATTEMPTS` | `3` | int, must be `>= 1` | wire retries inside one call: 3 means one request plus two on a 429/500/503 or a transport error |
-| `DEEPSEEK_RETRY_BACKOFF_SECONDS` | `2.0` | float, must be `> 0` | first backoff, doubled per attempt |
-| `DEEPSEEK_REQUEST_TIMEOUT_SECONDS` | `300.0` | float, must be `> 0` | per-request read/connect deadline, generous because DeepSeek can hold a connection open up to 10 minutes before inference starts |
+| `LLM_PROVIDERS` | `{}` | JSON object, one entry per provider id | the provider table. Each entry carries `base_url` (the OpenAI-format endpoint, never `/anthropic`: the cost measurement reads `usage.prompt_cache_hit_tokens`, which the Anthropic wire format does not carry), `model`, `thinking`, `max_tokens` (output ceiling per call, covering reasoning plus the JSON body — too small returns `finish_reason="length"` with empty content, indistinguishable from the documented empty-content bug from the envelope alone) and `max_concurrency` (in-flight requests; the account-wide ceiling has no documented RPM/TPM). A job's `provider` param names one of the ids, validated at creation; jobs that name none use `LLM_DEFAULT_PROVIDER`. Both containers read it — the web process validates at creation and the worker spends against it. The `.env.example` deepseek entry reproduces the old defaults verbatim. `thinking: false` sends the DeepSeek-specific `{"thinking": {"type": "disabled"}}` wire field; a provider that does not know it may 400, so leave thinking true for one without a DeepSeek-compatible switch |
+| `LLM_DEFAULT_PROVIDER` | `deepseek` | str | the provider id a classification job uses when its params name none; the resolved id is stored on the job row at creation |
+| `LLM_MAX_ATTEMPTS` | `3` | int, must be `>= 1` | wire retries inside one call: 3 means one request plus two on a 429/500/503 or a transport error. Global across providers: the retry layer is one |
+| `LLM_RETRY_BACKOFF_SECONDS` | `2.0` | float, must be `> 0` | first backoff, doubled per attempt |
+| `LLM_REQUEST_TIMEOUT_SECONDS` | `300.0` | float, must be `> 0` | per-request read/connect deadline, generous because the API can hold a connection open up to 10 minutes before inference starts |
 | `CLASSIFICATION_MAX_PACKAGES` | `500` | int, must be `>= 1` | ceiling on packages one classification job may call the API for. A job's own params may lower this, never raise it |
 | `CLASSIFICATION_MAX_CALLS_PER_PACKAGE` | `3` | int, must be `>= 1` | total billed requests one package may cost, counting every wire retry. `package_classification.attempts` stores this count |
 
