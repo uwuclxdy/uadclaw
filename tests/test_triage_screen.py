@@ -613,7 +613,8 @@ async def test_a_parked_package_is_reachable_behind_its_own_filter(
 
     assert "com.example.parked" not in await screen(client)
     parked = await screen(client, "?view=parked")
-    assert "deepseek gave no answer" in parked
+    assert "the model gave no answer" in parked
+    assert 'title="the model could not answer"' in parked
 
 
 # --- the edit path ----------------------------------------------------------------------------
@@ -877,7 +878,7 @@ async def test_the_decision_and_the_evidence_are_separate_columns(
 
     assert 'class="triage-board"' in body
     assert 'class="triage-rail"' in body
-    for acted_on in ('name="action" value="approve"', "deepseek's answer", "minimum rating"):
+    for acted_on in ('name="action" value="approve"', "the LLM's answer", "minimum rating"):
         assert acted_on in decide, acted_on
     for backing in (">firmware facts</div>", ">similar upstream entries</summary>"):
         assert backing in evidence, backing
