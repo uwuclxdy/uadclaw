@@ -313,7 +313,7 @@ async def test_an_approved_package_leaves_the_queue(db_env, triage_db):
 
 
 async def test_an_approval_with_no_emission_row_stays_decided_and_offerable(db_env, triage_db):
-    """The pre-§19 shape must keep working: an approval that has not shipped yet is still a
+    """The pre-emission shape must keep working: an approval that has not shipped yet is still a
     decided package, still offerable to the next emission."""
     await seed(triage_db, {"com.example.one": 1})
 
@@ -324,7 +324,7 @@ async def test_an_approval_with_no_emission_row_stays_decided_and_offerable(db_e
 
 
 async def test_a_shipped_package_leaves_decided_and_enters_shipped(db_env, triage_db):
-    """§19's verify line at the store: an `approve` with a `branch_emission_package` row is
+    """An `approve` with a `branch_emission_package` row is
     its own state, not a decided one — the board must stop offering something already gone."""
     await seed(triage_db, {"com.example.one": 1})
 

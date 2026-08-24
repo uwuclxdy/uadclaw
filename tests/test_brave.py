@@ -531,7 +531,7 @@ async def test_a_same_scheme_redirect_is_followed_within_the_hop_budget():
 
 
 async def test_a_redirect_downgrading_https_to_http_is_refused():
-    """§13's class, and this client is scheme-safe regardless of what the shared driver seam
+    """This client is scheme-safe regardless of what the shared driver seam
     ends up being: httpx would follow a 302 from https to http without complaint."""
 
     def handler(request):

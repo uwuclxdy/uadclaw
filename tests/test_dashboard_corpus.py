@@ -365,7 +365,7 @@ async def test_the_verdict_badge_distinguishes_pending_not_queued_and_queued(
 ):
     """The list row used to carry two separate badges (`queued`, `upstream`) derived from the
     same `filter_verdict` enum — redundant, and together with `floor`/`conflict` it put four
-    tag-styled badges in one row against SPEC §5's "at most three" cap. They are merged into
+    tag-styled badges in one row against the "at most three" cap. They are merged into
     one `verdict` badge here, so this is the tri-state test that badge now has to pass."""
     await _seed(
         db_session_factory,
@@ -386,7 +386,7 @@ async def test_the_verdict_badge_distinguishes_pending_not_queued_and_queued(
 
 
 async def test_a_row_never_shows_more_than_three_badges_at_once(db_env, db_session_factory, client):
-    """SPEC §5: at most three badges in any one place. Before this round the row could show
+    """At most three badges in any one place. Before this round the row could show
     four (floor, queued, upstream, conflict) — queued/upstream merged into one verdict badge
     since both were derived from the same `filter_verdict` enum. floor + verdict + conflict is
     the ceiling case; this pins that a row carrying all three never exceeds it."""
@@ -432,7 +432,7 @@ async def test_the_list_page_carries_a_keyboard_reachable_badge_legend(
     """Badges on a 50-row list stay bare text — a per-row explanation would add up to 100 tab
     stops to a table meant to be scanned. One shared `<details>` legend explains every
     verdict/pending/conflict value instead, and `<summary>` is natively focusable so a
-    keyboard user reaches it without a pointer (SPEC §5). Seeded with ZERO packages
+    keyboard user reaches it without a pointer. Seeded with ZERO packages
     deliberately: the empty-corpus state still renders the legend (it sits above the
     `total == 0` branch), so nothing here can be satisfied by a row's own badge markup —
     only the legend itself can produce this text, which is what makes this a standalone pin
@@ -471,7 +471,7 @@ async def test_filter_verdict_never_renders_its_raw_enum_spelling(
 
     # `>already_upstream<`, not a bare substring: the verdict filter's own
     # `<option value="already_upstream">already upstream</option>` legitimately carries the
-    # raw spelling as a wire VALUE (SPEC §4 — form values don't change), so a blanket
+    # raw spelling as a wire VALUE (form values don't change), so a blanket
     # `"already_upstream" not in listing.text` is a false positive against that option now
     # that M4's filter exists. What must never appear is the raw spelling as visible text.
     assert ">already_upstream<" not in listing.text
@@ -488,7 +488,7 @@ async def test_an_unmapped_filter_verdict_falls_through_raw_rather_than_prettifi
 ):
     """A value nobody enumerated has to read as visibly unhandled, never as plausible prose a
     blanket `.replace('_', ' ')` would produce silently — that is the exact failure mode
-    `FILTER_VERDICT_LABEL` exists to avoid (SPEC §4)."""
+    `FILTER_VERDICT_LABEL` exists to avoid."""
     await _seed(
         db_session_factory,
         _fact("com.example.futureverdict"),
@@ -667,7 +667,7 @@ async def test_detail_for_a_missing_package_reads_as_not_found_not_as_an_error(
 async def test_detail_renders_a_shipped_package_with_the_branch_it_went_out_on(
     db_env, db_session_factory, client
 ):
-    """§19's corpus half: this screen shows a package's full standing, and a package whose
+    """This screen shows a package's full standing, and a package whose
     approval went out on a branch has to say so, with the branch."""
     await _seed(
         db_session_factory,
@@ -828,8 +828,8 @@ async def test_a_package_with_no_icon_renders_the_monogram_fallback(
     listing = await client.get("/corpus")
     detail = await client.get("/corpus/com.example.noicon")
 
-    # The list is the 32px rail variant, the detail the 48px card variant (icon contract,
-    # SPEC §6) — pinned here so a later edit cannot silently put the rail size on the card.
+    # The list is the 32px rail variant, the detail the 48px card variant (the icon contract):
+    # pinned here so a later edit cannot silently put the rail size on the card.
     assert 'class="monogram monogram-c' in listing.text
     assert ' monogram-sm"' in listing.text
     assert 'aria-hidden="true"' in listing.text

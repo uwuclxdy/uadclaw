@@ -537,7 +537,7 @@ async def test_a_rejected_candidate_persists_with_its_reason_and_does_not_reappe
 async def test_a_shipped_package_leaves_decided_and_renders_in_shipped_with_its_branch(
     db_env, triage_env, triage_db, client
 ):
-    """§19's verify line, through the screen: an approval that went out on a branch must not
+    """An approval that went out on a branch must not
     sit in `decided` indistinguishable from one still waiting — it leaves that list and
     renders in its own view carrying the branch it went out on."""
     await login(client)
@@ -559,7 +559,7 @@ async def test_a_shipped_package_leaves_decided_and_renders_in_shipped_with_its_
 async def test_an_approval_with_no_emission_row_stays_decided_and_is_still_offered(
     db_env, triage_env, triage_db, client
 ):
-    """§19's second half: an approval made after a batch has no emission row yet, so it must
+    """An approval made after a batch has no emission row yet, so it must
     stay in `decided` (offerable) and still reach the next emission. The emission half is
     asserted through `load_approved` — the seam that builds the batch — not by re-deriving
     the shipped predicate in the test."""
@@ -1551,7 +1551,7 @@ def test_every_monogram_tint_clears_the_contrast_floor(theme):
 
 
 async def test_a_refused_edit_gives_every_answer_back(db_env, triage_env, triage_db, client):
-    """ux-patterns §7.1: keep every answer the user gave, passing and failing both.
+    """Keep every answer the user gave, passing and failing both.
 
     The expensive case is the one that is not about the field that failed — three careful
     sentences typed ALONGSIDE a below-floor rating. The refusal re-read the candidate from the
