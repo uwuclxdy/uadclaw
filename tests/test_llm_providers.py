@@ -164,10 +164,12 @@ async def test_a_named_provider_is_stored_on_the_row(
     db_env, provider_env, monkeypatch, db_session_factory
 ):
     table = dict(PROVIDER_TABLE)
+    # thinking must be true on a non-deepseek id: the loader refuses false there, because
+    # it would send DeepSeek's off-switch wire field to a provider that may not know it.
     table["openai"] = {
         "base_url": "https://api.openai.test",
         "model": "gpt-test",
-        "thinking": False,
+        "thinking": True,
         "max_tokens": 2048,
         "max_concurrency": 2,
     }

@@ -117,6 +117,42 @@ async def test_thinking_off_sends_the_real_off_switch():
     assert result.thinking is False
 
 
+async def test_a_deepseek_row_with_thinking_off_still_sends_the_wire_field(monkeypatch):
+    """The settings refusal exempts the deepseek id, so a row with thinking=false survives
+    the loader and the flag travels into the client unchanged — the end-to-end half of the
+    settings tests that allow the row."""
+    monkeypatch.setenv("POSTGRES_PASSWORD", "x")
+    monkeypatch.setenv("AUTH_PASSWORD", "y")
+    monkeypatch.setenv("SESSION_SECRET", "z")
+    monkeypatch.setenv("LLM_DEEPSEEK_KEY", "sk-test-not-a-real-key-0000")
+    monkeypatch.setenv(
+        "LLM_PROVIDERS",
+        json.dumps(
+            {
+                "deepseek": {
+                    "base_url": "https://api.deepseek.test",
+                    "model": "deepseek-v4-flash",
+                    "thinking": False,
+                    "max_tokens": 4096,
+                    "max_concurrency": 2,
+                }
+            }
+        ),
+    )
+    sent: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json=envelope('{"ok": true}'))
+
+    api = LlmClient.from_settings(
+        Settings(), provider_id="deepseek", transport=httpx.MockTransport(handler)
+    )
+    async with api:
+        await api.complete_json(system=SYSTEM, user=USER)
+    assert json.loads(sent[0].content)["thinking"] == {"type": "disabled"}
+
+
 async def test_thinking_on_sends_no_override_and_records_the_mode():
     api, sent = client([httpx.Response(200, json=envelope('{"ok": true}'))])
     async with api:

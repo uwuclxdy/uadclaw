@@ -321,9 +321,12 @@ class LlmClient:
             "max_tokens": self.max_tokens,
         }
         if not self.thinking:
-            # The real off switch. `reasoning_effort: "low"` only halves the reasoning spend
-            # (measured 104 -> 52 tokens on one prompt); `disabled` removes it entirely
-            # (measured 5 completion tokens, no reasoning field at all).
+            # The real off switch, DeepSeek-specific: `Settings` refuses thinking=false on
+            # any row that is not deepseek (id `deepseek`, or a base_url on DeepSeek's own
+            # host), so this branch only ever runs for a row that speaks the field.
+            # `reasoning_effort: "low"` only halves the reasoning spend (measured 104 -> 52
+            # tokens on one prompt); `disabled` removes it entirely (measured 5 completion
+            # tokens, no reasoning field at all).
             body["thinking"] = {"type": "disabled"}
         return body
 
@@ -452,7 +455,8 @@ class LlmClient:
             f"reasoning_tokens={reasoning}, content {len(result.content)} chars). Reasoning "
             "is charged against max_tokens and thinking is ON by default on this model, so "
             "the JSON body can be truncated or missing entirely with nothing else wrong. "
-            "Raise this provider's max_tokens in LLM_PROVIDERS, or set its thinking to false "
+            "Raise this provider's max_tokens in LLM_PROVIDERS, or — on a deepseek row (id "
+            "`deepseek`, or a base_url on DeepSeek's own host) — set its thinking to false "
             "to stop paying the reasoning budget out of the same ceiling. Not retried: the "
             "same request fails the same way."
         )

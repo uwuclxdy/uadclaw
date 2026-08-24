@@ -487,6 +487,171 @@ def test_a_provider_id_that_is_unsafe_in_a_filename_or_env_name_is_refused(
         Settings(_secrets_dir=str(tmp_path), _env_file=None)
 
 
+def test_a_non_deepseek_provider_with_thinking_off_is_refused_at_load(monkeypatch, tmp_path):
+    """`thinking=false` makes the client send DeepSeek's own
+    `{"thinking": {"type": "disabled"}}` wire field, and a provider that does not know it
+    answers 400 — an unretried `LlmError`, so every package parks. Refused here rather than
+    at the point of use, so the error names the entry and the fix; the id lives on the dict
+    key, not on the row model, which is why the check sits on the whole table."""
+    _set_required_env(monkeypatch)
+    entry = {
+        "base_url": "https://api.openai.test/v1",
+        "model": "gpt-test",
+        "thinking": False,
+        "max_tokens": 4096,
+        "max_concurrency": 4,
+    }
+    monkeypatch.setenv("LLM_PROVIDERS", json.dumps({"openai": entry}))
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert [error["loc"] for error in exc_info.value.errors()] == [("llm_providers",)]
+    assert "provider 'openai'" in str(exc_info.value)
+    assert "set this entry's thinking to true" in str(exc_info.value)
+
+
+def test_the_deepseek_row_keeps_thinking_off(monkeypatch, tmp_path):
+    """The wire field is DeepSeek's own off switch, so the refusal stops at every deepseek
+    row (id `deepseek`, or a base_url on DeepSeek's own host). This one is deepseek by id,
+    and keeps the flag in either state."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDERS", _provider_json(thinking=False))
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.llm_providers["deepseek"].thinking is False
+
+
+def test_a_second_deepseek_account_under_another_id_keeps_thinking_off(monkeypatch, tmp_path):
+    """The host leg of the discriminator: a base_url on DeepSeek's own host speaks the
+    wire field whatever the id, so a second account under another id keeps the flag."""
+    _set_required_env(monkeypatch)
+    entry = {
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-flash",
+        "thinking": False,
+        "max_tokens": 4096,
+        "max_concurrency": 4,
+    }
+    monkeypatch.setenv("LLM_PROVIDERS", json.dumps({"deepseek-2": entry}))
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.llm_providers["deepseek-2"].thinking is False
+
+
+def test_a_deepseek_subdomain_under_another_id_keeps_thinking_off(monkeypatch, tmp_path):
+    """The suffix leg: any hostname ending in `.deepseek.com` is DeepSeek's own host."""
+    _set_required_env(monkeypatch)
+    entry = {
+        "base_url": "https://beta.deepseek.com",
+        "model": "deepseek-v4-flash",
+        "thinking": False,
+        "max_tokens": 4096,
+        "max_concurrency": 4,
+    }
+    monkeypatch.setenv("LLM_PROVIDERS", json.dumps({"deepseek-3": entry}))
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.llm_providers["deepseek-3"].thinking is False
+
+
+def test_a_scheme_less_deepseek_base_url_still_counts_as_deepseeks_host(monkeypatch, tmp_path):
+    """urlsplit reads a scheme-less value as the path, so the host check prefixes it with
+    `//` before parsing — this pins that a bare `api.deepseek.com/...` is still DeepSeek's
+    own host and not a foreign base_url."""
+    _set_required_env(monkeypatch)
+    entry = {
+        "base_url": "api.deepseek.com/v1",
+        "model": "deepseek-v4-flash",
+        "thinking": False,
+        "max_tokens": 4096,
+        "max_concurrency": 4,
+    }
+    monkeypatch.setenv("LLM_PROVIDERS", json.dumps({"deepseek-4": entry}))
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.llm_providers["deepseek-4"].thinking is False
+
+
+def test_a_trailing_dot_fqdn_of_deepseeks_host_keeps_thinking_off(monkeypatch, tmp_path):
+    """`api.deepseek.com.` is DNS's absolute-name spelling of DeepSeek's own host, so the
+    hostname is normalized (trailing dots stripped) rather than refused — a refusal would
+    tell an operator whose row IS deepseek to set thinking true."""
+    _set_required_env(monkeypatch)
+    entry = {
+        "base_url": "https://api.deepseek.com.",
+        "model": "deepseek-v4-flash",
+        "thinking": False,
+        "max_tokens": 4096,
+        "max_concurrency": 4,
+    }
+    monkeypatch.setenv("LLM_PROVIDERS", json.dumps({"deepseek-5": entry}))
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.llm_providers["deepseek-5"].thinking is False
+
+
+def test_a_gateway_fronting_deepseek_is_refused_with_thinking_off(monkeypatch, tmp_path):
+    """Fail-closed on the host leg: a gateway at a foreign host may or may not forward the
+    DeepSeek-only field, so the row is refused naming the entry, and the fix — thinking
+    true — sends no wire field at all."""
+    _set_required_env(monkeypatch)
+    entry = {
+        "base_url": "http://localhost:4000/v1",
+        "model": "deepseek-v4-flash",
+        "thinking": False,
+        "max_tokens": 4096,
+        "max_concurrency": 4,
+    }
+    monkeypatch.setenv("LLM_PROVIDERS", json.dumps({"litellm": entry}))
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert [error["loc"] for error in exc_info.value.errors()] == [("llm_providers",)]
+    assert "provider 'litellm'" in str(exc_info.value)
+    assert "set this entry's thinking to true" in str(exc_info.value)
+
+
+def test_a_non_deepseek_row_with_thinking_on_loads_alongside_deepseek(monkeypatch, tmp_path):
+    """thinking=true sends no wire field at all, so every row may carry it. The refusal is
+    the conjunction of a non-deepseek id, a foreign host and thinking=false, and this
+    positive leg is what pins the flag leg of that boundary: a check that refused every
+    foreign-host row would pass the refusal and exemption tests above."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv(
+        "LLM_PROVIDERS",
+        json.dumps(
+            {
+                "deepseek": {
+                    "base_url": "https://api.deepseek.test",
+                    "model": "deepseek-v4-flash",
+                    "thinking": False,
+                    "max_tokens": 4096,
+                    "max_concurrency": 4,
+                },
+                "openai": {
+                    "base_url": "https://api.openai.test/v1",
+                    "model": "gpt-test",
+                    "thinking": True,
+                    "max_tokens": 4096,
+                    "max_concurrency": 4,
+                },
+            }
+        ),
+    )
+
+    settings = Settings(_secrets_dir=str(tmp_path), _env_file=None)
+
+    assert settings.llm_providers["deepseek"].thinking is False
+    assert settings.llm_providers["openai"].thinking is True
+
+
 def test_an_empty_table_is_a_legal_configuration(monkeypatch, tmp_path):
     """The deterministic half of the pipeline must boot on a box with no LLM account, so no
     providers configured is a legal state — a classification job then fails at creation."""

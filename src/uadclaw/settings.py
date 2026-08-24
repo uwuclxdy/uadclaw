@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
@@ -88,12 +89,15 @@ class LlmProviderConfig(BaseModel):
     Every field is required on purpose — the table is the single source of truth about a
     provider, so nothing about one is a hidden default. `thinking` in particular carries
     money: reasoning tokens bill as output at ~20x the thinking-off spend, so whether a
-    provider thinks has to be a decision written down, not a fallback. One wire-format
-    caveat travels with the flag: `thinking=false` makes the client send the
-    DeepSeek-specific `{"thinking": {"type": "disabled"}}` field, and a provider that does
-    not know it may answer 400 — which is an unretried `LlmError`, so every package
-    parks. Leave `thinking` true for a provider without a DeepSeek-compatible thinking
-    switch.
+    provider thinks has to be a decision written down, not a fallback. `thinking=false`
+    makes the client send the DeepSeek-specific `{"thinking": {"type": "disabled"}}`
+    wire field, so `Settings` refuses it on any entry that is not deepseek, naming the
+    entry: a provider that does not know the field answers 400 — an unretried `LlmError`,
+    so every package parks. An entry is deepseek by id `deepseek` (the shipped default,
+    whatever host fronts it) or by a base_url on DeepSeek's own host (`api.deepseek.com`
+    or any `*.deepseek.com` — a second account under another id still speaks the field).
+    A gateway fronting deepseek is refused and sets thinking true: fail-closed, the field
+    is then simply not sent. Deepseek entries keep the flag unchanged, in either state.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -163,6 +167,28 @@ def _dotenv_key(
 # `provider` param only ever names an EXISTING id, so validating the table keys here is the
 # one boundary that bounds every path an id can reach.
 _PROVIDER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+# A base_url whose hostname is DeepSeek's own speaks the `thinking` wire field whatever
+# the row's id: a second deepseek account under another id still understands the field.
+# A gateway FRONTING deepseek (litellm, an Azure-hosted endpoint) is not on this list and
+# is refused when it sets thinking=false — fail-closed, and the fix, thinking=true, sends
+# no wire field at all.
+_DEEPSEEK_HOSTS: tuple[str, ...] = ("api.deepseek.com",)
+_DEEPSEEK_HOST_SUFFIX = ".deepseek.com"
+
+
+def _base_url_on_deepseek_host(base_url: str) -> bool:
+    """Whether `base_url` points at DeepSeek's own host.
+
+    urlsplit lowercases the hostname; a scheme-less value is split with a `//` prefix
+    added first, because urlsplit would otherwise read the whole string as the path. A
+    trailing-dot FQDN (`api.deepseek.com.`) is DNS's absolute-name spelling of the same
+    host, so trailing dots are stripped rather than refused — refusing would tell an
+    operator whose row IS deepseek to set thinking true.
+    """
+    url = base_url if "://" in base_url else f"//{base_url}"
+    host = (urlsplit(url).hostname or "").rstrip(".")
+    return bool(host) and (host in _DEEPSEEK_HOSTS or host.endswith(_DEEPSEEK_HOST_SUFFIX))
 
 
 class Settings(BaseSettings):
@@ -561,6 +587,33 @@ class Settings(BaseSettings):
                     "digits, '-' and '_', starting with a letter. The id spells the key file "
                     "secrets/llm_<id>_key and the environment variable LLM_<ID>_KEY, so it "
                     "must be safe in a filename and an environment name."
+                )
+        return value
+
+    @field_validator("llm_providers")
+    @classmethod
+    def _reject_thinking_off_non_deepseek(
+        cls, value: dict[str, LlmProviderConfig]
+    ) -> dict[str, LlmProviderConfig]:
+        # `thinking=false` makes the client send DeepSeek's own `{"thinking": {"type":
+        # "disabled"}}` wire field, and a provider that does not know it answers 400 — an
+        # unretried LlmError, so every package parks. A row may carry the flag only when
+        # it is deepseek: by id (the shipped default, whatever host fronts it) or by a
+        # base_url on DeepSeek's own host (a second account under another id still speaks
+        # the field). Refused here rather than at the point of use, so the failure names
+        # the entry and the fix. The id lives on the dict key, not on the row model, so
+        # this is the one place id and row meet.
+        for provider_id, row in value.items():
+            if (
+                provider_id != "deepseek"
+                and not _base_url_on_deepseek_host(row.base_url)
+                and not row.thinking
+            ):
+                raise ValueError(
+                    f"provider {provider_id!r} has thinking=false, which is refused: the "
+                    'flag makes the client send the DeepSeek-only wire field {"thinking": '
+                    '{"type": "disabled"}}, which a provider that does not know it may '
+                    "answer 400 — set this entry's thinking to true"
                 )
         return value
 
