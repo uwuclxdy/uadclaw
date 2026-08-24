@@ -26,11 +26,11 @@ It calls the OpenAI-format `/chat/completions` endpoint rather than the `/anthro
 
 | Error | Trigger | Retryable |
 |---|---|---|
-| `DeepSeekAuthError` | HTTP 401/403 | no |
-| `DeepSeekBalanceError` | HTTP 402 insufficient balance | no, will not resolve inside a retry window |
+| `LlmAuthError` | HTTP 401/403 | no |
+| `LlmBalanceError` | HTTP 402 insufficient balance | no, will not resolve inside a retry window |
 | `LlmBudgetError` | `finish_reason == "length"`, or empty content with reasoning at the ceiling | no, raising `max_tokens` is the fix |
-| `DeepSeekMalformedError` | empty content with `finish_reason == "stop"`, or a non-JSON body | yes |
-| `DeepSeekUnavailableError` | HTTP 429/500/503, or a transport failure | yes |
+| `LlmMalformedError` | empty content with `finish_reason == "stop"`, or a non-JSON body | yes |
+| `LlmUnavailableError` | HTTP 429/500/503, or a transport failure | yes |
 
 ### The budget failure and the empty-content bug are opposite fixes
 
