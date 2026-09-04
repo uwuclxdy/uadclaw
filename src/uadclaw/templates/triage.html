@@ -3,9 +3,9 @@
 {% block content %}
 <section>
   <header style="margin-bottom:var(--space-6);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
-    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">human gate</div>
-    <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em">triage</h2>
-    <p style="font-size:var(--text-sm);color:var(--text-dim);margin-top:var(--space-2)">
+    <div class="label" style="color:var(--accent-text);margin-bottom:var(--space-2)">human gate</div>
+    <h2>triage</h2>
+    <p style="font-size:var(--t-2);color:var(--text-3);margin-top:var(--space-2)">
       ranked by device count. nothing reaches a pull request without a human.
     </p>
   </header>
@@ -18,97 +18,97 @@
        style="margin-bottom:var(--space-4)"></div>
 
   {% include "partials/triage_board.html" %}
-</section>
-{% endblock %}
 
-{% block scripts %}
-<script>
-// Keybinds click the buttons the screen already renders, so the keyboard, the mouse and a
-// browser with no JavaScript at all take one path. Nothing here calls an endpoint.
-(function () {
-  if (window.__uadclawTriageKeys) return;   // hx-boost swaps the body; bind once per document
-  window.__uadclawTriageKeys = true;
+  {# Inside #main on purpose: a boosted navigation into /triage swaps #main in, and htmx
+     executes the scripts a swap brings with it, so the keybinds arrive with the screen
+     however it was reached. The guard binds them once per document. #}
+  <script>
+  // Keybinds click the buttons the screen already renders, so the keyboard, the mouse and a
+  // browser with no JavaScript at all take one path. Nothing here calls an endpoint.
+  (function () {
+    if (window.__uadclawTriageKeys) return;   // every swap re-runs this; bind once per document
+    window.__uadclawTriageKeys = true;
 
-  var TYPING = /^(input|textarea|select)$/i;
+    var TYPING = /^(input|textarea|select)$/i;
 
-  document.addEventListener('keydown', function (event) {
-    if (event.ctrlKey || event.metaKey || event.altKey) return;
-    var target = event.target;
-    if (target && (TYPING.test(target.tagName) || target.isContentEditable)) {
-      // Escape leaves the field, but a bare blur() drops focus on <body> — the same hole
-      // `data-swap-focus` exists to close, reached by the ordinary way out of the reason box.
-      if (event.key === 'Escape') {
-        var column = target.closest('.triage-decide');
-        if (column) { column.focus(); } else { target.blur(); }
+    document.addEventListener('keydown', function (event) {
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      var target = event.target;
+      if (target && (TYPING.test(target.tagName) || target.isContentEditable)) {
+        // Escape leaves the field, but a bare blur() drops focus on <body> — the same hole
+        // `data-swap-focus` exists to close, reached by the ordinary way out of the reason box.
+        if (event.key === 'Escape') {
+          var column = target.closest('.triage-decide');
+          if (column) { column.focus(); } else { target.blur(); }
+        }
+        return;
       }
-      return;
-    }
-    var key = event.key.toLowerCase();
-    if (key === '?') {
-      var help = document.getElementById('triage-help');
-      if (help) { help.open = !help.open; event.preventDefault(); }
-      return;
-    }
-    if (key === 'j' || key === 'k') {
-      var rows = Array.prototype.slice.call(document.querySelectorAll('[data-queue-row]'));
-      if (!rows.length) return;
-      var at = rows.findIndex(function (row) { return row.dataset.selected === 'true'; });
-      var next = rows[Math.min(Math.max(at + (key === 'j' ? 1 : -1), 0), rows.length - 1)];
-      if (next) { next.click(); event.preventDefault(); }
-      return;
-    }
-    // Looked up by reading each control's own key rather than by interpolating one into a
-    // selector: the interpolated form leaves a key-attribute literal in this file, which reads
-    // exactly like a control to anything scanning the page for the set of bound keys.
-    var control = null;
-    document.querySelectorAll('[data-key]').forEach(function (element) {
-      if (!control && element.dataset.key === key) control = element;
+      var key = event.key.toLowerCase();
+      if (key === '?') {
+        var help = document.getElementById('triage-help');
+        if (help) { help.open = !help.open; event.preventDefault(); }
+        return;
+      }
+      if (key === 'j' || key === 'k') {
+        var rows = Array.prototype.slice.call(document.querySelectorAll('[data-queue-row]'));
+        if (!rows.length) return;
+        var at = rows.findIndex(function (row) { return row.dataset.selected === 'true'; });
+        var next = rows[Math.min(Math.max(at + (key === 'j' ? 1 : -1), 0), rows.length - 1)];
+        if (next) { next.click(); event.preventDefault(); }
+        return;
+      }
+      // Looked up by reading each control's own key rather than by interpolating one into a
+      // selector: the interpolated form leaves a key-attribute literal in this file, which reads
+      // exactly like a control to anything scanning the page for the set of bound keys.
+      var control = null;
+      document.querySelectorAll('[data-key]').forEach(function (element) {
+        if (!control && element.dataset.key === key) control = element;
+      });
+      if (!control) return;
+      event.preventDefault();
+      // `r` opens the reason field rather than submitting: a rejection with no reason is
+      // refused, and a keybind that fires a refusal is a keybind that teaches nothing.
+      if (control.dataset.focus === 'true') { control.focus(); control.select(); return; }
+      control.click();
     });
-    if (!control) return;
-    event.preventDefault();
-    // `r` opens the reason field rather than submitting: a rejection with no reason is
-    // refused, and a keybind that fires a refusal is a keybind that teaches nothing.
-    if (control.dataset.focus === 'true') { control.focus(); control.select(); return; }
-    control.click();
-  });
 
-  // An htmx swap replaces the board, and the focused control goes with it: focus falls back
-  // to <body>, so the next Tab restarts at the top of the document and a refusal the reviewer
-  // has to answer is somewhere behind them. The SERVER says where focus belongs, because it
-  // is what knows why this render happened; this only moves it.
-  // htmx swaps neither a 5xx nor a transport failure, and every `_render` call in the view
-  // sits OUTSIDE its try blocks — so a template that raises, a store error class nobody has
-  // met yet, or a server restart mid-session all reach the reviewer as a key that quietly
-  // stopped working. Measured: two `d` presses against a 500 changed nothing on screen and
-  // both verdicts were gone.
-  function transportFailed(event) {
-    var box = document.getElementById('triage-transport-error');
-    if (!box) return;
-    var status = (event.detail && event.detail.xhr && event.detail.xhr.status) || 0;
-    box.className = 'callout callout-danger';
-    box.innerHTML = '<div class="callout-body"></div>';
-    // Unhidden BEFORE the text goes in. A live region announces the MUTATION, and a mutation
-    // made inside a `display:none` subtree is one the accessibility tree never saw — the box
-    // would render for a sighted reviewer and say nothing to anyone else, which is the exact
-    // half-fix this whole handler exists to avoid.
-    box.hidden = false;
-    box.firstChild.textContent = status
-      ? 'nothing was recorded (the server answered ' + status + '). reload the page and try again.'
-      : 'nothing was recorded: the server did not answer. reload the page and try again.';
-  }
-  document.body.addEventListener('htmx:responseError', transportFailed);
-  document.body.addEventListener('htmx:sendError', transportFailed);
+    // An htmx swap replaces the board, and the focused control goes with it: focus falls back
+    // to <body>, so the next Tab restarts at the top of the document and a refusal the reviewer
+    // has to answer is somewhere behind them. The SERVER says where focus belongs, because it
+    // is what knows why this render happened; this only moves it.
+    // htmx swaps neither a 5xx nor a transport failure, and every `_render` call in the view
+    // sits OUTSIDE its try blocks — so a template that raises, a store error class nobody has
+    // met yet, or a server restart mid-session all reach the reviewer as a key that quietly
+    // stopped working. Measured: two `d` presses against a 500 changed nothing on screen and
+    // both verdicts were gone.
+    function transportFailed(event) {
+      var box = document.getElementById('triage-transport-error');
+      if (!box) return;
+      var status = (event.detail && event.detail.xhr && event.detail.xhr.status) || 0;
+      box.className = 'callout callout-danger';
+      box.innerHTML = '<div class="callout-body"></div>';
+      // Unhidden BEFORE the text goes in. A live region announces the MUTATION, and a mutation
+      // made inside a `display:none` subtree is one the accessibility tree never saw — the box
+      // would render for a sighted reviewer and say nothing to anyone else, which is the exact
+      // half-fix this whole handler exists to avoid.
+      box.hidden = false;
+      box.firstChild.textContent = status
+        ? 'nothing was recorded (the server answered ' + status + '). reload the page and try again.'
+        : 'nothing was recorded: the server did not answer. reload the page and try again.';
+    }
+    document.body.addEventListener('htmx:responseError', transportFailed);
+    document.body.addEventListener('htmx:sendError', transportFailed);
 
-  document.body.addEventListener('htmx:afterSwap', function () {
-    // A swap that lands is the only evidence the previous failure is over.
-    var failed = document.getElementById('triage-transport-error');
-    if (failed) { failed.hidden = true; failed.className = ''; failed.textContent = ''; }
-    var target = document.querySelector('[data-swap-focus]');
-    if (target) target.focus();
-    // The rail scrolls in its own box, so an advance can select a row that is not on screen.
-    var selected = document.querySelector('[data-queue-row][data-selected="true"]');
-    if (selected) selected.scrollIntoView({ block: 'nearest' });
-  });
-})();
+    document.body.addEventListener('htmx:afterSwap', function () {
+      // A swap that lands is the only evidence the previous failure is over.
+      var failed = document.getElementById('triage-transport-error');
+      if (failed) { failed.hidden = true; failed.className = ''; failed.textContent = ''; }
+      var target = document.querySelector('[data-swap-focus]');
+      if (target) target.focus();
+      // The rail scrolls in its own box, so an advance can select a row that is not on screen.
+      var selected = document.querySelector('[data-queue-row][data-selected="true"]');
+      if (selected) selected.scrollIntoView({ block: 'nearest' });
+    });
+  })();
 </script>
 {% endblock %}

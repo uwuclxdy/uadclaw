@@ -1491,11 +1491,41 @@ def _mix(colour: str, over: str, fraction: float) -> str:
     return "#" + "".join(f"{round(c * fraction + o * (1 - fraction)):02X}" for c, o in pairs)
 
 
+def _oklch_to_hex(value: str) -> str:
+    """A plain oklch() token to sRGB hex, so contrast math can run on the shipped tokens.
+
+    The v2 tokens are oklch and WCAG ratios are defined on sRGB, so the test converts with
+    the standard OKLab-to-sRGB matrices rather than hard-coding hex the sheet no longer has.
+    """
+    import math
+
+    match = re.fullmatch(r"oklch\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\)", value)
+    assert match, f"not a plain oklch token: {value!r}"
+    lightness, chroma, hue = (float(part) for part in match.groups())
+    a = chroma * math.cos(math.radians(hue))
+    b = chroma * math.sin(math.radians(hue))
+    l_ = lightness + 0.3963377774 * a + 0.2158037573 * b
+    m_ = lightness - 0.1055613458 * a - 0.0638541728 * b
+    s_ = lightness - 0.0894841775 * a - 1.2914855480 * b
+    lms = (l_**3, m_**3, s_**3)
+    linear = (
+        4.0767416621 * lms[0] - 3.3077115913 * lms[1] + 0.2309699292 * lms[2],
+        -1.2684380046 * lms[0] + 2.6097574011 * lms[1] - 0.3413193965 * lms[2],
+        -0.0041960863 * lms[0] - 0.7034186147 * lms[1] + 1.7076147010 * lms[2],
+    )
+
+    def gamma(channel: float) -> float:
+        channel = max(0.0, min(1.0, channel))
+        return 12.92 * channel if channel <= 0.0031308 else 1.055 * channel ** (1 / 2.4) - 0.055
+
+    return "#" + "".join(f"{round(gamma(channel) * 255):02X}" for channel in linear)
+
+
 def _tokens(css: str, theme: str) -> dict[str, str]:
     """Every colour token one theme resolves to, read block by block.
 
-    Not a split on the light selector: `ui.css` defines the palette in several blocks and the
-    categorical ramp comes AFTER the light surfaces, so one split files the dark ramp under
+    Not a split on the light selector: `tokens.css` defines the palette in several blocks and
+    the categorical ramp comes AFTER the light surfaces, so one split files the dark ramp under
     light and the dark theme reads as having no tints at all.
     """
     tokens: dict[str, str] = {}
@@ -1504,30 +1534,34 @@ def _tokens(css: str, theme: str) -> dict[str, str]:
             continue
         if ('data-theme="light"' in selector) != (theme == "light"):
             continue
-        tokens.update(re.findall(r"(--[a-z-]+):\s*(#[0-9A-Fa-f]{6})", body))
+        # Only plain `oklch(L C H)` tokens are stored; an alpha-bearing one is not a colour
+        # the contrast math can take whole, and none of the surfaces or tints read here has one.
+        colour = r"oklch\([\d. ]+\)|#[0-9A-Fa-f]{6}"
+        for name, value in re.findall(rf"(--[a-z0-9-]+):\s*({colour})", body):
+            tokens[name] = _oklch_to_hex(value) if value.startswith("oklch") else value
     return tokens
 
 
 @pytest.mark.parametrize("theme", ["dark", "light"])
 def test_every_monogram_tint_clears_the_contrast_floor(theme):
-    """WCAG 1.4.3 wants 4.5:1, and 12px and 16px at weight 550 are both normal-size text.
+    """WCAG 1.4.3 wants 4.5:1, and 12px and 16px at weight 500 are both normal-size text.
 
     Recomputed from the two stylesheets rather than hard-coded, so it follows the fill
     percentage and the colour token if either moves. It is the assertion that was missing when
     this shipped putting the LETTERS on the categorical tint: composited over the real surface
     that measured 2.08:1 for `--cat-pink` on light, against a floor of 4.5.
     """
-    ui = (web.STATIC_DIR / "ui.css").read_text(encoding="utf-8")
+    tokens_css = (web.STATIC_DIR / "tokens.css").read_text(encoding="utf-8")
     app = (web.STATIC_DIR / "app.css").read_text(encoding="utf-8")
     # `_tokens` classifies a block by its SELECTOR and cannot see an enclosing at-rule, so a
     # palette moved under `@media (prefers-color-scheme: dark)` would be filed by whichever
     # leg its selector matched and this guard would measure the wrong one while staying green.
-    # That `ui.css` themes by attribute selector alone is a property of that stylesheet rather
-    # than of the parser, which makes it something to assert instead of rely on.
-    assert "prefers-color-scheme" not in ui, (
-        "ui.css themes by media query now; _tokens reads selectors and cannot see at-rules"
+    # That `tokens.css` themes by attribute selector alone is a property of that stylesheet
+    # rather than of the parser, which makes it something to assert instead of rely on.
+    assert "prefers-color-scheme" not in tokens_css, (
+        "tokens.css themes by media query now; _tokens reads selectors and cannot see at-rules"
     )
-    tokens = _tokens(ui, theme)
+    tokens = _tokens(tokens_css, theme)
 
     if theme == "light":
         block = app.split(':root[data-theme="light"] .monogram', 1)[1]
@@ -1544,7 +1578,7 @@ def test_every_monogram_tint_clears_the_contrast_floor(theme):
         )
     ]
     assert len(tints) == 8, f"read {len(tints)} tints out of app.css"
-    for surface in (tokens["--bg-raised"], tokens["--bg"], tokens["--bg-sunken"]):
+    for surface in (tokens["--surface-1"], tokens["--bg"], tokens["--well"]):
         for tint in tints:
             fill = _mix(tint, surface, fraction)
             ratio = _contrast(ink or tint, fill)

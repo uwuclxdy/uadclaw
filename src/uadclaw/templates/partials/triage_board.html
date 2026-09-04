@@ -95,7 +95,7 @@
               <input type="hidden" name="package" value="{{ board.undo }}">
               <input type="hidden" name="action" value="reopen">
               <input type="hidden" name="view" value="{{ board.view }}">
-              <button class="btn btn-ghost btn-sm" type="submit" data-key="{{ undo_key }}"
+              <button class="btn btn-secondary btn-sm" type="submit" data-key="{{ undo_key }}"
                       hx-disabled-elt="this">undo <kbd>{{ undo_key }}</kbd></button>
             </form>
           {% endif %}
@@ -108,7 +108,7 @@
          all still working, and a full-page failure would have thrown them away too. #}
       <div class="card">
         <div class="card-title">the queue is unreadable right now</div>
-        <p style="font-size:var(--text-sm);color:var(--text-dim);margin:var(--space-3) 0 var(--space-4)">
+        <p style="font-size:var(--t-2);color:var(--text-3);margin:var(--space-3) 0 var(--space-4)">
           nothing was lost. try again once the database answers.
         </p>
         <button class="btn btn-secondary" type="button"
@@ -119,7 +119,7 @@
       {# Reachable only from a settled read: the counts above are the same query. #}
       <div class="card">
         <div class="card-title">nothing to triage yet</div>
-        <p style="font-size:var(--text-sm);color:var(--text-dim);margin:var(--space-3) 0 var(--space-4)">
+        <p style="font-size:var(--t-2);color:var(--text-3);margin:var(--space-3) 0 var(--space-4)">
           no package has been classified. run a firmware job, then a classification job.
         </p>
         <a class="btn btn-primary" href="/jobs">go to jobs</a>
@@ -127,7 +127,7 @@
     {% elif board.state == "cleared" %}
       <div class="card">
         <div class="card-title">{{ view_labels[board.view] }} is clear</div>
-        <p style="font-size:var(--text-sm);color:var(--text-dim);margin:var(--space-3) 0 var(--space-4)">
+        <p style="font-size:var(--t-2);color:var(--text-3);margin:var(--space-3) 0 var(--space-4)">
           {% for name in views %}{{ board.counts[name] }} {{ view_labels[name] }}{% if not loop.last %}, {% endif %}{% endfor %}.
         </p>
         {# The action that RESOLVES the state, not the one that re-renders it. `back to the

@@ -28,7 +28,7 @@ async def _login(client) -> None:
 
 async def test_static_assets_are_served_without_a_session(client):
     """The login page has to be styled before anyone can log in."""
-    resp = await client.get("/static/ui.css")
+    resp = await client.get("/static/tokens.css")
     assert resp.status_code == 200
     assert "--accent" in resp.text
 
@@ -49,7 +49,7 @@ def test_a_path_merely_starting_like_the_exempt_prefix_is_not_public(path):
     assert is_public(path) is False
 
 
-@pytest.mark.parametrize("path", ["/static/ui.css", "/static/vendor/x.js", "/health", "/login"])
+@pytest.mark.parametrize("path", ["/static/tokens.css", "/static/vendor/x.js", "/health", "/login"])
 def test_the_public_surface_is_public(path):
     """The positive leg. Without it the test above is satisfied by a rule that exempts
     nothing at all, including the stylesheet the login page cannot render without."""
@@ -368,7 +368,7 @@ def test_every_font_the_stylesheet_asks_for_is_actually_vendored():
     functional test would ever catch."""
     import re
 
-    css = (web.STATIC_DIR / "ui.css").read_text()
+    css = (web.STATIC_DIR / "tokens.css").read_text()
     declared = set(re.findall(r'url\("fonts/([^"]+)"\)', css))
     assert declared
     present = {path.name for path in (web.STATIC_DIR / "fonts").glob("*.woff2")}

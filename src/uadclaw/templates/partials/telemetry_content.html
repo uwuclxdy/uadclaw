@@ -16,8 +16,11 @@
       <div class="stat-value">{{ stats.queue_depth_now }}</div>
       <div class="stat-delta">jobs waiting to claim, right now</div>
     </div>
-    <div class="stat-card stat-highlight">
-      <div class="stat-label">scratch lease occupancy</div>
+    <div class="stat-card">
+      <div class="annot" style="margin-bottom:var(--space-3)">
+        <div class="label">scratch lease occupancy</div>
+        <div class="annot-rule"></div>
+      </div>
       <div class="stat-value">{{ "%.1f"|format(stats.lease.occupancy_pct) }}%</div>
       <div class="stat-delta">
         {% if stats.lease.occupancy_pct > 80 %}
@@ -59,7 +62,7 @@
     </table>
   </div>
   {% else %}
-  <div style="color:var(--text-dim);font-size:var(--text-sm);margin-bottom:var(--space-8)">no stage completed in this window yet.</div>
+  <div style="color:var(--text-3);font-size:var(--t-2);margin-bottom:var(--space-8)">no stage completed in this window yet.</div>
   {% endif %}
 
   <div class="label" style="margin-bottom:var(--space-3)">worker utilization</div>
@@ -83,6 +86,6 @@
     </table>
   </div>
   {% else %}
-  <div style="color:var(--text-dim);font-size:var(--text-sm)">no worker has run a job in this window yet.</div>
+  <div style="color:var(--text-3);font-size:var(--t-2)">no worker has run a job in this window yet.</div>
   {% endif %}
 {% endif %}

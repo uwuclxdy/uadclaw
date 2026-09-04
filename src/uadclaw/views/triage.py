@@ -49,7 +49,7 @@ router = APIRouter(prefix="/triage")
 ACTION_BUTTONS: tuple[tuple[str, str, str, str], ...] = (
     ("approve", "a", "approve", "btn-primary"),
     ("defer", "d", "defer", "btn-secondary"),
-    ("reopen", "u", "reopen", "btn-ghost"),
+    ("reopen", "u", "reopen", "btn-secondary"),
 )
 # Reject and edit are not plain buttons: `r` focuses the reason field, because a rejection
 # with no reason is refused and a key that fires a refusal teaches nothing, and `e` opens the

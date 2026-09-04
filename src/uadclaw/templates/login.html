@@ -1,18 +1,21 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>log in · uadclaw</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%226%22%20fill%3D%22%231E1E2E%22%2F%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22%2343ABE5%22%20stroke-width%3D%223.5%22%20stroke-linecap%3D%22round%22%3E%3Cpath%20d%3D%22M9%207c-1.5%205-1.5%2011%201%2018%22%2F%3E%3Cpath%20d%3D%22M16%206c-1%205.5-1%2011.5%201.5%2019%22%2F%3E%3Cpath%20d%3D%22M23%208c-.5%205-.5%2010.5%201.5%2016%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E">
-  <link rel="stylesheet" href="/static/ui.css">
+  <link rel="stylesheet" href="/static/tokens.css">
+  <link rel="stylesheet" href="/static/components.css">
+  <link rel="stylesheet" href="/static/cursor.css">
 </head>
 <body>
+{% include "partials/icons_sprite.html" %}
 <main style="min-height:100vh;display:grid;place-items:center;padding:var(--space-6)">
   <div class="card" style="width:100%;max-width:360px">
-    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">uadclaw</div>
-    <h1 style="font:550 var(--text-xl)/1.2 var(--font-sans);color:var(--text);letter-spacing:-0.02em;margin-bottom:var(--space-2)">log in</h1>
-    <p style="font-size:var(--text-sm);color:var(--text-dim);margin-bottom:var(--space-6)">
+    <div class="label" style="color:var(--accent-text);margin-bottom:var(--space-2)">uadclaw</div>
+    <h1 style="font:500 var(--t-5)/1.2 var(--font-sans);margin-bottom:var(--space-2)">log in</h1>
+    <p style="font-size:var(--t-2);color:var(--text-3);margin-bottom:var(--space-6)">
       single user, one password.
     </p>
 
@@ -31,5 +34,7 @@
     </form>
   </div>
 </main>
+<script type="module" src="/static/cursor.js"></script>
+<script type="module" src="/static/ui.js"></script>
 </body>
 </html>

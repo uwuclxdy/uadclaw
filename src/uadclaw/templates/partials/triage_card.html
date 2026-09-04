@@ -38,7 +38,7 @@
      reaches by `a`/`d`/`r`/`e` rather than by Tab. #}
   <details id="triage-badge-help" style="margin-bottom:var(--space-3)">
     <summary class="label" style="cursor:pointer">what the badges mean</summary>
-    <dl style="margin-top:var(--space-3);font-size:var(--text-sm);color:var(--text-dim);display:grid;gap:var(--space-2)">
+    <dl style="margin-top:var(--space-3);font-size:var(--t-2);color:var(--text-3);display:grid;gap:var(--space-2)">
       {% for badge, meaning in badge_meanings %}
         <div style="display:flex;gap:var(--space-2);align-items:baseline">
           <dt><span class="tag tag-default">{{ badge }}</span></dt>
@@ -194,7 +194,7 @@
   <div>
     <details id="triage-help">
       <summary class="label" style="cursor:pointer">keys <kbd>?</kbd></summary>
-      <div style="display:flex;gap:var(--space-4);flex-wrap:wrap;margin-top:var(--space-3);font-size:var(--text-sm);color:var(--text-dim)">
+      <div style="display:flex;gap:var(--space-4);flex-wrap:wrap;margin-top:var(--space-3);font-size:var(--t-2);color:var(--text-3)">
         {% for key, label in keybinds %}
           <span><kbd>{{ key }}</kbd> {{ label }}</span>
         {% endfor %}
@@ -210,7 +210,7 @@
   {% if c.description %}
     <p style="color:var(--text);margin-bottom:var(--space-4)">{{ c.description }}</p>
   {% else %}
-    <p style="color:var(--text-faint);margin-bottom:var(--space-4)">no description on this row.</p>
+    <p style="color:var(--text-4);margin-bottom:var(--space-4)">no description on this row.</p>
   {% endif %}
   <table class="info-table">
     <tr><td>list</td><td>{{ c.uad_list or "-" }}</td></tr>
@@ -231,7 +231,7 @@
 <article class="card">
   <div class="label" style="margin-bottom:var(--space-3)">minimum rating</div>
   {% if c.floor %}
-    <p style="font-size:var(--text-sm);color:var(--text-dim);margin-bottom:var(--space-3)">
+    <p style="font-size:var(--t-2);color:var(--text-3);margin-bottom:var(--space-3)">
       floor <strong style="color:var(--text)">{{ c.floor }}</strong>, set by <code>{{ c.floor_rule }}</code>. can be raised, never lowered.
     </p>
     <div class="table-wrap">

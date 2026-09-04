@@ -1,44 +1,18 @@
 /* ============================================================
-   uadclaw — the few rules cloudy-ui does not ship
+   uadclaw — the few rules the design language does not ship
 
-   `ui.css` is a VERBATIM extraction of the cloudy-ui design language and is meant to stay
-   re-extractable when that language updates. So anything this app needs and cloudy-ui does
-   not define lives here instead, loaded after it, and stays small enough to re-read.
+   tokens.css, components.css and cursor.css are byte-identical copies of the design
+   language and stay re-extractable when it updates. Anything this app needs and the
+   language does not define lives here instead, loaded after the three, and stays small
+   enough to re-read.
    ============================================================ */
 
-/* `.table-wrap` exists to clip a border radius and does it with `overflow: hidden`, while
-   `thead th` is `white-space: nowrap` — so at a phone width the table runs past its wrapper
-   and the overflow is UNREACHABLE: no scrollbar, no drag. Measured at 380px: the floor-reasons
-   table is 398px inside a 370px screen, and the column that falls off the end is `why`, the
-   stated justification for the minimum rating. `overflow-x: auto` pairs with a hidden y and
-   keeps the radius clipped on the axis that needed it. Pre-existing and shell-wide; `app.css`
-   is the only file that can fix it, since `ui.css` stays a verbatim extraction. */
-.table-wrap {
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-
-/* cloudy-ui ships no bare `a` rule, because it expects links to be components. A dashboard
-   renders links it did not author: corroboration sources, vendor index urls, upstream
-   entries. Left alone those render at the user agent's default dark blue on a dark surface,
-   which is the one contrast failure nothing else here can produce. Every named component
-   (.navbar-link, .btn, .nav-item) sets its own colour and wins on specificity, so this
-   reaches exactly the unclassed links. */
-a {
-  color: var(--accent);
-  text-decoration: none;
-}
-
-a:hover {
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-a:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: var(--radius);
-}
+/* The shipped column token is 1200px and the shipped navbar inner column derives from
+   --space-8 padding. This app's column is 1400px with --space-12 inline padding (see
+   .page-main below), so the token and the inner column retune to it: the retune hook is
+   what --page-w is for, and the inner column lands on .page-main's content edge. */
+:root { --page-w: 1400px; }
+.navbar-inner { max-width: calc(var(--page-w) - 2 * var(--space-12)); }
 
 /* htmx's own convention, which needs two rules to exist or every in-flight request is
    silent. A vendor index fetch takes seconds and reaches the network, so "nothing appears to
@@ -46,7 +20,7 @@ a:focus-visible {
    element (or on `hx-indicator`'s target) for exactly the duration of the request. */
 .htmx-indicator {
   opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease);
+  transition: opacity var(--dur-tint) var(--ease);
 }
 
 .htmx-request .htmx-indicator,
@@ -136,14 +110,6 @@ a:focus-visible {
   }
 }
 
-/* `.info-table`'s label column is a fixed 140px and its value column carries machine strings
-   with no space to break at (`description=llm:deepseek-reasoner`), so the table's min-content
-   width pushed the whole PAGE into a horizontal scroll. Measured at a 380px viewport before
-   this rule: 401px of scroll width, on a screen 370px wide. */
-.info-table td {
-  overflow-wrap: anywhere;
-}
-
 /* The page box, lifted out of `base.html`'s `style=` attribute: an inline style outranks every
    media query, so the padding could not shrink while it lived there. */
 .page-main {
@@ -161,34 +127,6 @@ a:focus-visible {
   /* 48px of page padding each side is a quarter of a 380px screen. */
   .page-main {
     padding: var(--space-6) var(--space-4);
-  }
-}
-
-/* cloudy-ui hides `.navbar-nav` below 768px and hands the links to a hamburger drawer. This
-   app ships no drawer, so the rule alone leaves every screen unreachable from every other
-   one at exactly the width this project was asked to support. Four links wrap in one row
-   instead. */
-@media (max-width: 768px) {
-  .navbar {
-    height: auto;
-    flex-wrap: wrap;
-    padding: var(--space-2) var(--space-4);
-    align-items: center;
-  }
-
-  .navbar-nav {
-    display: flex;
-    flex-wrap: wrap;
-    flex-basis: 100%;
-    order: 3;
-  }
-
-  .navbar-link {
-    padding: var(--space-2) var(--space-3);
-  }
-
-  .navbar-brand {
-    border-right: none;
   }
 }
 
@@ -211,9 +149,9 @@ a:focus-visible {
 .pkg-icon,
 .pkg-icon-sm {
   object-fit: contain;
-  background: var(--bg-sunken);
+  background: var(--well);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--r-1);
   flex-shrink: 0;
 }
 
@@ -223,8 +161,8 @@ a:focus-visible {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  border-radius: var(--radius);
-  font: 550 var(--text-md) / 1 var(--font-sans);
+  border-radius: var(--r-1);
+  font: 500 var(--t-4) / 1 var(--font-sans);
   letter-spacing: 0.02em;
   user-select: none;
   /* The tag formula the design language already ships, which is what makes one tint legible
@@ -237,13 +175,13 @@ a:focus-visible {
 
 /* Light theme takes the letters off the tint and puts them on the text colour, keeping the
    hue in the fill. MEASURED, because the reasoning that put them on the tint was wrong: the
-   14%/28% mix is cloudy-ui's own tag formula and the `--cat-*` tokens do swap to saturated
+   14%/28% mix is the design language's own tag formula and the `--cat-*` tokens do swap to saturated
    values on light, but the language never uses that ramp as TEXT at this size, and where its
-   own tags failed on light it patched the foreground by hand (`ui.css`, `[data-theme="light"]
-   .tag-warning`). Composited over the real surfaces the tinted letters ran 1.95:1 (`--cat-pink`
-   on `--bg-sunken`) to 4.39:1, so the whole ramp missed the 4.5:1 floor rather than the low
-   end of it. Ink on `--text` with the fill at 22% puts the worst case at 9.90:1 and keeps the
-   hue through the swap. Every number here is recomputed by
+   own tags failed on light it patched the foreground by hand. Composited over the real
+   surfaces the tinted letters on light run 1.90:1 (`--cat-pink` on `--well`) to 4.36:1
+   (`--cat-mauve` on `--surface-1`), so the whole light ramp missed the 4.5:1 floor rather
+   than the low end of it. Ink on `--text` with the fill at 22% puts the worst case at 8.11:1
+   and keeps the hue through the swap. Every number here is recomputed by
    `test_every_monogram_tint_clears_the_contrast_floor`, which reads the tokens and the fill
    out of the two stylesheets — trust it over this comment. */
 :root[data-theme="light"] .monogram,
@@ -265,7 +203,7 @@ a:focus-visible {
 }
 
 .monogram-sm {
-  font-size: var(--text-xs);
+  font-size: var(--t-2);
 }
 
 /* One class per colour `monogram.monogram_for` can return, off the categorical ramp. Status

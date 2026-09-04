@@ -3,9 +3,9 @@
 {% block content %}
 <section>
   <header style="margin-bottom:var(--space-8);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
-    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">pipeline</div>
-    <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em;margin-bottom:var(--space-3)">jobs</h2>
-    <p style="font-size:var(--text-base);color:var(--text-dim);max-width:540px">
+    <div class="label" style="color:var(--accent-text);margin-bottom:var(--space-2)">pipeline</div>
+    <h2 style="margin-bottom:var(--space-3)">jobs</h2>
+    <p style="font-size:var(--t-3);color:var(--text-3);max-width:540px">
       every run, and the controls that start one.
     </p>
   </header>
@@ -23,30 +23,30 @@
   <div class="card" style="margin-bottom:var(--space-8)">
     <div class="card-header">
       <div>
-        <div class="card-title" style="font-size:var(--text-lg)">scratch lease</div>
+        <div class="card-title" >scratch lease</div>
         <div class="card-subtitle">one job unpacks at a time. a wedged pipeline shows up here first.</div>
       </div>
       {% if db_error %}
         <span class="tag tag-danger">unknown</span>
       {% elif lease %}
-        <span class="tag tag-accent"><span class="tag-dot" style="background:var(--accent)"></span>held</span>
+        <span class="tag tag-accent"><span class="tag-dot"></span>held</span>
       {% else %}
-        <span class="tag tag-default"><span class="tag-dot" style="background:var(--text-faint)"></span>free</span>
+        <span class="tag tag-default"><span class="tag-dot"></span>free</span>
       {% endif %}
     </div>
     {% if db_error %}
-      <div style="font-size:var(--text-sm);color:var(--text-dim)">
+      <div style="font-size:var(--t-2);color:var(--text-3)">
         the lease row could not be read, so who holds scratch is unknown right now.
       </div>
     {% elif lease %}
       <table class="info-table">
-        <tr><td>holder</td><td><a href="/jobs/{{ lease.job_id }}/detail" style="color:var(--accent)">{{ lease.short_id }}</a></td></tr>
+        <tr><td>holder</td><td><a href="/jobs/{{ lease.job_id }}/detail" style="color:var(--accent-text)">{{ lease.short_id }}</a></td></tr>
         <tr><td>worker</td><td>{{ lease.worker_id }}</td></tr>
         <tr><td>since</td><td>{{ lease.acquired_at }} utc</td></tr>
         <tr><td>heartbeat</td><td>{{ lease.heartbeat_at }} utc</td></tr>
       </table>
     {% else %}
-      <div style="font-size:var(--text-sm);color:var(--text-dim)">
+      <div style="font-size:var(--t-2);color:var(--text-3)">
         nobody holds it. the next firmware job takes it on claim.
       </div>
     {% endif %}
@@ -58,7 +58,7 @@
   <div class="card" style="margin-bottom:var(--space-8)">
     <div class="card-header">
       <div>
-        <div class="card-title" style="font-size:var(--text-lg)">firmware sources</div>
+        <div class="card-title" >firmware sources</div>
         <div class="card-subtitle">what enabling each driver commits you to, as the driver itself declares it.</div>
       </div>
     </div>
@@ -70,10 +70,10 @@
          detail, so it is named in the trigger and the panel opens on its own rather than
          waiting for a click nobody knows to make. #}
       <details{% if terms_need_attention %} open{% endif %}>
-        <summary style="cursor:pointer;color:var(--accent);font-size:var(--text-sm)">
+        <summary style="cursor:pointer;color:var(--accent-text);font-size:var(--t-2)">
           show terms for {{ drivers | length }} driver{{ "" if drivers | length == 1 else "s" }}{% if unacknowledged_driver_count %} · {{ unacknowledged_driver_count }} not acknowledged{% endif %}
         </summary>
-        <div class="table-wrap" style="overflow-x:auto;margin-top:var(--space-3)">
+        <div class="table-wrap" style="margin-top:var(--space-3)">
           <table>
             <thead><tr><th>driver</th><th>terms</th><th>posture</th></tr></thead>
             <tbody>
@@ -86,11 +86,11 @@
                       <span class="tag tag-warning">not acknowledged</span>
                     {% endif %}
                   </td>
-                  <td style="color:var(--text-dim);font-size:var(--text-xs)">
+                  <td style="color:var(--text-3);font-size:var(--t-2)">
                     {{ driver.summary }}
                     <div style="margin-top:var(--space-1)">
                       <a href="{{ driver.source_url }}" rel="noreferrer noopener"
-                         style="color:var(--accent)">{{ driver.source_url }}</a>
+                         style="color:var(--accent-text)">{{ driver.source_url }}</a>
                     </div>
                   </td>
                 </tr>
@@ -118,7 +118,7 @@
     <div class="card">
       <div class="card-header">
         <div>
-          <div class="card-title" style="font-size:var(--text-lg)">firmware analysis</div>
+          <div class="card-title" >firmware analysis</div>
           <div class="card-subtitle">download one build, unpack it, extract facts, run the deterministic core.</div>
         </div>
       </div>
@@ -144,7 +144,7 @@
                 hx-swap="innerHTML"
                 hx-disabled-elt="this">load devices</button>
       </form>
-      <p style="font-size:var(--text-sm);color:var(--text-faint);margin-bottom:var(--space-4)">
+      <p style="font-size:var(--t-2);color:var(--text-4);margin-bottom:var(--space-4)">
         listing devices is a live request to the vendor and takes a few seconds. it runs only when you press it.
       </p>
 
@@ -156,7 +156,7 @@
     <div class="card">
       <div class="card-header">
         <div>
-          <div class="card-title" style="font-size:var(--text-lg)">classification</div>
+          <div class="card-title" >classification</div>
           <div class="card-subtitle">describe and rate the queued packages, then corroborate each description.</div>
         </div>
       </div>

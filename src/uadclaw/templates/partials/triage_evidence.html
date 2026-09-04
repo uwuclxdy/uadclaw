@@ -24,12 +24,12 @@
   </div>
   {% if c.corroboration %}
     {% if c.corroboration_reasoning or c.corroboration_failure %}
-      <p style="font-size:var(--text-sm);color:var(--text-dim);margin-bottom:var(--space-3)">
+      <p style="font-size:var(--t-2);color:var(--text-3);margin-bottom:var(--space-3)">
         {{ c.corroboration_reasoning }}{% if c.corroboration_failure %} ({{ c.corroboration_failure }}){% endif %}
       </p>
     {% endif %}
   {% else %}
-    <p style="font-size:var(--text-sm);color:var(--text-dim);margin-bottom:var(--space-3)">
+    <p style="font-size:var(--t-2);color:var(--text-3);margin-bottom:var(--space-3)">
       not searched yet.
     </p>
   {% endif %}
@@ -45,7 +45,7 @@
           {% else %}
             {{ title or url }} <span class="tag tag-warning">not a web link</span>
           {% endif %}
-          <div style="font-size:var(--text-xs);color:var(--text-faint);word-break:break-all">{{ url }}</div>
+          <div style="font-size:var(--t-2);color:var(--text-4);word-break:break-all">{{ url }}</div>
         </li>
       {% endfor %}
     </ul>
@@ -62,7 +62,7 @@
       {% endfor %}
     </table>
   {% else %}
-    <p style="font-size:var(--text-sm);color:var(--text-faint)">no merged facts row.</p>
+    <p style="font-size:var(--t-2);color:var(--text-4)">no merged facts row.</p>
   {% endif %}
   {% if c.conflicts %}
     <div class="callout callout-info" style="margin-top:var(--space-4)">
@@ -101,7 +101,7 @@
           </table>
         </div>
       {% else %}
-        <p style="font-size:var(--text-sm);color:var(--text-faint)">
+        <p style="font-size:var(--t-2);color:var(--text-4)">
           nothing upstream shares this namespace.
         </p>
       {% endif %}

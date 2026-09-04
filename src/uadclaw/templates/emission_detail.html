@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}emission {{ emission_id }} · uadclaw{% endblock %}
 {% block content %}
-<section hx-boost="true">
+<section hx-boost="true" hx-target="#main" hx-select="#main">
   <nav class="breadcrumb" style="margin-bottom:var(--space-4)">
     <a class="breadcrumb-item" href="/emission">emission</a>
     <span class="breadcrumb-sep">/</span>
@@ -9,8 +9,8 @@
   </nav>
 
   <header style="margin-bottom:var(--space-6);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
-    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">emission</div>
-    <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em">#{{ emission_id }}</h2>
+    <div class="label" style="color:var(--accent-text);margin-bottom:var(--space-2)">emission</div>
+    <h2>#{{ emission_id }}</h2>
   </header>
 
   {% if error is defined and error %}
@@ -49,7 +49,7 @@
     <div class="card" style="margin-bottom:var(--space-5)">
       <div class="card-header">
         <div>
-          <div class="card-title" style="font-size:var(--text-lg)">pr body</div>
+          <div class="card-title" >pr body</div>
           <div class="card-subtitle">copy this into the github pr. select all inside the box to copy it whole.</div>
         </div>
       </div>
@@ -57,13 +57,13 @@
          the whole body is one value so a human pastes it into the PR unchanged. `{{ pr_body }}`
          is autoescaped, which is safe here — the textarea shows the raw body, never markup. #}
       <textarea class="input" readonly rows="24" spellcheck="false"
-                style="font-family:var(--font-mono);font-size:var(--text-sm);width:100%;white-space:pre;overflow-x:auto">{{ detail.pr_body }}</textarea>
+                style="font-family:var(--font-mono);font-size:var(--t-2);width:100%;white-space:pre;overflow-x:auto">{{ detail.pr_body }}</textarea>
     </div>
 
     <div class="card">
       <div class="card-header">
         <div>
-          <div class="card-title" style="font-size:var(--text-lg)">batch</div>
+          <div class="card-title" >batch</div>
           <div class="card-subtitle">every package written to the branch, in the order it was written.</div>
         </div>
       </div>
@@ -86,7 +86,7 @@
           </table>
         </div>
       {% else %}
-        <div style="color:var(--text-dim);font-size:var(--text-sm)">no package rows recorded for this emission.</div>
+        <div style="color:var(--text-3);font-size:var(--t-2)">no package rows recorded for this emission.</div>
       {% endif %}
     </div>
   {% endif %}

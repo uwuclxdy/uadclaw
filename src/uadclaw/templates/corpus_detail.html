@@ -2,9 +2,9 @@
 {% from "partials/pkg_icon.html" import pkg_icon %}
 {% block title %}{{ package }} · corpus · uadclaw{% endblock %}
 {% block content %}
-<section hx-boost="true">
+<section hx-boost="true" hx-target="#main" hx-select="#main">
   <header style="margin-bottom:var(--space-6);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
-    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">
+    <div class="label" style="color:var(--accent-text);margin-bottom:var(--space-2)">
       <a href="/corpus" style="color:inherit;text-decoration:none">corpus</a>
     </div>
     <div style="display:flex;align-items:center;gap:var(--space-3)">
@@ -14,7 +14,7 @@
       {% if has_icon is defined %}
         {{ pkg_icon(package, has_icon, small=false) }}
       {% endif %}
-      <h2 class="num" style="font:550 var(--text-xl)/1.3 var(--font-mono);color:var(--text);word-break:break-all">{{ package }}</h2>
+      <h2 class="num" style="font-family:var(--font-mono);word-break:break-all">{{ package }}</h2>
     </div>
   </header>
 
@@ -74,22 +74,22 @@
         {% if standing.shipped_branch and standing.decision and standing.decision.action == "approve" %}
           <div>
             <span class="tag tag-success">shipped → {{ standing.shipped_branch }}</span>
-            <span style="color:var(--text-dim);font-size:var(--text-sm)">this approval went out on that branch.</span>
+            <span style="color:var(--text-3);font-size:var(--t-2)">this approval went out on that branch.</span>
           </div>
         {% elif standing.decision and standing.decision.action == "approve" %}
           <div>
             <span class="tag tag-success">approved</span>
-            <span style="color:var(--text-dim);font-size:var(--text-sm)">approved, awaiting the next emission.</span>
+            <span style="color:var(--text-3);font-size:var(--t-2)">approved, awaiting the next emission.</span>
           </div>
         {% elif standing.decision and standing.decision.action == "reject" %}
           <div>
             <span class="tag tag-danger">rejected</span>
-            <span style="color:var(--text-dim);font-size:var(--text-sm)">{{ standing.decision.reason }}</span>
+            <span style="color:var(--text-3);font-size:var(--t-2)">{{ standing.decision.reason }}</span>
           </div>
         {% elif standing.decision and standing.decision.action == "defer" %}
           <div>
             <span class="tag tag-default">skipped</span>
-            <span style="color:var(--text-dim);font-size:var(--text-sm)">deferred, not decided.</span>
+            <span style="color:var(--text-3);font-size:var(--t-2)">deferred, not decided.</span>
           </div>
         {% endif %}
       </div>
@@ -130,7 +130,7 @@
         {% if analysis.floor %}
           <div style="margin-bottom:var(--space-4)">
             <span class="tag {{ FLOOR_TAG_CLASS.get(analysis.floor, "tag-default") }}">{{ analysis.floor }}</span>
-            <span style="color:var(--text-dim);font-size:var(--text-sm)">set by {{ analysis.floor_rule }}</span>
+            <span style="color:var(--text-3);font-size:var(--t-2)">set by {{ analysis.floor_rule }}</span>
           </div>
           <div class="label" style="margin-bottom:var(--space-2)">every rule that fired, strictest first</div>
           <table class="info-table">
@@ -161,7 +161,7 @@
           </div>
         {% else %}
           <span class="tag {{ FILTER_VERDICT_TAG_CLASS.get(analysis.filter_verdict, "tag-default") }}">{{ FILTER_VERDICT_LABEL.get(analysis.filter_verdict, analysis.filter_verdict) }}</span>
-          <p style="color:var(--text-dim);font-size:var(--text-sm);margin-top:var(--space-2)">{{ FILTER_VERDICT_EXPLANATION.get(analysis.filter_verdict, "") }}</p>
+          <p style="color:var(--text-3);font-size:var(--t-2);margin-top:var(--space-2)">{{ FILTER_VERDICT_EXPLANATION.get(analysis.filter_verdict, "") }}</p>
         {% endif %}
       </div>
 
@@ -177,7 +177,7 @@
           {# Zero library edges is a measured property of this corpus, not a broken lookup —
              see corpus.py's module docstring. A plain muted line, never a warning/danger
              callout, so an empty result here does not read as a failure. #}
-          <div style="color:var(--text-dim);font-size:var(--text-sm)">no edges recorded for this package.</div>
+          <div style="color:var(--text-3);font-size:var(--t-2)">no edges recorded for this package.</div>
         {% endif %}
         {% if dependency_links %}
           <div class="label" style="margin-top:var(--space-4);margin-bottom:var(--space-2)">dependencies</div>

@@ -10,7 +10,7 @@
   <div class="card" style="margin-bottom:var(--space-4)">
     <div class="card-header">
       <div>
-        <div class="card-title" style="font-size:var(--text-lg)">{{ job.kind }}</div>
+        <div class="card-title" >{{ job.kind }}</div>
         <div class="card-subtitle">{{ job.id }}</div>
       </div>
       <span class="tag {{ job.state_tag }}">{{ job.state }}</span>
@@ -41,7 +41,7 @@
   <div class="card" style="margin-bottom:var(--space-4)">
     <div class="card-header">
       <div>
-        <div class="card-title" style="font-size:var(--text-lg)">stages</div>
+        <div class="card-title" >stages</div>
         {# The KIND's walk, never the design's whole vocabulary: a firmware job ends at
            rule_ladder and rendering the four stages it does not run would report every
            finished one as 6 of 10. #}
@@ -61,16 +61,16 @@
             <tr>
               <td><span class="table-name">{{ step.stage }}</span></td>
               <td><span class="tag {{ step.tag }}">{{ step.status }}</span></td>
-              <td style="color:var(--text-dim);font-size:var(--text-xs)">{{ step.started_at }}</td>
+              <td style="color:var(--text-3);font-size:var(--t-2)">{{ step.started_at }}</td>
               <td class="num-col">{{ step.seconds }}</td>
-              <td style="color:var(--text-dim);font-size:var(--text-xs)">{{ step.outcome }}</td>
+              <td style="color:var(--text-3);font-size:var(--t-2)">{{ step.outcome }}</td>
             </tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
     {% if run_count < walk | length %}
-      <div style="font-size:var(--text-sm);color:var(--text-faint);margin-top:var(--space-3)">
+      <div style="font-size:var(--t-2);color:var(--text-4);margin-top:var(--space-3)">
         {{ run_count }} of {{ walk | length }} stages have a recorded run.
         {% if job.live %}the rest have not started.{% else %}the rest never ran.{% endif %}
       </div>
@@ -80,14 +80,14 @@
   <div class="card">
     <div class="card-header">
       <div>
-        <div class="card-title" style="font-size:var(--text-lg)">log tail</div>
+        <div class="card-title" >log tail</div>
         <div class="card-subtitle">the most recent lines the worker wrote onto this run.</div>
       </div>
     </div>
     {% if job.log_tail %}
       <pre style="white-space:pre-wrap;overflow-x:auto"><code style="display:block;padding:var(--space-3);line-height:1.5">{{ job.log_tail }}</code></pre>
     {% else %}
-      <div style="font-size:var(--text-sm);color:var(--text-dim)">
+      <div style="font-size:var(--t-2);color:var(--text-3)">
         no lines yet. the worker writes one as each stage completes.
       </div>
     {% endif %}

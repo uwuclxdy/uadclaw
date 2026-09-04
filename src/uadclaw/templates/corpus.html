@@ -4,9 +4,9 @@
 {% block content %}
 <section>
   <header style="margin-bottom:var(--space-8);padding-bottom:var(--space-5);border-bottom:1px solid var(--line)">
-    <div class="label" style="color:var(--accent);margin-bottom:var(--space-2)">uadclaw</div>
-    <h2 style="font:550 var(--text-2xl)/1.15 var(--font-sans);color:var(--text);letter-spacing:-0.02em">corpus</h2>
-    <p style="font-size:var(--text-base);color:var(--text-dim);max-width:540px;margin-top:var(--space-2)">
+    <div class="label" style="color:var(--accent-text);margin-bottom:var(--space-2)">uadclaw</div>
+    <h2>corpus</h2>
+    <p style="font-size:var(--t-3);color:var(--text-3);max-width:540px;margin-top:var(--space-2)">
       every package the deterministic core has seen, with its floor, its verdict and whether it disagrees across devices.
     </p>
   </header>
@@ -23,7 +23,7 @@
         <div class="callout-body">{{ filter_warning }}</div>
       </div>
     {% endif %}
-    <div hx-boost="true">
+    <div hx-boost="true" hx-target="#main" hx-select="#main">
       <form method="get" action="/corpus" style="display:flex;flex-wrap:wrap;gap:var(--space-3);align-items:flex-end;margin-bottom:var(--space-6)">
         <input type="hidden" name="sort" value="{{ sort }}">
         <input type="hidden" name="dir" value="{{ dir }}">
@@ -52,7 +52,7 @@
         </div>
         <button class="btn btn-primary" type="submit">filter</button>
         {% if filters_active %}
-          <a class="btn btn-ghost" href="/corpus">clear</a>
+          <a class="btn btn-secondary" href="/corpus">clear</a>
         {% endif %}
       </form>
 
@@ -60,7 +60,7 @@
          would add up to 100 tab stops to a 50-row table meant to be scanned, and `<summary>`
          is natively focusable, so this is reachable without a pointer (SPEC §5). #}
       <details style="margin-bottom:var(--space-5)">
-        <summary style="cursor:pointer;color:var(--accent);font-size:var(--text-sm)">what the badges mean</summary>
+        <summary style="cursor:pointer;color:var(--accent-text);font-size:var(--t-2)">what the badges mean</summary>
         <table class="info-table" style="margin-top:var(--space-2)">
           {% for v in verdicts %}
             <tr>
