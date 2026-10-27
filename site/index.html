@@ -269,34 +269,34 @@
       <div class="section-head section-narrow" style="text-align:center">
         <p class="label">Why</p>
         <h2 class="section-title">Trust is the feature</h2>
-        <p class="section-lede">A wrong removal rating reaches real phones through three downstream tools, so every answer earns its way upstream.</p>
+        <p class="section-lede">A wrong removal rating reaches real phones through Canta, AppManager and android-debloat-list, so every answer has to earn its way upstream.</p>
       </div>
 
       <div class="feature-grid" style="margin-top:var(--space-12)">
         <div class="feature">
           <span class="icon-tile"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg></span>
           <h3 class="feature-title">Deterministic first, model last</h3>
-          <p class="feature-copy">The deterministic half reads firmware bytes and manifests, and the LLM writes one field. Every value carries its provenance.</p>
+          <p class="feature-copy">Facts come from the firmware bytes; the model writes only the description. Every value carries its provenance: rule, graph, llm, human.</p>
         </div>
         <div class="feature">
           <span class="icon-tile"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg></span>
           <h3 class="feature-title">A floor the model cannot lower</h3>
-          <p class="feature-copy">The rule ladder pins a danger tier from manifest and /etc signals. A below-floor answer is rejected, never clamped.</p>
+          <p class="feature-copy">coreApp, priv-app, sharedUserId and friends pin a danger tier. A below-floor answer is rejected, never clamped.</p>
         </div>
         <div class="feature">
           <span class="icon-tile"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg></span>
           <h3 class="feature-title">Every answer faces an external check</h3>
-          <p class="feature-copy">A Brave search and a judge pass look for independent support. A fabricated citation refuses the whole response.</p>
+          <p class="feature-copy">A Brave search and a judge pass look for independent support. A citation the judge was never handed refuses the whole response.</p>
         </div>
         <div class="feature">
           <span class="icon-tile"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg></span>
           <h3 class="feature-title">Evidence you can re-ask</h3>
-          <p class="feature-copy">The evidence bundle is content-addressed and pinned, because the LLM has no seed. The same hash means the same question.</p>
+          <p class="feature-copy">The LLM has no seed, so the bundle is the anchor: content-addressed, pinned, and the same hash means the same question.</p>
         </div>
         <div class="feature">
           <span class="icon-tile"><svg class="icon" aria-hidden="true"><use href="#i-user"/></svg></span>
           <h3 class="feature-title">A human approves every package</h3>
-          <p class="feature-copy">Keyboard triage ranked by device count. Nothing reaches a pull request without a decision, and decisions land in an append-only log.</p>
+          <p class="feature-copy">Every card shows the evidence, the proposal and the sources. You decide with the keyboard. The decision lands in an append-only log.</p>
         </div>
         <div class="feature">
           <span class="icon-tile"><svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></span>
@@ -312,7 +312,7 @@
       <div class="section-head">
         <p class="label">Pipeline</p>
         <h2 class="section-title">The full walk, firmware to branch</h2>
-        <p class="section-lede">Every stage writes its own record, and the paid stages never run on their own.</p>
+        <p class="section-lede">Every stage writes its own record. The paid ones wait for you to queue them.</p>
       </div>
       <div class="table-wrap" style="margin-top:var(--space-8)">
         <table>
@@ -339,7 +339,7 @@
   <section class="band band-well" data-reveal>
     <div class="page">
       <div class="section-head section-narrow" style="text-align:center">
-        <p class="label">Three halves</p>
+        <p class="label">The split</p>
         <h2 class="section-title">Who does what</h2>
       </div>
       <div class="feature-grid" style="margin-top:var(--space-8)">
@@ -356,7 +356,7 @@
         <div class="feature">
           <span class="icon-tile"><svg class="icon" aria-hidden="true"><use href="#i-user"/></svg></span>
           <h3 class="feature-title">Two stages are yours</h3>
-          <p class="feature-copy">Triage decides every package, and the branch emission stops short of the push. A human opens the pull request.</p>
+          <p class="feature-copy">Triage decides every package. The branch emission stops short of the push; a human opens the pull request.</p>
         </div>
       </div>
     </div>
@@ -547,5 +547,34 @@ docker compose up -d</code></pre>
 
 <script type="module" src="cursor.js"></script>
 <script type="module" src="ui.js"></script>
+<script type="module">
+  // scroll-spy: the ink reaches its section through initNavbar's own click path.
+  // the capture listener cancels the anchor jump a synthetic click would cause,
+  // so the section moves only when the reader scrolls.
+  const nav = document.querySelector('.navbar-nav');
+  const links = [...nav.querySelectorAll('.navbar-link')];
+  const targets = links.map(link => document.querySelector(link.getAttribute('href')));
+  const line = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--pin-top'), 10) + 40;
+  // offsetTop, never a rect: a section still carrying its reveal transform reads
+  // 16px low through getBoundingClientRect, and a jump that crosses it in one
+  // scroll event misses the crossing with no later event to correct it
+  const docTop = el => {
+    let y = 0;
+    for (let n = el; n; n = n.offsetParent) y += n.offsetTop;
+    return y;
+  };
+  let current = 0;
+  nav.addEventListener('click', e => { if (e.detail === 'uadclaw-spy') e.preventDefault(); }, true);
+  const spy = () => {
+    let idx = 0;
+    targets.forEach((t, i) => { if (t && docTop(t) - scrollY <= line) idx = i; });
+    if (idx !== current) {
+      current = idx;
+      links[idx].dispatchEvent(new CustomEvent('click', { bubbles: true, cancelable: true, detail: 'uadclaw-spy' }));
+    }
+  };
+  addEventListener('scroll', spy, { passive: true });
+  spy();
+</script>
 </body>
 </html>
