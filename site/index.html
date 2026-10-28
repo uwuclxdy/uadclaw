@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%2368BBEF'/%3E%3C/svg%3E">
+<link rel="icon" type="image/png" sizes="32x32" href="media/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="media/apple-touch-icon.png">
 <title>uadclaw: from OEM firmware to a reviewed debloat list</title>
 <meta name="description" content="uadclaw extracts every preinstalled app from official Android firmware, classifies the debloat-worthy ones, and lands them as a human-reviewed pull request.">
 <script>
@@ -17,6 +18,10 @@
 <style>
   main > .page > section { margin-block: var(--space-16); }
   .install-stack { display: flex; flex-direction: column; gap: var(--space-4); }
+  .sona > .sona-light { display: none; }
+  .sona:has(img) { background-image: none; }
+  [data-theme="light"] .sona > .sona-dark { display: none; }
+  [data-theme="light"] .sona > .sona-light { display: block; }
 </style>
 </head>
 <body>
@@ -209,7 +214,7 @@
 <nav class="navbar is-top">
   <div class="navbar-inner">
     <div class="navbar-brand">
-      <span class="sona" aria-hidden="true"></span>
+      <span class="sona" aria-hidden="true"><img class="sona-dark" src="media/logo-tile-dark.png" alt=""><img class="sona-light" src="media/logo-tile-light.png" alt=""></span>
       <span class="logo-name">uadclaw</span>
     </div>
     <div class="navbar-nav">
@@ -511,7 +516,7 @@ docker compose up -d</code></pre>
     <div class="footer">
       <div class="footer-brand">
         <a class="footer-logo" href="#main">
-          <span class="sona" aria-hidden="true"></span>
+          <span class="sona" aria-hidden="true"><img class="sona-dark" src="media/logo-tile-dark.png" alt=""><img class="sona-light" src="media/logo-tile-light.png" alt=""></span>
           <span class="logo-name">uadclaw</span>
         </a>
         <p>Automatic bloat classification for the Universal Android Debloater list.</p>
